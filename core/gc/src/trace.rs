@@ -32,6 +32,15 @@ impl Tracer {
     }
 
     pub(crate) fn enqueue(&mut self, node: GcErasedPointer) {
+        // Mark on enqueue. Marking on dequeue pushes a node once per incoming edge,
+        // and on wasm32 the worklist can outgrow isize::MAX.
+        // SAFETY: `node` is a live GcBox pointer supplied by a Trace impl, so its
+        // header is valid to read and mark.
+        let header = &unsafe { node.as_ref() }.header;
+        if header.is_marked() {
+            return;
+        }
+        header.mark();
         self.queue.push_back(node);
     }
 
@@ -43,10 +52,8 @@ impl Tracer {
     pub(crate) unsafe fn trace_until_empty(&mut self) {
         while let Some(node) = self.queue.pop_front() {
             let node_ref = unsafe { node.as_ref() };
-            if node_ref.is_marked() {
-                continue;
-            }
-            node_ref.header.mark();
+            // Nodes are marked when enqueued, so each dequeued node is traced
+            // exactly once.
             let trace_fn = node_ref.trace_fn();
 
             // SAFETY: The function pointer is appropriate for this node type because we extract it from it's VTable.
