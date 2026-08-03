@@ -2667,8 +2667,10 @@ impl Array {
             // e. Set k to k + 1.
         }
         // 4. Sort items using an implementation-defined sequence of calls to SortCompare. If any such call returns an abrupt completion, stop before performing any further calls to SortCompare and return that Completion Record.
+        // std's driftsort panics on an incoherent comparator (NaN returns,
+        // mutation), which the spec allows; under panic=unwind that poisons the VM.
         let mut sort_err = Ok(());
-        items.sort_by(|x, y| {
+        Self::ks_tolerant_sort_by(&mut items, |x, y| {
             if sort_err.is_ok() {
                 sort_compare(x, y, context).unwrap_or_else(|err| {
                     sort_err = Err(err);
@@ -2682,6 +2684,67 @@ impl Array {
 
         // 5. Return items.
         Ok(items)
+    }
+
+    /// Stable bottom-up merge sort that never verifies comparator coherence,
+    /// so any comparefn yields some permutation (the spec's implementation-defined order).
+    fn ks_tolerant_sort_by<F>(items: &mut [JsValue], mut cmp: F)
+    where
+        F: FnMut(&JsValue, &JsValue) -> Ordering,
+    {
+        fn merge_pass<F>(src: &[JsValue], dst: &mut [JsValue], width: usize, cmp: &mut F)
+        where
+            F: FnMut(&JsValue, &JsValue) -> Ordering,
+        {
+            let len = src.len();
+            let mut i = 0;
+            while i < len {
+                let mid = (i + width).min(len);
+                let end = (i + 2 * width).min(len);
+                let (mut a, mut b, mut k) = (i, mid, i);
+                while a < mid && b < end {
+                    if cmp(&src[a], &src[b]) == Ordering::Greater {
+                        dst[k] = src[b].clone();
+                        b += 1;
+                    } else {
+                        dst[k] = src[a].clone();
+                        a += 1;
+                    }
+                    k += 1;
+                }
+                while a < mid {
+                    dst[k] = src[a].clone();
+                    a += 1;
+                    k += 1;
+                }
+                while b < end {
+                    dst[k] = src[b].clone();
+                    b += 1;
+                    k += 1;
+                }
+                i = end;
+            }
+        }
+
+        let len = items.len();
+        if len < 2 {
+            return;
+        }
+        let mut buf: Vec<JsValue> = items.to_vec();
+        let mut width = 1usize;
+        let mut in_items = true;
+        while width < len {
+            if in_items {
+                merge_pass(items, &mut buf, width, &mut cmp);
+            } else {
+                merge_pass(&buf, items, width, &mut cmp);
+            }
+            in_items = !in_items;
+            width *= 2;
+        }
+        if !in_items {
+            items.clone_from_slice(&buf);
+        }
     }
 
     /// Array.prototype.sort ( comparefn )
