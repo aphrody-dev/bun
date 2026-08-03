@@ -494,6 +494,42 @@ impl Context {
         self.job_executor().enqueue_job(job, self);
     }
 
+    /// With no bytecode run live, whatever an unwind or panic left on the VM
+    /// is garbage that would trip the limits forever; reclaim it, returning the slots freed.
+    #[inline]
+    pub fn ks_clear_residual_stack(&mut self) -> usize {
+        // A panic unwind skips every `pop_frame` and every host-call decrement, so
+        // stranded frames pin their registers and the recursion count never drops.
+        if crate::vm::ks_execution_depth() != 0 {
+            return 0;
+        }
+        while self.vm.pop_frame().is_some() {}
+        self.vm.host_call_depth = 0;
+        self.vm.pending_exception = None;
+        self.vm.set_return_value(JsValue::undefined());
+        let n = self.vm.stack.len();
+        self.vm.stack.clear();
+        n
+    }
+
+    /// (call frames excluding the dummy, value-stack slots). frames == 0
+    /// with slots left is leaked residue; frames > 0 is a suspended execution.
+    #[inline]
+    pub fn ks_vm_stats(&self) -> (usize, usize) {
+        (self.vm.frames.len().saturating_sub(1), self.vm.stack.len())
+    }
+
+    /// Names of the frames currently pinning the VM, bottom-up (the
+    /// dummy frame excluded). Identifies which suspended execution never completes.
+    pub fn ks_vm_frame_names(&self) -> Vec<String> {
+        self.vm
+            .frames
+            .iter()
+            .skip(1)
+            .map(|f| f.code_block().name().to_std_string_escaped())
+            .collect()
+    }
+
     /// Runs all the jobs with the provided job executor.
     #[inline]
     pub fn run_jobs(&mut self) -> JsResult<()> {

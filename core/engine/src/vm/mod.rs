@@ -133,6 +133,18 @@ impl Stack {
         }
     }
 
+    /// Number of live value slots, for the occupancy and residual-stack
+    /// probes on Context (ks_vm_stats, ks_clear_residual_stack).
+    pub(crate) fn len(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Drop every value slot. Only sound when no frame is executing,
+    /// which ks_clear_residual_stack checks first.
+    pub(crate) fn clear(&mut self) {
+        self.stack.clear();
+    }
+
     /// Get a register value by index, relative to the given frame's `rp`.
     pub(crate) fn get_register(&self, frame: &CallFrame, index: usize) -> Option<&JsValue> {
         self.stack.get(frame.rp as usize + index)
@@ -675,6 +687,35 @@ impl Vm {
     }
 }
 
+// How many bytecode runs are live on the native stack. An embedder that
+// survives panics needs to know when what is left on the VM is garbage.
+thread_local! {
+    static KS_EXEC_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Zero means no `run`/`run_async_with_budget` is executing, so anything
+/// left on `vm.frames`/`vm.stack` was stranded by a panic unwind.
+pub(crate) fn ks_execution_depth() -> usize {
+    KS_EXEC_DEPTH.with(std::cell::Cell::get)
+}
+
+// Drop (not a plain decrement) so the count is restored while a panic unwinds
+// through the interpreter, which is the case that matters.
+struct KsExecDepthGuard;
+
+impl KsExecDepthGuard {
+    fn enter() -> Self {
+        KS_EXEC_DEPTH.with(|d| d.set(d.get() + 1));
+        Self
+    }
+}
+
+impl Drop for KsExecDepthGuard {
+    fn drop(&mut self) {
+        KS_EXEC_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 #[allow(clippy::print_stdout)]
 #[cfg(feature = "trace")]
 impl Context {
@@ -951,6 +992,7 @@ impl Context {
     /// "clock cycles" have passed.
     #[allow(clippy::future_not_send)]
     pub(crate) async fn run_async_with_budget(&mut self, budget: u32) -> CompletionRecord {
+        let _ks_depth = KsExecDepthGuard::enter();
         let mut runtime_budget: u32 = budget;
 
         while let Some(byte) = self
@@ -986,6 +1028,7 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
+        let _ks_depth = KsExecDepthGuard::enter();
         while let Some(byte) = self
             .vm
             .frame()
