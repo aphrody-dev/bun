@@ -20,7 +20,7 @@ use crate::{
     property::{PropertyDescriptor, PropertyKey},
     value::PreferredType,
 };
-use boa_gc::{self, Finalize, Gc, GcRef, GcRefCell, GcRefMut, Trace};
+use boa_gc::{self, Finalize, Gc, GcRef, GcRefCell, GcRefMut, Trace, WeakGc};
 use core::ptr::fn_addr_eq;
 use std::collections::HashSet;
 use std::{
@@ -1155,6 +1155,36 @@ impl<T: NativeObject> AsRef<GcRefCell<Object<T>>> for JsObject<T> {
     #[inline]
     fn as_ref(&self) -> &GcRefCell<Object<T>> {
         &self.inner.object
+    }
+}
+
+impl JsObject {
+    /// Creates a [`WeakJsObject`] referencing this object without keeping it
+    /// alive, for host-side identity caches that must not root.
+    #[inline]
+    #[must_use]
+    pub fn downgrade(&self) -> WeakJsObject {
+        WeakJsObject(WeakGc::new(&self.inner))
+    }
+}
+
+/// A non-rooting handle to a [`JsObject`]. `upgrade` returns `None` once the
+/// referenced object has been collected.
+#[derive(Clone)]
+pub struct WeakJsObject(WeakGc<ErasedVTableObject>);
+
+impl Debug for WeakJsObject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WeakJsObject").finish_non_exhaustive()
+    }
+}
+
+impl WeakJsObject {
+    /// Recovers the referenced object, or `None` if it was collected.
+    #[inline]
+    #[must_use]
+    pub fn upgrade(&self) -> Option<JsObject> {
+        self.0.upgrade().map(JsObject::from)
     }
 }
 
