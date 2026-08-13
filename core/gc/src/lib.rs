@@ -530,6 +530,16 @@ impl Collector {
     }
 }
 
+/// Returns the current heap occupancy as `(bytes_allocated, threshold)`: how
+/// much garbage the collector tolerates between cycles.
+#[must_use]
+pub fn heap_stats() -> (usize, usize) {
+    BOA_GC.with(|current| {
+        let gc = current.borrow();
+        (gc.runtime.bytes_allocated, gc.config.threshold)
+    })
+}
+
 /// Forcefully runs a garbage collection of all inaccessible nodes.
 pub fn force_collect() {
     BOA_GC.with(|current| {
