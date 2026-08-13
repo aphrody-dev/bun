@@ -42,7 +42,7 @@ impl<T: Trace + ?Sized> WeakGc<T> {
     }
 }
 
-impl<T: Trace> Clone for WeakGc<T> {
+impl<T: Trace + ?Sized> Clone for WeakGc<T> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
