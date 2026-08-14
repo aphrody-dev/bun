@@ -33,6 +33,17 @@ impl<Char> FixedString<Char> {
     pub(super) fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+
+    /// Gets the current length of the [`FixedString`].
+    pub(super) fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Rewinds the string to `len` characters. `Vec::truncate` never
+    /// reallocates, so pointers to the surviving prefix stay valid.
+    pub(super) fn truncate(&mut self, len: usize) {
+        self.inner.truncate(len);
+    }
 }
 
 impl<Char> FixedString<Char>

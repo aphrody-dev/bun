@@ -34,8 +34,8 @@ mod sym;
 #[cfg(test)]
 mod tests;
 
-use alloc::{borrow::Cow, format, string::String, vec::Vec};
-use raw::RawInterner;
+use alloc::{borrow::Cow, format, string::String, sync::Arc, vec::Vec};
+use raw::{RawCheckpoint, RawInterner};
 
 pub use sym::*;
 
@@ -255,6 +255,17 @@ pub struct Interner {
     utf16_interner: RawInterner<u16>,
     /// Latin1-encodability cache for dynamically-interned strings (all code units ≤ 0xFF).
     latin1_flags: Vec<bool>,
+    identity: Arc<()>,
+}
+
+/// Opaque snapshot of an [`Interner`]'s dynamic state; feed it back to
+/// [`Interner::truncate`] to release everything interned after it.
+#[derive(Debug, Clone)]
+pub struct InternerCheckpoint {
+    owner: Arc<()>,
+    utf8: RawCheckpoint,
+    utf16: RawCheckpoint,
+    latin1_len: usize,
 }
 
 impl Interner {
@@ -293,6 +304,7 @@ impl Interner {
             utf8_interner: RawInterner::with_capacity(capacity),
             utf16_interner: RawInterner::with_capacity(capacity),
             latin1_flags: Vec::with_capacity(capacity),
+            identity: Arc::new(()),
         }
     }
 
@@ -330,6 +342,45 @@ impl Interner {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         COMMON_STRINGS_UTF8.is_empty() && self.utf16_interner.is_empty()
+    }
+
+    /// Returns the number of dynamically interned strings (excluding
+    /// the static common set): the live gauge for checkpoint hygiene.
+    #[inline]
+    #[must_use]
+    pub fn dynamic_len(&self) -> usize {
+        // Both sides append in lockstep (get_or_intern asserts equal
+        // indices), so either interner's len is the dynamic count.
+        self.utf16_interner.len()
+    }
+
+    /// Captures the current state for a later [`Self::truncate`].
+    #[inline]
+    #[must_use]
+    pub fn checkpoint(&self) -> InternerCheckpoint {
+        InternerCheckpoint {
+            owner: self.identity.clone(),
+            utf8: self.utf8_interner.checkpoint(),
+            utf16: self.utf16_interner.checkpoint(),
+            latin1_len: self.latin1_flags.len(),
+        }
+    }
+
+    /// Rewinds to `checkpoint`, releasing later strings. Later-minted
+    /// [`Sym`]s dangle (resolve `None`), so callers must hold none.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `checkpoint` was created by a different interner.
+    #[track_caller]
+    pub fn truncate(&mut self, checkpoint: &InternerCheckpoint) {
+        assert!(
+            Arc::ptr_eq(&self.identity, &checkpoint.owner),
+            "checkpoint belongs to another interner"
+        );
+        self.utf8_interner.truncate(&checkpoint.utf8);
+        self.utf16_interner.truncate(&checkpoint.utf16);
+        self.latin1_flags.truncate(checkpoint.latin1_len);
     }
 
     /// Returns the symbol for the given string if any.

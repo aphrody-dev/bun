@@ -164,3 +164,103 @@ fn check_is_latin1() {
     let static_sym = interner.get_or_intern_static(STATIC_STR, STATIC_UTF16);
     assert!(interner.is_latin1(static_sym));
 }
+
+#[test]
+fn truncate_releases_and_recycles() {
+    let mut interner = Interner::default();
+    let kept = interner.get_or_intern("kept_string");
+    let cp = interner.checkpoint();
+    let dead = interner.get_or_intern("dead_string");
+    let dead2 = interner.get_or_intern("dead_string_two");
+    assert_eq!(interner.dynamic_len(), 3);
+
+    interner.truncate(&cp);
+    assert_eq!(interner.dynamic_len(), 1);
+    assert_eq!(interner.resolve_expect(kept).utf8(), Some("kept_string"));
+    assert!(interner.resolve(dead).is_none());
+    assert!(interner.resolve(dead2).is_none());
+    assert!(interner.get("dead_string").is_none());
+    assert_eq!(interner.get("kept_string"), Some(kept));
+
+    // Recycling reuses indices deterministically: the next intern gets
+    // the first freed slot, and resolution follows the new string.
+    let recycled = interner.get_or_intern("recycled_string");
+    assert_eq!(recycled, dead);
+    assert_eq!(
+        interner.resolve_expect(recycled).utf8(),
+        Some("recycled_string")
+    );
+}
+
+#[test]
+fn truncate_across_slab_roll() {
+    let mut interner = Interner::default();
+    let kept = interner.get_or_intern("small_kept");
+    let cp = interner.checkpoint();
+    // Big strings force head rolls into `full` past the checkpoint, so
+    // truncate must restore the checkpoint-era head from `full`.
+    let mut dead_syms = alloc::vec::Vec::new();
+    for i in 0..64 {
+        let big = alloc::format!("{}{}", "x".repeat(1024), i);
+        dead_syms.push(interner.get_or_intern(big.as_str()));
+    }
+    interner.truncate(&cp);
+    assert_eq!(interner.resolve_expect(kept).utf8(), Some("small_kept"));
+    for s in dead_syms {
+        assert!(interner.resolve(s).is_none());
+    }
+    // The surviving prefix must still be appendable and resolvable.
+    let after = interner.get_or_intern("post_roll");
+    assert_eq!(interner.resolve_expect(after).utf8(), Some("post_roll"));
+    assert_eq!(interner.resolve_expect(kept).utf8(), Some("small_kept"));
+}
+
+#[test]
+fn truncate_utf16_sentinel_dedup() {
+    let mut interner = Interner::default();
+    // Unpaired surrogates are utf16-only: each interns the `""` sentinel
+    // into the utf8 side, exercising the duplicate-key cache rebuild.
+    let kept_lone = interner.get_or_intern(&[0xD800u16][..]);
+    let cp = interner.checkpoint();
+    let dead_lone = interner.get_or_intern(&[0xDC00u16][..]);
+    interner.truncate(&cp);
+    assert_eq!(interner.resolve_expect(kept_lone).utf16(), &[0xD800u16][..]);
+    assert!(interner.resolve(dead_lone).is_none());
+    // The surviving sentinel must still dedup new surrogate interns.
+    let again = interner.get_or_intern(&[0xDC00u16][..]);
+    assert_eq!(interner.resolve_expect(again).utf16(), &[0xDC00u16][..]);
+    assert_eq!(interner.get_or_intern(&[0xD800u16][..]), kept_lone);
+}
+
+#[test]
+fn truncate_noop_and_statics() {
+    let mut interner = Interner::default();
+    let cp = interner.checkpoint();
+    interner.truncate(&cp);
+    assert_eq!(interner.dynamic_len(), 0);
+    // Static common strings live outside the dynamic tables and always
+    // survive truncation with stable symbols.
+    let arguments = interner.get_or_intern("arguments");
+    interner.truncate(&cp);
+    assert_eq!(interner.get_or_intern("arguments"), arguments);
+    assert_eq!(interner.resolve_expect(arguments).utf8(), Some("arguments"));
+}
+
+#[test]
+#[should_panic(expected = "checkpoint belongs to another interner")]
+fn truncate_rejects_foreign_checkpoint() {
+    let mut owner = Interner::with_capacity(256);
+    for index in 0..16 {
+        let short = alloc::format!("owner-{index:02}");
+        owner.get_or_intern(short.as_str());
+    }
+    let checkpoint = owner.checkpoint();
+
+    let mut other = Interner::default();
+    // The foreign checkpoint keeps spans whose slabs it would free.
+    for index in 0..17 {
+        let long = alloc::format!("{}-{index}", "x".repeat(4096));
+        other.get_or_intern(long.as_str());
+    }
+    other.truncate(&checkpoint);
+}

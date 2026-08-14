@@ -6,6 +6,15 @@ use rustc_hash::FxHasher;
 
 type Map<T, U> = HashMap<T, U, BuildHasherDefault<FxHasher>>;
 
+/// Snapshot of a [`RawInterner`]'s append-only state, used to rewind
+/// everything interned after it was taken.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RawCheckpoint {
+    spans_len: usize,
+    full_len: usize,
+    head_len: usize,
+}
+
 /// Raw string interner, generic by a char type.
 #[derive(Debug)]
 pub(super) struct RawInterner<Char> {
@@ -57,6 +66,15 @@ impl<Char> RawInterner<Char> {
     /// Returns `true` if the interner contains no interned strings.
     pub(super) fn is_empty(&self) -> bool {
         self.spans.is_empty()
+    }
+
+    /// Captures the current append state for a later [`Self::truncate`].
+    pub(super) fn checkpoint(&self) -> RawCheckpoint {
+        RawCheckpoint {
+            spans_len: self.spans.len(),
+            full_len: self.full.len(),
+            head_len: self.head.len(),
+        }
     }
 }
 
@@ -125,6 +143,41 @@ where
         self.spans.push(string);
         self.symbol_cache.insert(string, next);
         next
+    }
+}
+
+impl<Char> RawInterner<Char>
+where
+    Char: Hash + Eq,
+{
+    /// Rewinds to a captured [`RawCheckpoint`]: indices below it stay
+    /// valid, indices at/above resolve `None` until reassigned.
+    pub(super) fn truncate(&mut self, checkpoint: &RawCheckpoint) {
+        if checkpoint.spans_len >= self.spans.len() {
+            return;
+        }
+        self.spans.truncate(checkpoint.spans_len);
+
+        // Rebuild rather than remove keys: a removed `""` sentinel span
+        // may shadow a surviving copy below the checkpoint in the cache.
+        self.symbol_cache.clear();
+        for (index, span) in self.spans.iter().enumerate() {
+            self.symbol_cache.insert(*span, index);
+        }
+
+        // Surviving spans only reference checkpoint-era slabs; a retired
+        // then-head sits at full[full_len], so restore it and drop newer slabs.
+        if self.full.len() > checkpoint.full_len {
+            self.full.truncate(checkpoint.full_len + 1);
+            let mut old_head = self
+                .full
+                .pop()
+                .expect("full.len() > checkpoint.full_len, so pop must succeed");
+            old_head.truncate(checkpoint.head_len);
+            self.head = old_head;
+        } else {
+            self.head.truncate(checkpoint.head_len);
+        }
     }
 }
 
