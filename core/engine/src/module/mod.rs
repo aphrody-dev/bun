@@ -442,6 +442,16 @@ impl Module {
         &self.inner.host_defined
     }
 
+    /// Whether this module still retains its parsed AST, i.e. it has not yet
+    /// passed initialize_environment so embedders can tell when its interner is unused.
+    #[must_use]
+    pub fn has_pending_source(&self) -> bool {
+        match self.kind() {
+            ModuleKind::SourceText(src) => src.has_pending_source(),
+            ModuleKind::Synthetic(_) => false,
+        }
+    }
+
     /// Gets the kind of this `Module`.
     pub(crate) fn kind(&self) -> &ModuleKind {
         &self.inner.kind
@@ -551,13 +561,9 @@ impl Module {
     /// This must only be called if the [`JsPromise`] returned by [`Module::load`] has fulfilled.
     ///
     /// [spec]: https://tc39.es/ecma262/#table-abstract-methods-of-module-records
-    fn get_exported_names(
-        &self,
-        export_star_set: &mut Vec<Module>,
-        interner: &Interner,
-    ) -> FxHashSet<JsString> {
+    fn get_exported_names(&self, export_star_set: &mut Vec<Module>) -> FxHashSet<JsString> {
         match self.kind() {
-            ModuleKind::SourceText(src) => src.get_exported_names(self, export_star_set, interner),
+            ModuleKind::SourceText(src) => src.get_exported_names(self, export_star_set),
             ModuleKind::Synthetic(synth) => synth.get_exported_names(),
         }
     }
@@ -578,12 +584,9 @@ impl Module {
         &self,
         export_name: &JsString,
         resolve_set: &mut FxHashSet<(Self, JsString)>,
-        interner: &Interner,
     ) -> Result<ResolvedBinding, ResolveExportError> {
         match self.kind() {
-            ModuleKind::SourceText(src) => {
-                src.resolve_export(self, export_name, resolve_set, interner)
-            }
+            ModuleKind::SourceText(src) => src.resolve_export(self, export_name, resolve_set),
             ModuleKind::Synthetic(synth) => synth.resolve_export(self, export_name),
         }
     }
@@ -760,8 +763,7 @@ impl Module {
             .borrow_mut()
             .get_or_insert_with(|| {
                 // a. Let exportedNames be module.GetExportedNames().
-                let exported_names =
-                    self.get_exported_names(&mut Vec::default(), context.interner());
+                let exported_names = self.get_exported_names(&mut Vec::default());
 
                 // b. Let unambiguousNames be a new empty List.
                 let unambiguous_names = exported_names
@@ -770,7 +772,7 @@ impl Module {
                     .filter_map(|name| {
                         // i. Let resolution be module.ResolveExport(name).
                         // ii. If resolution is a ResolvedBinding Record, append name to unambiguousNames.
-                        self.resolve_export(&name, &mut HashSet::default(), context.interner())
+                        self.resolve_export(&name, &mut HashSet::default())
                             .ok()
                             .map(|_| name)
                     })
