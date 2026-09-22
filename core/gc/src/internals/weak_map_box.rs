@@ -1,4 +1,5 @@
-use crate::{GcRefCell, Trace, Tracer, WeakGc, pointers::RawWeakMap};
+use crate::{GcRefCell, Trace, Tracer, WeakGc, internals::ErasedEphemeronBox, pointers::RawWeakMap};
+use std::ptr::NonNull;
 
 /// A box that is used to track [`WeakMap`][`crate::WeakMap`]s.
 pub(crate) struct WeakMapBox<K: Trace + ?Sized + 'static, V: Trace + Sized + 'static> {
@@ -15,6 +16,9 @@ pub(crate) trait ErasedWeakMapBox {
 
     /// Traces the weak reference inside of the [`WeakMapBox`] if the weak map is live.
     unsafe fn trace(&self, tracer: &mut Tracer);
+
+    /// Adds each entry's ephemeron box, for a census.
+    fn census_entries(&self, out: &mut Vec<NonNull<dyn ErasedEphemeronBox>>);
 }
 
 impl<K: Trace + ?Sized, V: Trace> ErasedWeakMapBox for WeakMapBox<K, V> {
@@ -34,6 +38,17 @@ impl<K: Trace + ?Sized, V: Trace> ErasedWeakMapBox for WeakMapBox<K, V> {
         if self.map.upgrade().is_some() {
             // SAFETY: When the weak map is live, the weak reference should be traced.
             unsafe { self.map.trace(tracer) }
+        }
+    }
+
+    fn census_entries(&self, out: &mut Vec<NonNull<dyn ErasedEphemeronBox>>) {
+        if let Some(map) = self.map.upgrade()
+            && let Ok(map) = map.try_borrow()
+        {
+            out.extend(map.iter().map(|eph| {
+                let ptr: NonNull<dyn ErasedEphemeronBox> = eph.inner_ptr();
+                ptr
+            }));
         }
     }
 }

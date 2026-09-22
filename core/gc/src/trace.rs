@@ -22,16 +22,23 @@ use crate::GcErasedPointer;
 #[allow(missing_debug_implementations)]
 pub struct Tracer {
     queue: VecDeque<GcErasedPointer>,
+    // Census edge discovery records children without changing marks.
+    pub(crate) record: Option<Vec<GcErasedPointer>>,
 }
 
 impl Tracer {
     pub(crate) fn new() -> Self {
         Self {
             queue: VecDeque::default(),
+            record: None,
         }
     }
 
     pub(crate) fn enqueue(&mut self, node: GcErasedPointer) {
+        if let Some(edges) = &mut self.record {
+            edges.push(node);
+            return;
+        }
         // Mark on enqueue. Marking on dequeue pushes a node once per incoming edge,
         // and on wasm32 the worklist can outgrow isize::MAX.
         // SAFETY: `node` is a live GcBox pointer supplied by a Trace impl, so its

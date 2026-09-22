@@ -1,4 +1,4 @@
-use crate::{Gc, GcBox, Tracer, trace::Trace};
+use crate::{Gc, GcBox, GcErasedPointer, Tracer, trace::Trace};
 use std::{cell::UnsafeCell, ptr::NonNull};
 
 use super::GcHeader;
@@ -126,6 +126,15 @@ pub(crate) trait ErasedEphemeronBox {
 
     fn trace_non_roots(&self);
 
+    /// Census-only strong view of a live entry's key and value.
+    unsafe fn census_root(&self, tracer: &mut Tracer);
+
+    /// A live entry's key, for a census.
+    fn census_key(&self) -> Option<GcErasedPointer>;
+
+    /// Census-only trace of a live entry's value alone.
+    unsafe fn census_trace_value(&self, tracer: &mut Tracer);
+
     /// Runs the finalization logic of the `EphemeronBox`'s held value, if the key is still live,
     /// and clears its contents.
     fn finalize_and_clear(&self);
@@ -161,6 +170,31 @@ impl<K: Trace + ?Sized, V: Trace> ErasedEphemeronBox for EphemeronBox<K, V> {
         }
 
         is_key_marked
+    }
+
+    unsafe fn census_root(&self, tracer: &mut Tracer) {
+        // SAFETY: as in trace, a census never mutates or sweeps the heap.
+        let data = unsafe { &*self.data.get() };
+        if let Some(data) = data.as_ref() {
+            tracer.enqueue(data.key.cast());
+            // SAFETY: the ephemeron still owns its value.
+            unsafe { data.value.trace(tracer) }
+        }
+    }
+
+    fn census_key(&self) -> Option<GcErasedPointer> {
+        // SAFETY: as in trace, a census never mutates or sweeps the heap.
+        let data = unsafe { &*self.data.get() };
+        data.as_ref().map(|data| data.key.cast())
+    }
+
+    unsafe fn census_trace_value(&self, tracer: &mut Tracer) {
+        // SAFETY: as in trace, a census never mutates or sweeps the heap.
+        let data = unsafe { &*self.data.get() };
+        if let Some(data) = data.as_ref() {
+            // SAFETY: the ephemeron still owns its value.
+            unsafe { data.value.trace(tracer) }
+        }
     }
 
     fn trace_non_roots(&self) {

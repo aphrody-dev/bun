@@ -2,6 +2,7 @@ use crate::BOA_GC;
 
 mod allocation;
 mod cell;
+mod census;
 mod erased;
 mod std_types;
 mod weak;
