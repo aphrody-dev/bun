@@ -255,6 +255,12 @@ impl JsObject {
         JsObject { inner }
     }
 
+    /// The heap address of this object for `boa_gc::census`, without adding a root.
+    #[must_use]
+    pub fn census_key(&self) -> boa_gc::CensusKey {
+        self.inner.census_key()
+    }
+
     /// Downcasts the object's inner data if the object is of type `T`.
     ///
     /// # Panics
