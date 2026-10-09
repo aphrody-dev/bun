@@ -1800,6 +1800,16 @@ fn global_declaration_instantiation(
                         env.create_immutable_binding(name, true);
                     }
                 }
+                // Bind `using` like `let`, as blocks and modules do until disposal is
+                // implemented. Without a binding, the initializer writes to an undeclared slot.
+                Declaration::Lexical(
+                    LexicalDeclaration::Using(declaration) | LexicalDeclaration::AwaitUsing(declaration),
+                ) => {
+                    for name in bound_names(declaration) {
+                        let name = name.to_js_string(interner);
+                        drop(env.create_mutable_binding(name, false));
+                    }
+                }
                 _ => {}
             }
         }
@@ -2180,6 +2190,16 @@ fn function_declaration_instantiation(
                         lex_env.create_immutable_binding(name, true);
                     }
                 }
+                // Bind `using` like `let`, as blocks and modules do until disposal is
+                // implemented. Without a binding, the initializer writes to an undeclared slot.
+                Declaration::Lexical(
+                    LexicalDeclaration::Using(declaration) | LexicalDeclaration::AwaitUsing(declaration),
+                ) => {
+                    for name in bound_names(declaration) {
+                        let name = name.to_js_string(interner);
+                        drop(lex_env.create_mutable_binding(name, false));
+                    }
+                }
                 _ => {}
             }
         }
@@ -2496,6 +2516,16 @@ pub(crate) fn eval_declaration_instantiation_scope(
                     for name in bound_names(declaration) {
                         let name = name.to_js_string(interner);
                         lex_env.create_immutable_binding(name, true);
+                    }
+                }
+                // Bind `using` like `let`, as blocks and modules do until disposal is
+                // implemented. Without a binding, the initializer writes to an undeclared slot.
+                Declaration::Lexical(
+                    LexicalDeclaration::Using(declaration) | LexicalDeclaration::AwaitUsing(declaration),
+                ) => {
+                    for name in bound_names(declaration) {
+                        let name = name.to_js_string(interner);
+                        drop(lex_env.create_mutable_binding(name, false));
                     }
                 }
                 _ => {}
