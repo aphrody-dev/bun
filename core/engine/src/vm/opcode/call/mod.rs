@@ -14,6 +14,25 @@ use crate::{
     vm::opcode::Operation,
 };
 
+// Name the callee type and the calling function, built only when a call
+// throws (cold, out of line); minified bundles otherwise give nothing to search for.
+#[cold]
+#[inline(never)]
+fn not_callable(func: &JsValue, context: &Context) -> JsError {
+    JsNativeError::typ()
+        .with_message(format!(
+            "not a callable function (callee={}, in fn '{}')",
+            func.type_of(),
+            context
+                .vm
+                .frame()
+                .code_block()
+                .name()
+                .to_std_string_escaped()
+        ))
+        .into()
+}
+
 /// `CallEval` implements the Opcode Operation for `Opcode::CallEval`
 ///
 /// Operation:
@@ -33,9 +52,7 @@ impl CallEval {
             .calling_convention_get_function(argument_count.into());
 
         let Some(object) = func.as_object() else {
-            return Err(JsNativeError::typ()
-                .with_message("not a callable function")
-                .into());
+            return Err(not_callable(func, context));
         };
 
         // Taken from `13.3.6.1 Runtime Semantics: Evaluation`
@@ -117,9 +134,7 @@ impl CallEvalSpread {
         let func = context.vm.stack.calling_convention_get_function(0);
 
         let Some(object) = func.as_object() else {
-            return Err(JsNativeError::typ()
-                .with_message("not a callable function")
-                .into());
+            return Err(not_callable(func, context));
         };
         // Taken from `13.3.6.1 Runtime Semantics: Evaluation`
         //            `CallExpression : CoverCallExpressionAndAsyncArrowHead`
@@ -190,20 +205,12 @@ impl Call {
             .calling_convention_get_function(argument_count.into());
 
         let Some(object) = func.as_object() else {
-            return Err(Self::handle_not_callable());
+            return Err(not_callable(func, context));
         };
 
         object.__call__(argument_count.into()).resolve(context)?;
 
         Ok(())
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn handle_not_callable() -> JsError {
-        JsNativeError::typ()
-            .with_message("not a callable function")
-            .into()
     }
 }
 
@@ -242,9 +249,7 @@ impl CallSpread {
             .calling_convention_get_function(argument_count);
 
         let Some(object) = func.as_object() else {
-            return Err(JsNativeError::typ()
-                .with_message("not a callable function")
-                .into());
+            return Err(not_callable(func, context));
         };
 
         object.__call__(argument_count).resolve(context)?;

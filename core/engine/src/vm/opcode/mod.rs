@@ -18,6 +18,64 @@ use crate::{
     vm::{completion_record::CompletionRecord, completion_record::IntoCompletionRecord},
 };
 use args::{Argument, read};
+
+// Which side of a property access failed on a null/undefined base, so
+// the message can say "read" or "set" the way V8's does.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Access {
+    Read,
+    Write,
+}
+
+// V8-shaped "cannot read properties of undefined (reading 'k')". The key
+// is the one token that locates the access in a minified bundle; throw path only.
+#[cold]
+#[inline(never)]
+pub(crate) fn null_base_error(value: &crate::JsValue, access: Access, key: &str) -> crate::JsError {
+    let base = if value.is_null() { "null" } else { "undefined" };
+    let (verb, gerund) = match access {
+        Access::Read => ("read", "reading"),
+        Access::Write => ("set", "setting"),
+    };
+    crate::JsNativeError::typ()
+        .with_message(format!(
+            "cannot {verb} properties of {base} ({gerund} '{key}')"
+        ))
+        .into()
+}
+
+// Describe a computed key without running user code (no getters or
+// toString during error construction): primitives by value, the rest by type.
+#[cold]
+#[inline(never)]
+pub(crate) fn describe_key(key: &crate::JsValue) -> String {
+    use crate::value::JsVariant;
+    match key.variant() {
+        JsVariant::String(s) => s.to_std_string_escaped(),
+        JsVariant::Integer32(i) => i.to_string(),
+        JsVariant::Float64(r) => r.to_string(),
+        JsVariant::Boolean(b) => b.to_string(),
+        JsVariant::Null => "null".to_string(),
+        JsVariant::Undefined => "undefined".to_string(),
+        _ => format!("<{}>", key.type_of()),
+    }
+}
+
+// The named-key error for a by-name access. The key comes from the
+// inline cache, which holds the property name for every by-name site.
+#[cold]
+#[inline(never)]
+pub(crate) fn null_base_error_by_name(
+    value: &crate::JsValue,
+    access: Access,
+    ic_index: usize,
+    context: &Context,
+) -> crate::JsError {
+    let name = context.vm.frame().code_block().ic[ic_index]
+        .name
+        .to_std_string_escaped();
+    null_base_error(value, access, &name)
+}
 use std::ops::ControlFlow;
 use thin_vec::ThinVec;
 

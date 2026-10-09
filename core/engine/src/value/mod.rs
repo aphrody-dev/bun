@@ -117,6 +117,24 @@ pub use boa_macros::js_value;
 #[derive(Finalize, Debug, Clone, Trace)]
 pub struct JsValue(inner::InnerValue);
 
+// Names the enclosing function, built only on the throw path and kept
+// out of line so the hot primitive arms of to_object/base_class stay small.
+#[cold]
+#[inline(never)]
+fn null_to_object_error(context: &Context) -> crate::JsError {
+    JsNativeError::typ()
+        .with_message(format!(
+            "cannot convert 'null' or 'undefined' to object (in fn '{}')",
+            context
+                .vm
+                .frame()
+                .code_block()
+                .name()
+                .to_std_string_escaped()
+        ))
+        .into()
+}
+
 impl JsValue {
     /// Create a new [`JsValue`] from an inner value.
     #[inline]
@@ -997,9 +1015,7 @@ impl JsValue {
     /// See: <https://tc39.es/ecma262/#sec-toobject>
     pub fn to_object(&self, context: &mut Context) -> JsResult<JsObject> {
         match self.variant() {
-            JsVariant::Undefined | JsVariant::Null => Err(JsNativeError::typ()
-                .with_message("cannot convert 'null' or 'undefined' to object")
-                .into()),
+            JsVariant::Undefined | JsVariant::Null => Err(null_to_object_error(context)),
             JsVariant::Boolean(boolean) => Ok(context
                 .intrinsics()
                 .templates()
@@ -1040,9 +1056,7 @@ impl JsValue {
     pub(crate) fn base_class(&self, context: &Context) -> JsResult<JsObject> {
         let constructors = context.intrinsics().constructors();
         match self.variant() {
-            JsVariant::Undefined | JsVariant::Null => Err(JsNativeError::typ()
-                .with_message("cannot convert 'null' or 'undefined' to object")
-                .into()),
+            JsVariant::Undefined | JsVariant::Null => Err(null_to_object_error(context)),
             JsVariant::Boolean(_) => Ok(constructors.boolean().prototype()),
             JsVariant::Integer32(_) | JsVariant::Float64(_) => {
                 Ok(constructors.number().prototype())

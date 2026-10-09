@@ -4,7 +4,10 @@ use crate::{
     Context, JsResult, JsValue, js_string,
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::PropertyKey,
-    vm::opcode::{IndexOperand, Operation, RegisterOperand},
+    vm::opcode::{
+        Access, IndexOperand, Operation, RegisterOperand, describe_key, null_base_error,
+        null_base_error_by_name,
+    },
 };
 
 fn get_by_name<const LENGTH: bool>(
@@ -35,7 +38,9 @@ fn get_by_name<const LENGTH: bool>(
     //
     //    To prevent the creation of a temporary JsObject, we directly retrieve the prototype that
     //    `to_object()` would produce, such as `Number.prototype`, `String.prototype`, etc.
-    let object = object.base_class(context)?;
+    let object = object
+        .base_class(context)
+        .map_err(|_| null_base_error_by_name(object, Access::Read, usize::from(index), context))?;
 
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
     let object_borrowed = object.borrow();
@@ -91,7 +96,9 @@ fn get_by_value<const PUSH_KEY: bool>(
 ) -> JsResult<()> {
     let key_value = context.vm.get_register(key.into()).clone();
     let base = context.vm.get_register(object.into()).clone();
-    let object = base.base_class(context)?;
+    let object = base
+        .base_class(context)
+        .map_err(|_| null_base_error(&base, Access::Read, &describe_key(&key_value)))?;
     let key_value = key_value.to_property_key(context)?;
 
     // Fast Path
