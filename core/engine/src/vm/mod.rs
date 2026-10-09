@@ -995,22 +995,19 @@ impl Context {
         let _ks_depth = KsExecDepthGuard::enter();
         let mut runtime_budget: u32 = budget;
 
-        while let Some(byte) = self
-            .vm
-            .frame()
-            .code_block
-            .bytecode
-            .bytes
-            .get(self.vm.frame().pc as usize)
-        {
-            let opcode = Opcode::decode(*byte);
+        loop {
+            let frame = self.vm.frame();
+            let pc = frame.pc as usize;
+            let bytes: &[u8] = &frame.code_block.bytecode.bytes;
+            let Some(&byte) = bytes.get(pc) else {
+                break;
+            };
+            let bytes: *const [u8] = bytes;
+            let opcode = Opcode::decode(byte);
 
             match self.execute_one(
                 |context, opcode| {
-                    let frame = context.vm.frame();
-                    let pc = frame.pc as usize;
-
-                    OPCODE_HANDLERS_BUDGET[opcode as usize](context, pc, &mut runtime_budget)
+                    OPCODE_HANDLERS_BUDGET[opcode as usize](context, pc, bytes, &mut runtime_budget)
                 },
                 opcode,
             ) {
@@ -1029,23 +1026,20 @@ impl Context {
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
         let _ks_depth = KsExecDepthGuard::enter();
-        while let Some(byte) = self
-            .vm
-            .frame()
-            .code_block
-            .bytecode
-            .bytes
-            .get(self.vm.frame().pc as usize)
-        {
-            let opcode = Opcode::decode(*byte);
+        loop {
+            // Walk frame -> code block -> bytes once per instruction and share
+            // it with the handler. This walk is hot.
+            let frame = self.vm.frame();
+            let pc = frame.pc as usize;
+            let bytes: &[u8] = &frame.code_block.bytecode.bytes;
+            let Some(&byte) = bytes.get(pc) else {
+                break;
+            };
+            let bytes: *const [u8] = bytes;
+            let opcode = Opcode::decode(byte);
 
             match self.execute_one(
-                |context, opcode| {
-                    let frame = context.vm.frame();
-                    let pc = frame.pc as usize;
-
-                    OPCODE_HANDLERS[opcode as usize](context, pc)
-                },
+                |context, opcode| OPCODE_HANDLERS[opcode as usize](context, pc, bytes),
                 opcode,
             ) {
                 ControlFlow::Continue(()) => {}

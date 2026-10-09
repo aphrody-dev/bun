@@ -465,7 +465,9 @@ macro_rules! generate_opcodes {
             )*
         }
 
-        type OpcodeHandler = fn(&mut Context, usize) -> ControlFlow<CompletionRecord>;
+        // The dispatch loop hands over the running frame's bytecode, which it
+        // already loaded, instead of each handler re-walking frame -> code block -> bytes.
+        type OpcodeHandler = fn(&mut Context, usize, *const [u8]) -> ControlFlow<CompletionRecord>;
 
         pub(crate) const OPCODE_HANDLERS: [OpcodeHandler; 256] = {
             [
@@ -475,7 +477,7 @@ macro_rules! generate_opcodes {
             ]
         };
 
-        type OpcodeHandlerBudget = fn(&mut Context, usize, &mut u32) -> ControlFlow<CompletionRecord>;
+        type OpcodeHandlerBudget = fn(&mut Context, usize, *const [u8], &mut u32) -> ControlFlow<CompletionRecord>;
 
         pub(crate) const OPCODE_HANDLERS_BUDGET: [OpcodeHandlerBudget; 256] = {
             [
@@ -489,8 +491,10 @@ macro_rules! generate_opcodes {
             pastey::paste! {
                 #[inline(always)]
                 #[allow(unused_parens)]
-                fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord> {
-                    let bytes = &context.vm.frame().code_block.bytecode.bytes;
+                fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize, bytes: *const [u8]) -> ControlFlow<CompletionRecord> {
+                    // SAFETY: the running frame's bytecode; the frame keeps its code block
+                    // alive until `operation` runs, and the bytes are only read before it.
+                    let bytes = unsafe { &*bytes };
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
@@ -503,9 +507,10 @@ macro_rules! generate_opcodes {
             pastey::paste! {
                 #[inline(always)]
                 #[allow(unused_parens)]
-                fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<CompletionRecord> {
+                fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, bytes: *const [u8], budget: &mut u32) -> ControlFlow<CompletionRecord> {
                     *budget = budget.saturating_sub(u32::from($Variant::COST));
-                    let bytes = &context.vm.frame().code_block.bytecode.bytes;
+                    // SAFETY: as in the non-budget handler above.
+                    let bytes = unsafe { &*bytes };
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
