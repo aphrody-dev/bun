@@ -665,6 +665,31 @@ impl Context {
         }
     }
 
+    /// `get_binding` that also resolves a live baked-export marker
+    /// (`crate::module::resolve_live`) read through a module environment.
+    pub(crate) fn get_binding_live(
+        &mut self,
+        locator: &BindingLocator,
+    ) -> JsResult<Option<JsValue>> {
+        let value = self.get_binding(locator)?;
+        // Markers are only stored as module exports, so only module environments
+        // can hold one; probing every name read cost ~30% on closure-heavy code.
+        if !self.binding_in_module_env(locator) {
+            return Ok(value);
+        }
+        Ok(value.map(|val| crate::module::resolve_live(val, self)))
+    }
+
+    fn binding_in_module_env(&self, locator: &BindingLocator) -> bool {
+        let BindingLocatorScope::Stack(index) = locator.scope() else {
+            return false;
+        };
+        matches!(
+            self.environment_expect(index),
+            Environment::Declarative(env) if env.kind().as_module().is_some()
+        )
+    }
+
     /// Sets the value of a binding.
     ///
     /// # Panics

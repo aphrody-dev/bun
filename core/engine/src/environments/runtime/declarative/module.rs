@@ -13,11 +13,22 @@ enum BindingAccessor {
 }
 
 /// An indirect reference to a binding inside an environment.
-#[derive(Clone, Debug, Trace, Finalize)]
+#[derive(Clone, Trace, Finalize)]
 struct IndirectBinding {
     module: Module,
     #[unsafe_ignore_trace]
     accessor: RefCell<BindingAccessor>,
+}
+
+// Manual Debug that does not recurse into `module`: cyclic ES imports (A imports
+// B, B imports A) make the derived Debug infinite-loop -> stack overflow.
+impl std::fmt::Debug for IndirectBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndirectBinding")
+            .field("module", &"<module elided to avoid import-cycle recursion>")
+            .field("accessor", &self.accessor)
+            .finish()
+    }
 }
 
 /// The type of binding a [`ModuleEnvironment`] can contain.
@@ -104,9 +115,9 @@ impl ModuleEnvironment {
 
         match &mut bindings[index as usize] {
             BindingType::Direct(v) => *v = Some(value),
-            BindingType::Indirect(_) => {
-                panic!("cannot modify indirect references to other environments")
-            }
+            // Writing an indirect (re-exported) binding is a page error V8
+            // reports as a TypeError. Ignore the write rather than panic.
+            BindingType::Indirect(_) => {}
         }
     }
 

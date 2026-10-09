@@ -47,8 +47,8 @@ use crate::bytecompiler::ToJsString;
 use crate::object::TypedJsFunction;
 use crate::spanned_source_text::SourceText;
 use crate::{
-    Context, HostDefined, JsError, JsNativeError, JsResult, JsString, JsValue, NativeFunction,
-    builtins,
+    Context, HostDefined, JsData, JsError, JsNativeError, JsResult, JsString, JsValue,
+    NativeFunction, builtins,
     builtins::promise::{PromiseCapability, PromiseState},
     environments::DeclarativeEnvironment,
     object::{JsObject, JsPromise},
@@ -175,12 +175,78 @@ pub struct Module {
 
 impl std::fmt::Debug for Module {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Do not recurse into `namespace`/`kind`: cyclic ES imports
+        // (A imports B, B imports A) make Debug infinite-loop -> stack overflow.
         f.debug_struct("Module")
             .field("realm", &self.inner.realm.addr())
-            .field("namespace", &self.inner.namespace)
-            .field("kind", &self.inner.kind)
-            .finish()
+            .field("path", &self.inner.path)
+            .finish_non_exhaustive()
     }
+}
+
+// Live module bindings for baked-chunk imports. The host reads the current raw
+// value and can reuse the marker's last Boa conversion when it is unchanged.
+type LiveResolveHook = fn(f64, u64, &JsString, Option<JsValue>, &mut Context) -> JsValue;
+
+thread_local! {
+    static LIVE_RESOLVE_HOOK: Cell<Option<LiveResolveHook>> = const { Cell::new(None) };
+}
+
+/// Register the host callback that resolves a live baked-export binding.
+pub fn set_live_resolve_hook(f: LiveResolveHook) {
+    LIVE_RESOLVE_HOOK.with(|h| h.set(Some(f)));
+}
+
+// This private native type prevents page objects from forging live-binding markers.
+#[derive(Debug, Trace, Finalize, JsData)]
+struct LiveBindingMarker {
+    #[unsafe_ignore_trace]
+    namespace_handle: f64,
+    #[unsafe_ignore_trace]
+    raw_value_handle: u64,
+    name: JsString,
+    cached_value: GcRefCell<Option<JsValue>>,
+}
+
+/// Create a live-binding marker object for a baked export (host bridge).
+pub fn make_live_binding(ns_handle: f64, name: JsString, raw_value_handle: u64) -> JsValue {
+    JsObject::from_proto_and_data(
+        None,
+        LiveBindingMarker {
+            namespace_handle: ns_handle,
+            raw_value_handle,
+            name,
+            cached_value: GcRefCell::new(None),
+        },
+    )
+    .into()
+}
+
+/// Returns `value`, or the host's current value for it if it is a live-binding marker.
+pub(crate) fn resolve_live(value: JsValue, ctx: &mut Context) -> JsValue {
+    let Some(obj) = value.as_object() else {
+        return value;
+    };
+    let (ns_handle, raw_value_handle, name, cached_value) = {
+        let Some(marker) = obj.downcast_ref::<LiveBindingMarker>() else {
+            return value;
+        };
+        (
+            marker.namespace_handle,
+            marker.raw_value_handle,
+            marker.name.clone(),
+            marker.cached_value.borrow().clone(),
+        )
+    };
+    let Some(hook) = LIVE_RESOLVE_HOOK.with(Cell::get) else {
+        return value;
+    };
+
+    let resolved = hook(ns_handle, raw_value_handle, &name, cached_value, ctx);
+    if let Some(marker) = obj.downcast_ref::<LiveBindingMarker>() {
+        *marker.cached_value.borrow_mut() = Some(resolved.clone());
+    }
+    resolved
 }
 
 #[derive(Trace, Finalize)]

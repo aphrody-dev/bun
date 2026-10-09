@@ -358,13 +358,14 @@ fn module_namespace_exotic_try_get(
             .js_expect("checked before that the name was reachable")?;
 
         // 12. Return ? targetEnv.GetBindingValue(binding.[[BindingName]], true).
-        env.get(locator.binding_index()).map(Some).ok_or_else(|| {
+        let val = env.get(locator.binding_index()).ok_or_else(|| {
             let import = export_name.to_std_string_escaped();
 
             JsNativeError::reference()
                 .with_message(format!("cannot get uninitialized import `{import}`"))
-                .into()
-        })
+        })?;
+        // Resolve a live baked-export marker against the current host binding.
+        Ok(Some(crate::module::resolve_live(val, context)))
     } else {
         // 9. If binding.[[BindingName]] is namespace, then
         //     a. Return GetModuleNamespace(targetModule).
@@ -446,13 +447,14 @@ fn module_namespace_exotic_get(
             .js_expect("checked before that the name was reachable")?;
 
         // 12. Return ? targetEnv.GetBindingValue(binding.[[BindingName]], true).
-        env.get(locator.binding_index()).ok_or_else(|| {
+        let val = env.get(locator.binding_index()).ok_or_else(|| {
             let import = export_name.to_std_string_escaped();
 
             JsNativeError::reference()
                 .with_message(format!("cannot get uninitialized import `{import}`"))
-                .into()
-        })
+        })?;
+        // Resolve a live baked-export marker against the current host binding.
+        Ok(crate::module::resolve_live(val, context))
     } else {
         // 9. If binding.[[BindingName]] is namespace, then
         //     a. Return GetModuleNamespace(targetModule).
