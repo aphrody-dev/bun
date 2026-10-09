@@ -7,7 +7,10 @@ struct Inner {
     source_text: boa_ast::SourceText,
 }
 impl Inner {
-    fn new(source_text: boa_ast::SourceText) -> Self {
+    fn new(mut source_text: boa_ast::SourceText) -> Self {
+        // Kept for the script's life, so drop the lexer's growth slack
+        // and store Latin-1 when it fits (half of a bundle's retained source).
+        source_text.compact();
         Self { source_text }
     }
 }
@@ -94,7 +97,7 @@ impl SpannedSourceText {
 
     /// Gets inner code points.
     #[must_use]
-    pub fn to_code_points(&self) -> Option<&[u16]> {
+    pub fn to_code_points(&self) -> Option<std::borrow::Cow<'_, [u16]>> {
         if let (Some(source_text), Some(span)) = (self.source_text.inner(), self.span) {
             Some(source_text.get_code_points_from_span(span))
         } else {

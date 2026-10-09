@@ -106,7 +106,7 @@ impl<'ast> boa_ast::visitor::Visitor<'ast> for JsonSourceVisitor<'_> {
     ) -> std::ops::ControlFlow<Self::BreakTy> {
         let span = node.linear_span();
         let code_points = self.source_text.get_code_points_from_span(span);
-        let text = String::from_utf16_lossy(code_points);
+        let text = String::from_utf16_lossy(&code_points);
         self.stack.push(JsonNode::Primitive(text));
         std::ops::ControlFlow::Continue(())
     }
@@ -177,7 +177,7 @@ impl<'ast> boa_ast::visitor::Visitor<'ast> for JsonSourceVisitor<'_> {
         {
             let span = lit.linear_span();
             let code_points = self.source_text.get_code_points_from_span(span);
-            let num_text = String::from_utf16_lossy(code_points);
+            let num_text = String::from_utf16_lossy(&code_points);
             self.stack.push(JsonNode::Primitive(format!("-{num_text}")));
             return std::ops::ControlFlow::Continue(());
         }

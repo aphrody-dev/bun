@@ -882,7 +882,7 @@ impl BuiltInFunctionObject {
 
         let code = function.codeblock();
         if let Some(code_points) = code.source_info().text_spanned().to_code_points() {
-            return Ok(JsString::from(code_points).into());
+            return Ok(JsString::from(&*code_points).into());
         }
 
         Ok(js_string!(
