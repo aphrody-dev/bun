@@ -77,13 +77,19 @@ impl<R> Cursor<R> {
 impl<R: ReadChar> Cursor<R> {
     /// Creates a new Lexer cursor.
     pub(super) fn new(inner: R) -> Self {
+        // Sized up front from the input: growing by doubling briefly held about
+        // three times the text while it reallocated.
+        let source_collector = match inner.len_hint() {
+            0 => SourceText::default(),
+            hint => SourceText::with_capacity(hint),
+        };
         Self {
             iter: inner,
             pos: Position::new(1, 1),
             strict: false,
             module: false,
             peeked: [None; 4],
-            source_collector: SourceText::default(),
+            source_collector,
         }
     }
 

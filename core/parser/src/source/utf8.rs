@@ -5,14 +5,22 @@ use std::io::{self, Bytes, Read};
 #[derive(Debug)]
 pub struct UTF8Input<R> {
     input: Bytes<R>,
+    len_hint: usize,
 }
 
 impl<R: Read> UTF8Input<R> {
     /// Creates a new `UTF8Input` from a UTF-8 encoded source.
     pub(crate) fn new(iter: R) -> Self {
+        Self::with_len_hint(iter, 0)
+    }
+
+    /// Like `new`, knowing the source is `len` bytes long, which bounds
+    /// the UTF-16 code units it decodes to (no UTF-8 byte yields more than one).
+    pub(crate) fn with_len_hint(iter: R, len: usize) -> Self {
         Self {
             #[allow(clippy::unbuffered_bytes)]
             input: iter.bytes(),
+            len_hint: len,
         }
     }
 }
@@ -25,6 +33,10 @@ impl<R: Read> UTF8Input<R> {
 }
 
 impl<R: Read> ReadChar for UTF8Input<R> {
+    fn len_hint(&self) -> usize {
+        self.len_hint
+    }
+
     /// Retrieves the next unchecked char in u32 code point.
     fn next_char(&mut self) -> io::Result<Option<u32>> {
         // Decode UTF-8

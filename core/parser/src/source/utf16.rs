@@ -36,6 +36,10 @@ impl<'a> UTF16Input<'a> {
 }
 
 impl ReadChar for UTF16Input<'_> {
+    fn len_hint(&self) -> usize {
+        self.input.len() - self.index
+    }
+
     /// Retrieves the next unchecked char in u32 code point.
     fn next_char(&mut self) -> io::Result<Option<u32>> {
         let Some(u1) = self.input.get(self.index).copied() else {

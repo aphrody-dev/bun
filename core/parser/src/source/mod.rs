@@ -37,8 +37,9 @@ impl<'bytes> Source<'static, UTF8Input<&'bytes [u8]>> {
     ///
     /// [slice]: std::slice
     pub fn from_bytes<T: AsRef<[u8]> + ?Sized>(source: &'bytes T) -> Self {
+        let bytes = source.as_ref();
         Self {
-            reader: UTF8Input::new(source.as_ref()),
+            reader: UTF8Input::with_len_hint(bytes, bytes.len()),
             path: None,
         }
     }
@@ -143,6 +144,12 @@ pub trait ReadChar {
     ///
     /// Returns an error if the next input in the input is not a valid unicode code point.
     fn next_char(&mut self) -> io::Result<Option<u32>>;
+
+    /// An upper bound on the UTF-16 code units left, or 0 if unknown. The
+    /// lexer sizes the retained source text with it instead of growing by doubling.
+    fn len_hint(&self) -> usize {
+        0
+    }
 }
 
 #[cfg(test)]
