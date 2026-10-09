@@ -27,13 +27,13 @@ pub(crate) struct CacheEntry {
 /// An inline cache entry for a property access.
 #[derive(Clone, Debug, Trace, Finalize)]
 pub(crate) struct InlineCache {
-    /// The property that is accessed.
     pub(crate) name: JsString,
 
-    /// Multiple cached shape-to-slot entries.
-    pub(crate) entries: GcRefCell<ArrayVec<CacheEntry, PIC_CAPACITY>>,
+    // The first entry inline and the polymorphic overflow boxed, so a site
+    // that never runs or stays monomorphic costs one entry instead of PIC_CAPACITY.
+    first: GcRefCell<Option<CacheEntry>>,
+    rest: GcRefCell<Option<Box<ArrayVec<CacheEntry, { PIC_CAPACITY - 1 }>>>>,
 
-    /// Whether this access site has seen too many shapes and should no longer be cached.
     #[unsafe_ignore_trace]
     pub(crate) megamorphic: Cell<bool>,
 }
@@ -46,8 +46,13 @@ impl fmt::Display for InlineCache {
             return write!(f, "(megamorphic))");
         }
 
-        let entries = self.entries.borrow();
-        let entries = entries.iter().map(|e| e.shape.to_addr_usize()).format(", ");
+        let first = self.first.borrow();
+        let rest = self.rest.borrow();
+        let entries = first
+            .iter()
+            .chain(rest.iter().flat_map(|r| r.iter()))
+            .map(|e| e.shape.to_addr_usize())
+            .format(", ");
 
         write!(f, "({entries:#x}))")
     }
@@ -57,7 +62,8 @@ impl InlineCache {
     pub(crate) fn new(name: JsString) -> Self {
         Self {
             name,
-            entries: GcRefCell::new(ArrayVec::new()),
+            first: GcRefCell::new(None),
+            rest: GcRefCell::new(None),
             megamorphic: Cell::new(false),
         }
     }
@@ -66,21 +72,39 @@ impl InlineCache {
         if self.megamorphic.get() {
             return;
         }
+        let entry = CacheEntry {
+            shape: shape.into(),
+            slot,
+        };
 
-        let mut entries = self.entries.borrow_mut();
-
-        // Add a new entry if there's space.
-        if entries
-            .try_push(CacheEntry {
-                shape: shape.into(),
-                slot,
-            })
+        let mut first = self.first.borrow_mut();
+        if first.is_none() {
+            *first = Some(entry);
+            return;
+        }
+        let mut rest = self.rest.borrow_mut();
+        // Add a new entry if there's space; a full cache goes megamorphic.
+        if rest
+            .get_or_insert_with(Box::default)
+            .try_push(entry)
             .is_err()
         {
-            // Polymorphic cache is full, transition to megamorphic.
             self.megamorphic.set(true);
-            entries.clear();
+            *first = None;
+            *rest = None;
         }
+    }
+
+    /// Every live entry, first one first (the layout the PIC tests inspect).
+    #[cfg(test)]
+    pub(crate) fn entries(&self) -> Vec<CacheEntry> {
+        let first = self.first.borrow();
+        let rest = self.rest.borrow();
+        first
+            .iter()
+            .chain(rest.iter().flat_map(|r| r.iter()))
+            .cloned()
+            .collect()
     }
 
     /// Returns the cached `(Shape, Slot)` if a matching shape exists in the inline cache.
@@ -90,17 +114,29 @@ impl InlineCache {
         if self.megamorphic.get() {
             return None;
         }
-
-        let mut entries = self.entries.borrow_mut();
-        let mut i = 0;
-        let mut result = None;
         let shape_addr = shape.to_addr_usize();
 
+        {
+            let mut first = self.first.borrow_mut();
+            if let Some(entry) = first.as_ref() {
+                match entry.shape.upgrade() {
+                    Some(upgraded) if upgraded.to_addr_usize() == shape_addr => {
+                        return Some((upgraded, entry.slot));
+                    }
+                    Some(_) => {}
+                    // Opportunistically clean up a stale weak shape.
+                    None => *first = None,
+                }
+            }
+        }
+
+        let mut rest = self.rest.borrow_mut();
+        let entries = rest.as_mut()?;
+        let mut i = 0;
         while i < entries.len() {
             if let Some(upgraded) = entries[i].shape.upgrade() {
                 if upgraded.to_addr_usize() == shape_addr {
-                    result = Some((upgraded, entries[i].slot));
-                    break;
+                    return Some((upgraded, entries[i].slot));
                 }
                 i += 1;
             } else {
@@ -108,7 +144,6 @@ impl InlineCache {
                 entries.swap_remove(i);
             }
         }
-
-        result
+        None
     }
 }
