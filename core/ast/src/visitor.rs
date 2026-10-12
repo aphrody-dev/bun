@@ -109,6 +109,20 @@ macro_rules! node_ref {
                 }
             }
         )*
+
+        $(
+            impl<'a> From<&'a Box<$Variant>> for NodeRef<'a> {
+                fn from(node: &'a Box<$Variant>) -> NodeRef<'a> {
+                    Self::$Variant(node)
+                }
+            }
+
+            impl<'a> From<&'a mut Box<$Variant>> for NodeRefMut<'a> {
+                fn from(node: &'a mut Box<$Variant>) -> NodeRefMut<'a> {
+                    Self::$Variant(node)
+                }
+            }
+        )*
     }
 }
 
