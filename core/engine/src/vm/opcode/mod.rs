@@ -74,6 +74,7 @@ pub(crate) fn null_base_error_by_name(
     let name = context.vm.frame().code_block().ic_names[ic_index].to_std_string_escaped();
     null_base_error(value, access, &name)
 }
+use std::cell::{Cell, UnsafeCell};
 use std::ops::ControlFlow;
 use thin_vec::ThinVec;
 
@@ -201,9 +202,7 @@ impl BytecodeEmitter {
 
     /// Convert the [`BytecodeEmitter`] into a [`Bytecode`] instance.
     pub(crate) fn into_bytecode(self) -> Bytecode {
-        Bytecode {
-            bytes: self.bytes.into_boxed_slice(),
-        }
+        Bytecode::pack(&self.bytes)
     }
 
     /// Get the location of the next opcode in the bytecode.
@@ -237,10 +236,115 @@ impl BytecodeEmitter {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-/// The bytecode representation of a codeblock.
+/// A codeblock's bytecode, kept packed (u32 operands as varints) until it first runs,
+/// which most functions of a bundle never do; it is then expanded once to execute.
 pub(crate) struct Bytecode {
-    pub(crate) bytes: Box<[u8]>,
+    bytes: UnsafeCell<Box<[u8]>>,
+    packed: Cell<Box<[u8]>>,
+    len: u32,
+}
+
+impl Default for Bytecode {
+    fn default() -> Self {
+        Self {
+            bytes: UnsafeCell::default(),
+            packed: Cell::default(),
+            len: 0,
+        }
+    }
+}
+
+impl Clone for Bytecode {
+    fn clone(&self) -> Self {
+        let packed = self.packed.take();
+        let clone = Self {
+            // SAFETY: a shared read of the box; see `Self::expand` for the only write.
+            bytes: UnsafeCell::new(unsafe { (&*self.bytes.get()).clone() }),
+            packed: Cell::new(packed.clone()),
+            len: self.len,
+        };
+        self.packed.set(packed);
+        clone
+    }
+}
+
+impl std::fmt::Debug for Bytecode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bytecode")
+            .field("len", &self.len)
+            .field("packed", &self.is_packed())
+            .finish()
+    }
+}
+
+impl Bytecode {
+    fn pack(bytes: &[u8]) -> Self {
+        let mut packed = Vec::with_capacity(bytes.len() / 2);
+        let mut pc = 0;
+        while pc < bytes.len() {
+            packed.push(bytes[pc]);
+            pc = Self::pack_operands(Opcode::decode(bytes[pc]), bytes, pc + 1, &mut packed);
+        }
+        Self {
+            bytes: UnsafeCell::default(),
+            packed: Cell::new(packed.into_boxed_slice()),
+            len: bytes.len() as u32,
+        }
+    }
+
+    /// Whether [`Self::executable`] is still empty because the bytecode has not been expanded.
+    /// An empty code block never is: there is nothing to pack.
+    #[inline]
+    pub(crate) fn is_packed(&self) -> bool {
+        // SAFETY: a shared read of the box; see `Self::expand` for the only write.
+        self.len != 0 && unsafe { (&*self.bytes.get()).is_empty() }
+    }
+
+    /// The executable bytecode, expanding the packed form the first time it is asked for.
+    /// Everything but the dispatch loop reads it through here.
+    #[inline]
+    pub(crate) fn bytes(&self) -> &[u8] {
+        if self.is_packed() {
+            self.expand();
+        }
+        // SAFETY: expanded above, and `Self::expand` never writes the box again.
+        unsafe { &*self.bytes.get() }
+    }
+
+    /// Safety: empty while [`Self::is_packed`], and the slice must not outlive a call to
+    /// [`Self::expand`]. The dispatch loop reads it per instruction, its bounds check included.
+    #[inline(always)]
+    pub(crate) unsafe fn executable(&self) -> &[u8] {
+        // SAFETY: guaranteed by the caller.
+        unsafe { &*self.bytes.get() }
+    }
+
+    /// Expands the packed bytecode into [`Self::executable`]; a no-op once that has happened.
+    /// The box is only ever written here, while no reference into its (empty) contents is live.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn expand(&self) {
+        if !self.is_packed() {
+            return;
+        }
+        let packed = self.packed.take();
+        let mut bytes = Vec::with_capacity(self.len as usize);
+        let mut pos = 0;
+        while pos < packed.len() {
+            bytes.push(packed[pos]);
+            pos = Self::unpack_operands(Opcode::decode(packed[pos]), &packed, pos + 1, &mut bytes);
+        }
+        debug_assert_eq!(bytes.len(), self.len as usize);
+        // SAFETY: `bytes()` expands before handing out a reference and the dispatch loop drops
+        // its slice before expanding, so nothing borrows the empty box being replaced.
+        unsafe { *self.bytes.get() = bytes.into_boxed_slice() };
+    }
+
+    /// Length of the executable bytecode, without expanding it.
+    /// The code block printer uses this.
+    pub(crate) const fn len(&self) -> usize {
+        self.len as usize
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -550,8 +654,22 @@ macro_rules! generate_opcodes {
 
         impl Bytecode {
             #[allow(unused_parens)]
+            fn pack_operands(opcode: Opcode, bytes: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+                match opcode {
+                    $( Opcode::$Variant => <($($($FieldType),*)?)>::pack(bytes, pos, out), )*
+                }
+            }
+
+            #[allow(unused_parens)]
+            fn unpack_operands(opcode: Opcode, packed: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+                match opcode {
+                    $( Opcode::$Variant => <($($($FieldType),*)?)>::unpack(packed, pos, out), )*
+                }
+            }
+
+            #[allow(unused_parens)]
             pub(crate) fn next_instruction(&self, pc: usize) -> (Instruction, usize) {
-                let bytes = &self.bytes;
+                let bytes = self.bytes();
                 let opcode = Opcode::decode(bytes[pc]);
 
                 match opcode {
@@ -602,11 +720,11 @@ impl Iterator for InstructionIterator<'_> {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let start_pc = self.pc;
-        if self.pc >= self.bytes.bytes.len() {
+        let bytes = self.bytes.bytes();
+        if self.pc >= bytes.len() {
             return None;
         }
 
-        let bytes = &self.bytes.bytes;
         let opcode = Opcode::decode(bytes[self.pc]);
         // Get instruction and determine how much to advance pc
         let (instruction, read_size) = self.bytes.next_instruction(self.pc);

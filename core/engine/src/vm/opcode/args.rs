@@ -72,6 +72,46 @@ pub(crate) trait Argument: Sized + std::fmt::Debug {
     /// Decode the argument from a byte slice
     /// Returns the decoded argument and the new position after reading
     fn decode(bytes: &[u8], pos: usize) -> (Self, usize);
+
+    /// Re-encode the argument at `bytes[pos..]` into the packed at-rest layout of
+    /// [`super::Bytecode`] (u32-sized operands as varints); returns the position after it.
+    fn pack(bytes: &[u8], pos: usize, out: &mut Vec<u8>) -> usize;
+
+    /// The inverse of [`Argument::pack`], writing the executable layout back out;
+    /// returns the position in `packed` after the argument.
+    fn unpack(packed: &[u8], pos: usize, out: &mut Vec<u8>) -> usize;
+}
+
+#[inline(always)]
+fn pack_varint(bytes: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+    let (mut value, pos) = read::<u32>(bytes, pos);
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+    pos
+}
+
+#[inline(always)]
+fn unpack_varint(packed: &[u8], mut pos: usize, out: &mut Vec<u8>) -> usize {
+    let (mut value, mut shift) = (0u32, 0);
+    loop {
+        let byte = packed[pos];
+        pos += 1;
+        value |= u32::from(byte & 0x7f) << shift;
+        if byte < 0x80 {
+            write_u32(out, value);
+            return pos;
+        }
+        shift += 7;
+    }
+}
+
+#[inline(always)]
+fn copy_fixed(bytes: &[u8], pos: usize, len: usize, out: &mut Vec<u8>) -> usize {
+    out.extend_from_slice(&bytes[pos..pos + len]);
+    pos + len
 }
 
 #[inline(always)]
@@ -136,6 +176,25 @@ impl<T: Argument> Argument for ThinVec<T> {
         }
         (result, pos)
     }
+
+    fn pack(bytes: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+        let (len, _) = read::<u32>(bytes, pos);
+        let mut pos = pack_varint(bytes, pos, out);
+        for _ in 0..len {
+            pos = T::pack(bytes, pos, out);
+        }
+        pos
+    }
+
+    fn unpack(packed: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+        let start = out.len();
+        let mut pos = unpack_varint(packed, pos, out);
+        let (len, _) = read::<u32>(out, start);
+        for _ in 0..len {
+            pos = T::unpack(packed, pos, out);
+        }
+        pos
+    }
 }
 
 impl Argument for () {
@@ -143,6 +202,14 @@ impl Argument for () {
 
     fn decode(_: &[u8], pos: usize) -> (Self, usize) {
         ((), pos)
+    }
+
+    fn pack(_: &[u8], pos: usize, _: &mut Vec<u8>) -> usize {
+        pos
+    }
+
+    fn unpack(_: &[u8], pos: usize, _: &mut Vec<u8>) -> usize {
+        pos
     }
 }
 
@@ -155,6 +222,14 @@ impl Argument for IndexOperand {
         let (arg1, pos) = read::<u32>(bytes, pos);
         (arg1.into(), pos)
     }
+
+    fn pack(bytes: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+        pack_varint(bytes, pos, out)
+    }
+
+    fn unpack(packed: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+        unpack_varint(packed, pos, out)
+    }
 }
 
 impl Argument for RegisterOperand {
@@ -165,6 +240,14 @@ impl Argument for RegisterOperand {
     fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
         let (arg1, pos) = read::<u32>(bytes, pos);
         (Self::new(arg1), pos)
+    }
+
+    fn pack(bytes: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+        pack_varint(bytes, pos, out)
+    }
+
+    fn unpack(packed: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+        unpack_varint(packed, pos, out)
     }
 }
 
@@ -178,6 +261,14 @@ impl Argument for Address {
     fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
         let (value, pos) = read::<u32>(bytes, pos);
         (Self::new(value), pos)
+    }
+
+    fn pack(bytes: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+        pack_varint(bytes, pos, out)
+    }
+
+    fn unpack(packed: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+        unpack_varint(packed, pos, out)
     }
 }
 
@@ -194,6 +285,16 @@ macro_rules! impl_argument_for_tuple {
             fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
                 $( let ($i, pos) = $t::decode(bytes, pos); )*
                 (($($i,)*), pos)
+            }
+
+            fn pack(bytes: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+                $( let pos = $t::pack(bytes, pos, out); )*
+                pos
+            }
+
+            fn unpack(packed: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+                $( let pos = $t::unpack(packed, pos, out); )*
+                pos
             }
         }
     };
@@ -220,12 +321,41 @@ macro_rules! impl_argument_for_int {
             fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
                 read::<$t>(bytes, pos)
             }
+
+            fn pack(bytes: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+                copy_fixed(bytes, pos, size_of::<$t>(), out)
+            }
+
+            fn unpack(packed: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+                copy_fixed(packed, pos, size_of::<$t>(), out)
+            }
         }
         )*
     };
 }
 
-impl_argument_for_int!(u8 u16 u32 u64 i8 i16 i32 f32 f64);
+impl_argument_for_int!(u8 u16 u64 i8 i16 i32 f32 f64);
+
+impl Argument for u32 {
+    #[inline(always)]
+    fn encode(self, bytes: &mut Vec<u8>) {
+        write_u32(bytes, self);
+    }
+
+    #[inline(always)]
+    fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
+        read::<u32>(bytes, pos)
+    }
+
+    fn pack(bytes: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+        pack_varint(bytes, pos, out)
+    }
+
+    fn unpack(packed: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
+        unpack_varint(packed, pos, out)
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -239,6 +369,7 @@ mod tests {
         let (decoded, pos) = T::decode(&bytes, 0);
         assert_eq!(decoded, *value);
         assert_eq!(pos, bytes.len());
+        pack_round_trip::<T>(&bytes);
     }
 
     fn round_trip_eq<T: Argument + Clone, F: Fn(&T, &T) -> bool>(value: &T, eq: F) {
@@ -247,6 +378,15 @@ mod tests {
         let (decoded, pos) = T::decode(&bytes, 0);
         assert!(eq(&decoded, value));
         assert_eq!(pos, bytes.len());
+        pack_round_trip::<T>(&bytes);
+    }
+
+    fn pack_round_trip<T: Argument>(bytes: &[u8]) {
+        let mut packed = Vec::new();
+        assert_eq!(T::pack(bytes, 0, &mut packed), bytes.len());
+        let mut unpacked = Vec::new();
+        assert_eq!(T::unpack(&packed, 0, &mut unpacked), packed.len());
+        assert_eq!(unpacked, bytes);
     }
 
     #[test]

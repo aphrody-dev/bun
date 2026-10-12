@@ -998,8 +998,16 @@ impl Context {
         loop {
             let frame = self.vm.frame();
             let pc = frame.pc as usize;
-            let bytes: &[u8] = &frame.code_block.bytecode.bytes;
+            // SAFETY: only `expand` writes the box, and only while it is empty: this slice is
+            // dead before the cold path below calls it, and a non-empty box is never rewritten.
+            let bytes: &[u8] = unsafe { frame.code_block.bytecode.executable() };
             let Some(&byte) = bytes.get(pc) else {
+                // A still-packed code block reads as empty, so its first instruction
+                // lands here; expanding on this cold path keeps running code free of the check.
+                if frame.code_block.bytecode.is_packed() {
+                    frame.code_block.bytecode.expand();
+                    continue;
+                }
                 break;
             };
             let bytes: *const [u8] = bytes;
@@ -1031,8 +1039,16 @@ impl Context {
             // it with the handler. This walk is hot.
             let frame = self.vm.frame();
             let pc = frame.pc as usize;
-            let bytes: &[u8] = &frame.code_block.bytecode.bytes;
+            // SAFETY: only `expand` writes the box, and only while it is empty: this slice is
+            // dead before the cold path below calls it, and a non-empty box is never rewritten.
+            let bytes: &[u8] = unsafe { frame.code_block.bytecode.executable() };
             let Some(&byte) = bytes.get(pc) else {
+                // A still-packed code block reads as empty, so its first instruction
+                // lands here; expanding on this cold path keeps running code free of the check.
+                if frame.code_block.bytecode.is_packed() {
+                    frame.code_block.bytecode.expand();
+                    continue;
+                }
                 break;
             };
             let bytes: *const [u8] = bytes;
