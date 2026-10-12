@@ -26,7 +26,7 @@ fn set_by_name(
         null_base_error_by_name(value_object, Access::Write, usize::from(index), context)
     })?;
 
-    let ic = &context.vm.frame().code_block().ic[usize::from(index)];
+    let ic = &context.vm.frame().code_block().ic()[usize::from(index)];
 
     let object_borrowed = object.borrow();
     if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
@@ -77,7 +77,7 @@ fn set_by_name(
     // Cache the property.
     let slot = *context.slot();
     if succeeded && slot.is_cacheable() {
-        let ic = &context.vm.frame().code_block.ic[usize::from(index)];
+        let ic = &context.vm.frame().code_block.ic()[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape();
         ic.set(shape, slot);

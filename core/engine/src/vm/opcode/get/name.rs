@@ -57,7 +57,7 @@ impl GetNameGlobal {
         if binding_locator.is_global() {
             let object = context.global_object();
 
-            let ic = &context.vm.frame().code_block().ic[usize::from(ic_index)];
+            let ic = &context.vm.frame().code_block().ic()[usize::from(ic_index)];
 
             let object_borrowed = object.borrow();
             if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
@@ -96,7 +96,7 @@ impl GetNameGlobal {
             // Cache the property.
             let slot = *context.slot();
             if slot.is_cacheable() {
-                let ic = &context.vm.frame().code_block.ic[usize::from(ic_index)];
+                let ic = &context.vm.frame().code_block.ic()[usize::from(ic_index)];
                 let object_borrowed = object.borrow();
                 let shape = object_borrowed.shape();
                 ic.set(shape, slot);

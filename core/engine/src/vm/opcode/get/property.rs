@@ -42,7 +42,7 @@ fn get_by_name<const LENGTH: bool>(
         .base_class(context)
         .map_err(|_| null_base_error_by_name(object, Access::Read, usize::from(index), context))?;
 
-    let ic = &context.vm.frame().code_block().ic[usize::from(index)];
+    let ic = &context.vm.frame().code_block().ic()[usize::from(index)];
     let object_borrowed = object.borrow();
     if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
         let mut result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
@@ -75,7 +75,7 @@ fn get_by_name<const LENGTH: bool>(
     // Cache the property.
     let slot = *context.slot();
     if slot.is_cacheable() {
-        let ic = &context.vm.frame().code_block.ic[usize::from(index)];
+        let ic = &context.vm.frame().code_block.ic()[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape();
         ic.set(shape, slot);

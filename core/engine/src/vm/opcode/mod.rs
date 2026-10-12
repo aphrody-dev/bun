@@ -71,9 +71,7 @@ pub(crate) fn null_base_error_by_name(
     ic_index: usize,
     context: &Context,
 ) -> crate::JsError {
-    let name = context.vm.frame().code_block().ic[ic_index]
-        .name
-        .to_std_string_escaped();
+    let name = context.vm.frame().code_block().ic_names[ic_index].to_std_string_escaped();
     null_base_error(value, access, &name)
 }
 use std::ops::ControlFlow;

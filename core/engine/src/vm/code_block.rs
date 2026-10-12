@@ -14,7 +14,7 @@ use bitflags::bitflags;
 use boa_ast::scope::{BindingLocator, Scope};
 use boa_gc::{Finalize, Gc, Trace, empty_trace};
 use itertools::Itertools;
-use std::{cell::Cell, fmt::Display, fmt::Write as _};
+use std::{cell::Cell, cell::OnceCell, fmt::Display, fmt::Write as _};
 use thin_vec::ThinVec;
 
 use super::{
@@ -156,8 +156,12 @@ pub struct CodeBlock {
     #[unsafe_ignore_trace]
     pub(crate) handlers: ThinVec<Handler>,
 
-    /// inline caching
-    pub(crate) ic: Box<[InlineCache]>,
+    /// Property names of the inline caches, by IC index.
+    pub(crate) ic_names: Box<[JsString]>,
+
+    // The caches themselves are built on first use; most of a bundle's
+    // functions never run, and a site's cache is 9x the size of its name.
+    pub(crate) ic: OnceCell<Box<[InlineCache]>>,
 
     /// Bytecode to source code mapping.
     pub(crate) source_info: SourceInfo,
@@ -176,6 +180,13 @@ pub struct CodeBlock {
 
 /// ---- `CodeBlock` public API ----
 impl CodeBlock {
+    /// The inline caches, built from [`Self::ic_names`] the first time any is used.
+    #[inline]
+    pub(crate) fn ic(&self) -> &[InlineCache] {
+        self.ic
+            .get_or_init(|| self.ic_names.iter().cloned().map(InlineCache::new).collect())
+    }
+
     /// Creates a new `CodeBlock`.
     #[must_use]
     pub fn new(name: JsString, length: u32, strict: bool) -> Self {
@@ -192,7 +203,8 @@ impl CodeBlock {
             mapped_arguments_binding_indices: ThinVec::new(),
             parameter_length: 0,
             handlers: ThinVec::default(),
-            ic: Box::default(),
+            ic_names: Box::default(),
+            ic: OnceCell::new(),
             source_info: SourceInfo::new(
                 SourceMap::new(Box::default(), SourcePath::None),
                 name,
@@ -653,7 +665,7 @@ impl CodeBlock {
                 value,
                 ic_index,
             } => {
-                let ic = &self.ic[u32::from(*ic_index) as usize];
+                let ic = &self.ic_names[u32::from(*ic_index) as usize].display_escaped();
                 format!("dst:{dst}, value:{value}, ic:{ic}")
             }
             Instruction::GetPropertyByNameWithThis {
@@ -662,7 +674,7 @@ impl CodeBlock {
                 value,
                 ic_index,
             } => {
-                let ic = &self.ic[u32::from(*ic_index) as usize];
+                let ic = &self.ic_names[u32::from(*ic_index) as usize].display_escaped();
                 format!("dst:{dst}, receiver:{receiver}, value:{value}, ic:{ic}")
             }
             Instruction::SetPropertyByName {
@@ -670,7 +682,7 @@ impl CodeBlock {
                 object,
                 ic_index,
             } => {
-                let ic = &self.ic[u32::from(*ic_index) as usize];
+                let ic = &self.ic_names[u32::from(*ic_index) as usize].display_escaped();
                 format!("object:{object}, value:{value}, ic:{ic}")
             }
             Instruction::SetPropertyByNameWithThis {
@@ -679,7 +691,7 @@ impl CodeBlock {
                 object,
                 ic_index,
             } => {
-                let ic = &self.ic[u32::from(*ic_index) as usize];
+                let ic = &self.ic_names[u32::from(*ic_index) as usize].display_escaped();
                 format!("object:{object}, receiver:{receiver}, value:{value}, ic:{ic}")
             }
             Instruction::GetPropertyByValue {

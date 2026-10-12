@@ -45,7 +45,7 @@ use crate::{
     js_string,
     vm::{
         CallFrame, CodeBlock, CodeBlockFlags, Constant, GeneratorResumeKind, GlobalFunctionBinding,
-        Handler, InlineCache,
+        Handler,
         opcode::{Address, BindingOpcode, BytecodeEmitter, RegisterOperand},
         source_info::{SourceInfo, SourceMap, SourceMapBuilder, SourcePath},
     },
@@ -570,7 +570,7 @@ pub struct ByteCompiler<'ctx> {
     pub(crate) current_open_environments_count: u32,
     code_block_flags: CodeBlockFlags,
     handlers: ThinVec<Handler>,
-    pub(crate) ic: Vec<InlineCache>,
+    pub(crate) ic: Vec<JsString>,
     literals_map: FxHashMap<Literal, u32>,
     names_map: FxHashMap<Sym, u32>,
     bindings_map: FxHashMap<BindingLocator, u32>,
@@ -951,7 +951,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                 BindingAccessOpcode::GetName => {
                     let ic_index = self.ic.len() as u32;
                     let name = self.bindings[*index as usize].name().clone();
-                    self.ic.push(InlineCache::new(name));
+                    self.ic.push(name);
                     self.bytecode.emit_get_name_global(
                         value.variable(),
                         (*index).into(),
@@ -1053,7 +1053,7 @@ impl<'ctx> ByteCompiler<'ctx> {
         let Constant::String(ref name) = self.constants[name_index as usize].clone() else {
             unreachable!("there should be a string at index")
         };
-        self.ic.push(InlineCache::new(name.clone()));
+        self.ic.push(name.clone());
 
         if let Some(receiver) = receiver {
             self.bytecode.emit_get_property_by_name_with_this(
@@ -1090,7 +1090,7 @@ impl<'ctx> ByteCompiler<'ctx> {
         let Constant::String(ref name) = self.constants[name_index as usize].clone() else {
             unreachable!("there should be a string at index")
         };
-        self.ic.push(InlineCache::new(name.clone()));
+        self.ic.push(name.clone());
 
         if let Some(receiver) = receiver {
             self.bytecode.emit_set_property_by_name_with_this(
@@ -2822,7 +2822,8 @@ impl<'ctx> ByteCompiler<'ctx> {
             bindings: self.bindings.into_boxed_slice(),
             handlers: self.handlers,
             flags: Cell::new(self.code_block_flags),
-            ic: self.ic.into_boxed_slice(),
+            ic_names: self.ic.into_boxed_slice(),
+            ic: std::cell::OnceCell::new(),
             source_info: SourceInfo::new(
                 SourceMap::new(source_map_entries, self.source_path),
                 self.function_name,
