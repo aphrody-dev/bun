@@ -62,23 +62,172 @@ struct Inner {
 }
 
 /// Bytecode to source code mapping.
+///
+/// Entries are delta/varint-encoded (about 3-4 bytes each instead of 12),
+/// with a checkpoint every [`CHECKPOINT_EVERY`] entries so a lookup decodes few.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct SourceMap {
-    entries: Box<[Entry]>,
+    data: Box<[u8]>,
+    checkpoints: Box<[Checkpoint]>,
     path: SourcePath,
+}
+
+const CHECKPOINT_EVERY: usize = 32;
+
+/// Decoder state at the start of an entry: its pc, byte offset, and the last
+/// line/column seen before it (the bases its deltas are relative to).
+#[derive(Debug, Clone, Copy)]
+struct Checkpoint {
+    pc: u32,
+    offset: u32,
+    line: u32,
+    column: u32,
+}
+
+fn write_varint(out: &mut Vec<u8>, mut v: u32) {
+    while v >= 0x80 {
+        out.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+fn read_varint(data: &[u8], pos: &mut usize) -> u32 {
+    let mut v = 0u32;
+    let mut shift = 0;
+    loop {
+        let b = data[*pos];
+        *pos += 1;
+        v |= u32::from(b & 0x7f) << shift;
+        if b < 0x80 {
+            return v;
+        }
+        shift += 7;
+    }
+}
+
+const fn zigzag(v: i64) -> u32 {
+    ((v << 1) ^ (v >> 63)) as u32
+}
+
+const fn unzigzag(v: u32) -> i64 {
+    (v >> 1) as i64 ^ -((v & 1) as i64)
+}
+
+/// Streams the entries of a [`SourceMap`] from a checkpoint.
+struct Decoder<'a> {
+    data: &'a [u8],
+    pos: usize,
+    pc: u32,
+    line: u32,
+    column: u32,
+}
+
+impl Decoder<'_> {
+    fn next(&mut self) -> Option<Entry> {
+        if self.pos >= self.data.len() {
+            return None;
+        }
+        self.pc += read_varint(self.data, &mut self.pos);
+        let line = read_varint(self.data, &mut self.pos);
+        let position = if line == 0 {
+            None
+        } else {
+            self.line = (i64::from(self.line) + unzigzag(line - 1)) as u32;
+            let column = read_varint(self.data, &mut self.pos);
+            self.column = (i64::from(self.column) + unzigzag(column)) as u32;
+            Some(Position::new(self.line, self.column))
+        };
+        Some(Entry { pc: self.pc, position })
+    }
 }
 
 impl SourceMap {
     pub(crate) fn new(entries: Box<[Entry]>, path: SourcePath) -> Self {
-        Self { entries, path }
+        let mut data = Vec::new();
+        let mut checkpoints = Vec::with_capacity(entries.len().div_ceil(CHECKPOINT_EVERY));
+        let (mut pc, mut line, mut column) = (0u32, 0u32, 0u32);
+        for (i, entry) in entries.iter().enumerate() {
+            if i % CHECKPOINT_EVERY == 0 {
+                checkpoints.push(Checkpoint {
+                    pc: entry.pc,
+                    offset: data.len() as u32,
+                    line,
+                    column,
+                });
+                // The checkpoint already holds the pc, so the delta restarts from it.
+                pc = entry.pc;
+            }
+            write_varint(&mut data, entry.pc - pc);
+            pc = entry.pc;
+            match entry.position {
+                None => write_varint(&mut data, 0),
+                Some(p) => {
+                    write_varint(&mut data, zigzag(i64::from(p.line_number()) - i64::from(line)) + 1);
+                    write_varint(&mut data, zigzag(i64::from(p.column_number()) - i64::from(column)));
+                    line = p.line_number();
+                    column = p.column_number();
+                }
+            }
+        }
+        Self {
+            data: data.into_boxed_slice(),
+            checkpoints: checkpoints.into_boxed_slice(),
+            path,
+        }
     }
 
-    pub(crate) fn entries(&self) -> &[Entry] {
-        &self.entries
+    fn decoder(&self, checkpoint: &Checkpoint) -> Decoder<'_> {
+        Decoder {
+            data: &self.data,
+            pos: checkpoint.offset as usize,
+            pc: checkpoint.pc,
+            line: checkpoint.line,
+            column: checkpoint.column,
+        }
+    }
+
+    /// Every entry, decoded (only the code block printer wants them all).
+    pub(crate) fn entries(&self) -> Vec<Entry> {
+        let Some(first) = self.checkpoints.first() else {
+            return Vec::new();
+        };
+        let mut decoder = self.decoder(first);
+        let mut out = Vec::new();
+        let mut i = 0;
+        while let Some(mut entry) = decoder.next() {
+            if i % CHECKPOINT_EVERY == 0 {
+                entry.pc = self.checkpoints[i / CHECKPOINT_EVERY].pc;
+                decoder.pc = entry.pc;
+            }
+            out.push(entry);
+            i += 1;
+        }
+        out
     }
 
     pub(crate) fn find(&self, pc: u32) -> Option<Position> {
-        find_entry(self.entries(), pc)
+        let first = self.checkpoints.first()?;
+        if pc < first.pc {
+            return None;
+        }
+        let index = self.checkpoints.partition_point(|c| c.pc <= pc) - 1;
+        let checkpoint = &self.checkpoints[index];
+        let end = self
+            .checkpoints
+            .get(index + 1)
+            .map_or(self.data.len(), |c| c.offset as usize);
+        let mut decoder = self.decoder(checkpoint);
+        decoder.data = &self.data[..end];
+        let mut current = decoder.next()?;
+        while let Some(next) = decoder.next() {
+            if pc < next.pc {
+                return current.position;
+            }
+            current = next;
+        }
+        // The last entry of a block runs up to the next checkpoint, which is past `pc`.
+        current.position
     }
 
     pub(crate) fn path(&self) -> &SourcePath {
@@ -86,6 +235,7 @@ impl SourceMap {
     }
 }
 
+#[cfg(test)]
 fn find_entry(entries: &[Entry], pc: u32) -> Option<Position> {
     let first = entries.first()?;
 
@@ -131,6 +281,7 @@ pub(crate) struct Entry {
     pub(crate) position: Option<Position>,
 }
 
+#[cfg(test)]
 impl Entry {
     pub(crate) const fn pc(&self) -> u32 {
         self.pc

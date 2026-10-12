@@ -171,3 +171,39 @@ fn find_with_single_entry() {
     assert_eq!(find_entry(entries, 33), None);
     assert_eq!(find_entry(entries, u32::MAX), None);
 }
+
+#[test]
+fn compact_map_matches_find_entry() {
+    use super::{SourceMap, SourcePath};
+    let mut seed = 0x2545_f491_u32;
+    let mut rand = move |n: u32| {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed % n
+    };
+    for len in [0usize, 1, 2, 31, 32, 33, 64, 65, 200, 1000] {
+        let mut pc = rand(4);
+        let (mut line, mut col) = (1 + rand(50), 1 + rand(100_000));
+        let entries: Vec<Entry> = (0..len)
+            .map(|_| {
+                pc += 1 + rand(40);
+                let position = if rand(7) == 0 {
+                    None
+                } else {
+                    line = (line as i64 + i64::from(rand(9)) - 4).max(1) as u32;
+                    col = (col as i64 + i64::from(rand(4001)) - 2000).max(1) as u32;
+                    Some((line, col).into())
+                };
+                Entry { pc, position }
+            })
+            .collect();
+        let map = SourceMap::new(entries.clone().into_boxed_slice(), SourcePath::None);
+        assert_eq!(map.entries(), entries);
+        let max = entries.last().map_or(10, |e| e.pc + 10);
+        for probe in 0..max {
+            assert_eq!(map.find(probe), find_entry(&entries, probe), "len {len} pc {probe}");
+        }
+        assert_eq!(map.find(u32::MAX), find_entry(&entries, u32::MAX));
+    }
+}
