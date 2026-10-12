@@ -670,6 +670,12 @@ impl PropertyMap {
         out_slot.attributes =
             (out_slot.attributes & SlotAttributes::INLINE_CACHE_BITS) | attributes;
 
+        // Start at two slots, not Vec's four; most objects built a property at a
+        // time (literals, `this.x = ...`) have one or two, and the rest double from here.
+        if self.storage.capacity() == 0 {
+            self.storage.reserve_exact(2);
+        }
+
         if attributes.is_accessor_descriptor() {
             self.storage.push(
                 property
