@@ -140,6 +140,25 @@ impl Proxy {
         }
     }
 
+    /// The proxy's (target, handler), or `None` once revoked: lets an embedder
+    /// recognise proxies it minted by handler identity without running a trap.
+    #[must_use]
+    pub fn target_and_handler(&self) -> Option<(JsObject, JsObject)> {
+        self.data.clone()
+    }
+
+    /// `ProxyCreate` for an embedder holding object arguments: no `Proxy`
+    /// constructor call, so no VM frame and no stack-limit failure.
+    #[must_use]
+    pub fn from_target_and_handler(target: JsObject, handler: JsObject, context: &mut Context) -> JsObject {
+        JsObject::from_proto_and_data_with_shared_shape(
+            context.root_shape(),
+            context.intrinsics().constructors().object().prototype(),
+            Self::new(target, handler),
+        )
+        .upcast()
+    }
+
     /// This is an internal method only built for usage in the proxy internal methods.
     ///
     /// It returns the (target, handler) of the proxy.
