@@ -75,7 +75,14 @@ where
                 HoistableDeclaration::new(self.allow_yield, self.allow_await, false)
                     .parse(cursor, interner)
             }
-            TokenKind::Keyword((Keyword::Const | Keyword::Let | Keyword::Using, _)) => {
+            TokenKind::Keyword((Keyword::Const | Keyword::Let, _)) => {
+                LexicalDeclaration::new(true, self.allow_yield, self.allow_await, false)
+                    .parse(cursor, interner)
+                    .map(Into::into)
+            }
+            TokenKind::Keyword((Keyword::Using, false))
+                if super::using_starts_declaration(cursor, interner)? =>
+            {
                 LexicalDeclaration::new(true, self.allow_yield, self.allow_await, false)
                     .parse(cursor, interner)
                     .map(Into::into)

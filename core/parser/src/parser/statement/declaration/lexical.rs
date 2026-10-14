@@ -185,7 +185,7 @@ pub(crate) fn allowed_token_after_let(token: Option<&Token>) -> bool {
         Some(
             TokenKind::IdentifierName(_)
                 | TokenKind::Keyword((
-                    Keyword::Await | Keyword::Yield | Keyword::Let | Keyword::Async | Keyword::Of,
+                    Keyword::Await | Keyword::Yield | Keyword::Let | Keyword::Async | Keyword::Of | Keyword::Using,
                     _
                 ))
                 | TokenKind::Punctuator(Punctuator::OpenBlock | Punctuator::OpenBracket),

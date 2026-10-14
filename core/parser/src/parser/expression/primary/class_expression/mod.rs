@@ -57,7 +57,14 @@ where
         let token = cursor.peek(0, interner).or_abrupt()?;
         let name = match token.kind() {
             TokenKind::IdentifierName(_)
-            | TokenKind::Keyword((Keyword::Yield | Keyword::Await, _)) => {
+            | TokenKind::Keyword((Keyword::Yield | Keyword::Await | Keyword::Using, _)) => {
+                BindingIdentifier::new(self.allow_yield, self.allow_await)
+                    .parse(cursor, interner)?
+                    .into()
+            }
+            // Same contextual-keyword rule as class declarations (`class of extends X`);
+            // BindingIdentifier still rejects the reserved words.
+            TokenKind::Keyword((k, _)) if !k.to_sym().is_reserved_identifier() => {
                 BindingIdentifier::new(self.allow_yield, self.allow_await)
                     .parse(cursor, interner)?
                     .into()

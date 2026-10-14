@@ -198,7 +198,7 @@ where
                 Ok(ast::Statement::Empty)
             }
             TokenKind::IdentifierName(_)
-            | TokenKind::Keyword((Keyword::Await | Keyword::Yield, _)) => {
+            | TokenKind::Keyword((Keyword::Await | Keyword::Yield | Keyword::Using, _)) => {
                 // Labelled Statement check
                 cursor.set_goal(InputElement::Div);
                 let tok = cursor.peek(1, interner)?;
@@ -227,6 +227,32 @@ where
             }
         }
     }
+}
+
+/// `using` opens a declaration only when a binding identifier follows on the
+/// same line. Anywhere else (`using(`, `using =`, `using.x`, `using[0]`, a label) it names a variable.
+pub(in crate::parser) fn using_starts_declaration<R: ReadChar>(
+    cursor: &mut Cursor<R>,
+    interner: &mut Interner,
+) -> ParseResult<bool> {
+    // A line terminator before `using` (a function body's first line) is token 0 here, so
+    // step over it as the arrow-function lookahead in assignment/mod.rs does.
+    let skip_n = if cursor.peek_is_line_terminator(0, interner).or_abrupt()? {
+        2
+    } else {
+        1
+    };
+    let Some(next) = cursor.peek_no_skip_line_term(skip_n, interner)? else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        next.kind(),
+        TokenKind::IdentifierName(_)
+            | TokenKind::Keyword((
+                Keyword::Yield | Keyword::Async | Keyword::Of | Keyword::Using,
+                _
+            ))
+    ))
 }
 
 /// Reads a list of statements.
@@ -424,12 +450,18 @@ where
         let tok = cursor.peek(0, interner).or_abrupt()?;
 
         match tok.kind().clone() {
-            TokenKind::Keyword((
-                Keyword::Function | Keyword::Class | Keyword::Const | Keyword::Using,
-                _,
-            )) => Declaration::new(self.allow_yield, self.allow_await)
-                .parse(cursor, interner)
-                .map(ast::StatementListItem::from),
+            TokenKind::Keyword((Keyword::Function | Keyword::Class | Keyword::Const, _)) => {
+                Declaration::new(self.allow_yield, self.allow_await)
+                    .parse(cursor, interner)
+                    .map(ast::StatementListItem::from)
+            }
+            TokenKind::Keyword((Keyword::Using, false))
+                if using_starts_declaration(cursor, interner)? =>
+            {
+                Declaration::new(self.allow_yield, self.allow_await)
+                    .parse(cursor, interner)
+                    .map(ast::StatementListItem::from)
+            }
             TokenKind::Keyword((Keyword::Let, false))
                 if allowed_token_after_let(cursor.peek(1, interner)?) =>
             {
