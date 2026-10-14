@@ -23,12 +23,19 @@ impl ByteCompiler<'_> {
         self.register_allocator.dealloc(called);
 
         if async_ {
+            // Await writes the accumulator, which can hold a `return` value
+            // carried out of a finally block while the loop's iterator closes.
+            let accumulator = self.register_allocator.alloc();
+            self.bytecode
+                .emit_set_register_from_accumulator(accumulator.variable());
             self.bytecode.emit_await(value.variable());
             let resume_kind = self.register_allocator.alloc();
             self.pop_into_register(&resume_kind);
             self.pop_into_register(&value);
             self.generator_next(&value, &resume_kind);
             self.register_allocator.dealloc(resume_kind);
+            self.bytecode.emit_set_accumulator(accumulator.variable());
+            self.register_allocator.dealloc(accumulator);
         }
 
         self.bytecode.emit_is_object(value.variable());

@@ -663,6 +663,9 @@ impl Vm {
 
         let catch_address = handler.handler();
         let environment_sp = frame.env_fp + handler.environment_count;
+        // Nothing above the registers is live at a catch; only half-built calls
+        // push there.
+        let registers_end = frame.rp as usize + frame.code_block().register_count as usize;
 
         // Go to handler location.
         frame.pc = u32::from(catch_address);
@@ -670,6 +673,7 @@ impl Vm {
         self.frame_mut()
             .environments
             .truncate(environment_sp as usize);
+        self.stack.stack.truncate(registers_end);
 
         true
     }
@@ -966,6 +970,10 @@ impl Context {
             let exit_early = self.vm.frame().exit_early();
 
             if self.vm.handle_exception_at(pc) {
+                // The callee frame popped above leaves its stack behind when a
+                // caller catches. Without this truncation every caught throw from a call
+                // leaks a frame's worth of slots.
+                self.vm.stack.truncate_to_frame(&frame);
                 return ControlFlow::Continue(());
             }
 

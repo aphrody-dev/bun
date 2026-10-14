@@ -101,6 +101,15 @@ impl JumpRecord {
         while let Some(action) = self.actions.pop() {
             match action {
                 JumpRecordAction::Transfer { index } => {
+                    // A catch inside the finally drops whatever sits above the
+                    // registers, so carry a return value in the accumulator through it.
+                    if self.kind == (JumpRecordKind::Return { return_value_on_stack: true }) {
+                        let value = compiler.register_allocator.alloc();
+                        compiler.pop_into_register(&value);
+                        compiler.bytecode.emit_set_accumulator(value.variable());
+                        compiler.register_allocator.dealloc(value);
+                        self.kind = JumpRecordKind::Return { return_value_on_stack: false };
+                    }
                     self.label = compiler.jump();
                     compiler.jump_info[index as usize].jumps.push(self);
 
