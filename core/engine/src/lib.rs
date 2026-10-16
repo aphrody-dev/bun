@@ -110,9 +110,12 @@ mod sys;
 mod ks_code_stats;
 pub use ks_code_stats::ks_code_stats;
 
+mod ks_code_store;
+pub use ks_code_store::{CodeStore, ks_set_code_store};
+
 mod spanned_source_text;
 use spanned_source_text::SourceText;
-pub use spanned_source_text::SpannedSourceText;
+pub use spanned_source_text::{SpannedSourceText, ks_swap_source_texts};
 
 #[cfg(test)]
 mod tests;

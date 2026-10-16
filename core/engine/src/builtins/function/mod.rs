@@ -881,8 +881,8 @@ impl BuiltInFunctionObject {
             .ok_or_else(|| JsNativeError::typ().with_message("not a function"))?;
 
         let code = function.codeblock();
-        if let Some(code_points) = code.source_info().text_spanned().to_code_points() {
-            return Ok(JsString::from(&*code_points).into());
+        if let Some(text) = code.source_info().text_spanned().map_code_points(|points| JsString::from(points)) {
+            return Ok(text.into());
         }
 
         Ok(js_string!(

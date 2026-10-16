@@ -1,37 +1,174 @@
-use std::rc::Rc;
+use std::{
+    cell::{Cell, RefCell},
+    rc::{Rc, Weak},
+};
 
 use boa_ast::LinearSpan;
 use boa_gc::{Finalize, Trace};
 
-struct Inner {
-    source_text: boa_ast::SourceText,
-    charged: i64,
+use crate::{ks_code_stats as stats, ks_code_store::CodeStore};
+
+// Kitesurf: resident until an idle point finds the script still alive and the embedder's
+// store takes the text; `toString` then reads back only the span it asks for.
+enum Repr {
+    Resident(boa_ast::SourceText),
+    Swapped {
+        store: Rc<dyn CodeStore>,
+        key: u64,
+        bytes: usize,
+        latin1: bool,
+    },
 }
+
+enum Swap {
+    Done,
+    Busy,
+    Refused,
+}
+
+struct Inner {
+    repr: RefCell<Repr>,
+    charged: Cell<i64>,
+}
+
+thread_local! {
+    // Kitesurf: texts that may be swapped at the next idle point, held weakly so a script
+    // that dies inside its own eval never reaches the store.
+    static PENDING: RefCell<Vec<Weak<Inner>>> = const { RefCell::new(Vec::new()) };
+}
+
 impl Inner {
-    fn new(mut source_text: boa_ast::SourceText) -> Self {
-        // Kept for the script's life, so drop the lexer's growth slack
+    fn new(mut source_text: boa_ast::SourceText, swappable: bool) -> Rc<Self> {
+        // Kitesurf: kept for the script's life, so drop the lexer's growth slack
         // and store Latin-1 when it fits (half of a bundle's retained source).
         source_text.compact();
-        let charged = crate::ks_code_stats::bytes(source_text.retained_bytes());
-        crate::ks_code_stats::update(|s| {
+        let retained = source_text.retained_bytes();
+        let charged = stats::bytes(retained);
+        stats::update(|s| {
             s.source_texts += 1;
             s.source_bytes += charged;
         });
-        Self {
-            source_text,
-            charged,
+        let inner = Rc::new(Self {
+            repr: RefCell::new(Repr::Resident(source_text)),
+            charged: Cell::new(charged),
+        });
+        let wanted = swappable
+            && crate::ks_code_store::current().is_some_and(|store| retained >= store.min_bytes());
+        if wanted {
+            let weak = Rc::downgrade(&inner);
+            let _ = PENDING.try_with(|p| p.borrow_mut().push(weak));
         }
+        inner
+    }
+
+    fn swap(&self, store: &Rc<dyn CodeStore>) -> Swap {
+        let Ok(mut repr) = self.repr.try_borrow_mut() else {
+            return Swap::Busy;
+        };
+        let Repr::Resident(text) = &*repr else {
+            return Swap::Refused;
+        };
+        let Some((form, latin1)) = text.stored_form() else {
+            return Swap::Refused;
+        };
+        let Some(key) = store.put(&form) else {
+            return Swap::Refused;
+        };
+        let bytes = form.len();
+        drop(form);
+        *repr = Repr::Swapped {
+            store: store.clone(),
+            key,
+            bytes,
+            latin1,
+        };
+        let charged = self.charged.replace(0);
+        stats::update(|s| {
+            s.source_texts -= 1;
+            s.source_bytes -= charged;
+            s.source_swapped_texts += 1;
+            s.source_swapped_bytes += stats::bytes(bytes);
+        });
+        Swap::Done
+    }
+
+    fn map_span<R>(&self, span: LinearSpan, f: impl FnOnce(&[u16]) -> R) -> Option<R> {
+        let repr = self.repr.try_borrow().ok()?;
+        let (store, key, bytes, latin1) = match &*repr {
+            Repr::Resident(text) => return Some(f(&text.get_code_points_from_span(span))),
+            Repr::Swapped {
+                store,
+                key,
+                bytes,
+                latin1,
+            } => (store, *key, *bytes, *latin1),
+        };
+        let unit = if latin1 { 1 } else { 2 };
+        let (start, end) = (span.start().pos() * unit, span.end().pos() * unit);
+        stats::update(|s| s.source_reads += 1);
+        let mut buf = Vec::new();
+        if start > end || end > bytes || !store.read(key, start, end - start, &mut buf) || buf.len() != end - start {
+            stats::update(|s| s.store_failures += 1);
+            return None;
+        }
+        let points: Vec<u16> = if latin1 {
+            buf.iter().map(|&b| u16::from(b)).collect()
+        } else {
+            buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+        };
+        Some(f(&points))
     }
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        let charged = self.charged;
-        crate::ks_code_stats::update(|s| {
-            s.source_texts -= 1;
-            s.source_bytes -= charged;
-        });
+        match self.repr.get_mut() {
+            Repr::Resident(_) => {
+                let charged = self.charged.get();
+                stats::update(|s| {
+                    s.source_texts -= 1;
+                    s.source_bytes -= charged;
+                });
+            }
+            Repr::Swapped {
+                store, key, bytes, ..
+            } => {
+                let bytes = stats::bytes(*bytes);
+                stats::update(|s| {
+                    s.source_swapped_texts -= 1;
+                    s.source_swapped_bytes -= bytes;
+                });
+                store.release(*key);
+            }
+        }
     }
+}
+
+/// Kitesurf: hands the installed code store every still-live source text registered since
+/// the last call. Safe at any point: a text being read is retried at the next call.
+pub fn ks_swap_source_texts() -> usize {
+    let Some(store) = crate::ks_code_store::current() else {
+        return 0;
+    };
+    let pending = PENDING
+        .try_with(|p| std::mem::take(&mut *p.borrow_mut()))
+        .unwrap_or_default();
+    let mut busy = Vec::new();
+    let mut swapped = 0;
+    for weak in pending {
+        let Some(inner) = weak.upgrade() else {
+            continue;
+        };
+        match inner.swap(&store) {
+            Swap::Done => swapped += 1,
+            Swap::Busy => busy.push(weak),
+            Swap::Refused => {}
+        }
+    }
+    if !busy.is_empty() {
+        let _ = PENDING.try_with(|p| p.borrow_mut().extend(busy));
+    }
+    swapped
 }
 
 #[derive(Default, Trace, Finalize, Clone)]
@@ -44,17 +181,21 @@ impl SourceText {
     #[must_use]
     pub(crate) fn new(source_text: boa_ast::SourceText) -> Self {
         Self {
-            source_text: Some(Rc::new(Inner::new(source_text))),
+            source_text: Some(Inner::new(source_text, true)),
+        }
+    }
+
+    /// Kitesurf: a text that lives no longer than the call making it (JSON.parse), which
+    /// must never cost a store write.
+    #[must_use]
+    pub(crate) fn new_transient(source_text: boa_ast::SourceText) -> Self {
+        Self {
+            source_text: Some(Inner::new(source_text, false)),
         }
     }
 
     fn new_empty() -> Self {
         Self { source_text: None }
-    }
-
-    #[inline]
-    fn inner(&self) -> Option<&boa_ast::SourceText> {
-        self.source_text.as_ref().map(|x| &x.source_text)
     }
 
     fn is_empty(&self) -> bool {
@@ -114,14 +255,11 @@ impl SpannedSourceText {
         span_is_empty || self.source_text.is_empty()
     }
 
-    /// Gets inner code points.
-    #[must_use]
-    pub fn to_code_points(&self) -> Option<std::borrow::Cow<'_, [u16]>> {
-        if let (Some(source_text), Some(span)) = (self.source_text.inner(), self.span) {
-            Some(source_text.get_code_points_from_span(span))
-        } else {
-            None
-        }
+    /// Kitesurf: runs `f` on the code points of the span, from memory or from the store
+    /// the text was swapped to. None without a span, or when the store cannot read them.
+    pub fn map_code_points<R>(&self, f: impl FnOnce(&[u16]) -> R) -> Option<R> {
+        let (inner, span) = (self.source_text.source_text.as_ref()?, self.span?);
+        inner.map_span(span, f)
     }
 }
 
