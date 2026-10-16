@@ -14,7 +14,7 @@ enum Repr {
     Resident(boa_ast::SourceText),
     Swapped {
         store: Rc<dyn CodeStore>,
-        key: u64,
+        key: u32,
         bytes: usize,
         latin1: bool,
     },
@@ -56,7 +56,11 @@ impl Inner {
             && crate::ks_code_store::current().is_some_and(|store| retained >= store.min_bytes());
         if wanted {
             let weak = Rc::downgrade(&inner);
-            let _ = PENDING.try_with(|p| p.borrow_mut().push(weak));
+            let _ = PENDING.try_with(|p| {
+                if let Ok(mut p) = p.try_borrow_mut() {
+                    p.push(weak);
+                }
+            });
         }
         inner
     }
@@ -133,12 +137,13 @@ impl Drop for Inner {
             Repr::Swapped {
                 store, key, bytes, ..
             } => {
-                let bytes = stats::bytes(*bytes);
+                let len = *bytes;
+                let bytes = stats::bytes(len);
                 stats::update(|s| {
                     s.source_swapped_texts -= 1;
                     s.source_swapped_bytes -= bytes;
                 });
-                store.release(*key);
+                store.release(*key, len);
             }
         }
     }
@@ -146,12 +151,12 @@ impl Drop for Inner {
 
 /// Kitesurf: hands the installed code store every still-live source text registered since
 /// the last call. Safe at any point: a text being read is retried at the next call.
-pub fn ks_swap_source_texts() -> usize {
+pub(crate) fn swap_source_texts() -> usize {
     let Some(store) = crate::ks_code_store::current() else {
         return 0;
     };
     let pending = PENDING
-        .try_with(|p| std::mem::take(&mut *p.borrow_mut()))
+        .try_with(|p| p.try_borrow_mut().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default())
         .unwrap_or_default();
     let mut busy = Vec::new();
     let mut swapped = 0;
@@ -166,7 +171,11 @@ pub fn ks_swap_source_texts() -> usize {
         }
     }
     if !busy.is_empty() {
-        let _ = PENDING.try_with(|p| p.borrow_mut().extend(busy));
+        let _ = PENDING.try_with(|p| {
+            if let Ok(mut p) = p.try_borrow_mut() {
+                p.extend(busy);
+            }
+        });
     }
     swapped
 }

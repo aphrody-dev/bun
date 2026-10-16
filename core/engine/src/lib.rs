@@ -113,9 +113,12 @@ pub use ks_code_stats::ks_code_stats;
 mod ks_code_store;
 pub use ks_code_store::{CodeStore, ks_set_code_store};
 
+mod ks_swap;
+pub use ks_swap::ks_swap_at_idle;
+
 mod spanned_source_text;
 use spanned_source_text::SourceText;
-pub use spanned_source_text::{SpannedSourceText, ks_swap_source_texts};
+pub use spanned_source_text::SpannedSourceText;
 
 #[cfg(test)]
 mod tests;
