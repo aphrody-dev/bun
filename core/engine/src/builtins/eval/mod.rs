@@ -321,6 +321,7 @@ impl Eval {
         compiler.compile_statement_list(body.statements(), true, false);
 
         let code_block = Gc::new(compiler.finish());
+        crate::ks_swap::remember_root(&code_block, false);
 
         // Strict calls don't need extensions, since all strict eval calls push a new
         // function environment before evaluating.

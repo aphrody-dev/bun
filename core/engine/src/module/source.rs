@@ -1859,6 +1859,7 @@ impl SourceTextModule {
 
             (Gc::new(compiler.finish()), functions)
         };
+        crate::ks_swap::remember_root(&codeblock, false);
 
         // 8. Let moduleContext be a new ECMAScript code execution context.
         let mut envs = EnvironmentStack::new();

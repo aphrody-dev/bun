@@ -240,8 +240,44 @@ impl BytecodeEmitter {
 /// which most functions of a bundle never do; it is then expanded once to execute.
 pub(crate) struct Bytecode {
     bytes: UnsafeCell<Box<[u8]>>,
-    packed: Cell<Box<[u8]>>,
+    packed: Cell<Packed>,
+    // Kitesurf: the executable length in the low 24 bits; the high 8 count the frames and
+    // readers on the bytes (saturating, then sticky), which must be zero to drop them.
+    len_pins: Cell<u32>,
+}
+
+// Kitesurf: where the packed form is. Swapped keeps a 12-byte descriptor in a 16-byte chunk,
+// so a block swaps only when its packed form is bigger than that.
+pub(crate) enum Packed {
+    Resident(Box<[u8]>),
+    Swapped(Box<SwapDesc>),
+}
+
+impl Default for Packed {
+    fn default() -> Self {
+        Self::Resident(Box::default())
+    }
+}
+
+// Kitesurf: a swapped packed form's place in the code store and the hash it must read back
+// with: registers are read unchecked, so bytes that differ must never run.
+pub(crate) struct SwapDesc {
+    key: u32,
     len: u32,
+    hash: u32,
+}
+
+const LEN_MASK: u32 = 0x00FF_FFFF;
+const PIN: u32 = 0x0100_0000;
+const PINS_STICKY: u32 = 0xFF;
+// Kitesurf: a packed form this small frees less than its descriptor costs, so it stays
+// resident; most blocks are well over it.
+const MIN_SWAP_BYTES: usize = 24;
+
+fn fnv1a(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .fold(0x811c_9dc5_u32, |h, &b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193))
 }
 
 impl Default for Bytecode {
@@ -249,21 +285,29 @@ impl Default for Bytecode {
         Self {
             bytes: UnsafeCell::default(),
             packed: Cell::default(),
-            len: 0,
+            len_pins: Cell::new(0),
         }
     }
 }
 
 impl Clone for Bytecode {
     fn clone(&self) -> Self {
-        let packed = self.packed.take();
-        let clone = Self {
-            // SAFETY: a shared read of the box; see `Self::expand` for the only write.
-            bytes: UnsafeCell::new(unsafe { (&*self.bytes.get()).clone() }),
-            packed: Cell::new(packed.clone()),
-            len: self.len,
+        // Kitesurf: a clone gets its own resident packed form, since two owners of one store
+        // key would release it twice.
+        let packed = match self.peek_packed() {
+            Packed::Resident(p) => p.clone(),
+            Packed::Swapped(d) => self.read_swapped(d).into_boxed_slice(),
         };
-        self.packed.set(packed);
+        // No frame is on the clone yet, but a block that had to stay pinned (past 16 MiB, or
+        // saturated) still does, since its count is lost.
+        let sticky = if self.pins() == PINS_STICKY { PINS_STICKY << 24 } else { 0 };
+        let clone = Self {
+            // SAFETY: a shared read of the box, which no forced round can drop meanwhile:
+            // cloning allocates outside any round, and rounds never nest.
+            bytes: UnsafeCell::new(unsafe { (&*self.bytes.get()).clone() }),
+            packed: Cell::new(Packed::Resident(packed)),
+            len_pins: Cell::new(self.len_pins.get() & LEN_MASK | sticky),
+        };
         clone.charge(1);
         clone
     }
@@ -272,109 +316,323 @@ impl Clone for Bytecode {
 impl Drop for Bytecode {
     fn drop(&mut self) {
         self.charge(-1);
+        let addr = std::ptr::from_ref::<Self>(self) as usize;
+        if let Packed::Swapped(d) = self.packed.get_mut() {
+            crate::ks_swap::forget_flushable(addr);
+            if let Some(store) = crate::ks_code_store::current() {
+                store.release(d.key, d.len as usize);
+            }
+        }
     }
 }
 
 impl std::fmt::Debug for Bytecode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Bytecode")
-            .field("len", &self.len)
+            .field("len", &self.len())
             .field("packed", &self.is_packed())
             .finish()
     }
 }
 
+// Kitesurf: unpins on drop, so a reader that returns early or unwinds still lets go of the
+// block, and a forced round can drop its bytes again.
+pub(crate) struct PinGuard<'a>(&'a Bytecode);
+
+impl Drop for PinGuard<'_> {
+    fn drop(&mut self) {
+        self.0.unpin();
+    }
+}
+
 impl Bytecode {
     fn pack(bytes: &[u8]) -> Self {
+        let len = bytes.len();
+        // Kitesurf: the length shares a word with the pins, so a block past 16 MiB stays
+        // expanded and permanently pinned: it is never packed, swapped or dropped.
+        let bytecode = if len > LEN_MASK as usize {
+            Self {
+                bytes: UnsafeCell::new(bytes.into()),
+                packed: Cell::default(),
+                len_pins: Cell::new(PINS_STICKY << 24),
+            }
+        } else {
+            Self {
+                bytes: UnsafeCell::default(),
+                packed: Cell::new(Packed::Resident(Self::pack_bytes(bytes))),
+                len_pins: Cell::new(len as u32),
+            }
+        };
+        bytecode.charge(1);
+        bytecode
+    }
+
+    fn pack_bytes(bytes: &[u8]) -> Box<[u8]> {
         let mut packed = Vec::with_capacity(bytes.len() / 2);
         let mut pc = 0;
         while pc < bytes.len() {
             packed.push(bytes[pc]);
             pc = Self::pack_operands(Opcode::decode(bytes[pc]), bytes, pc + 1, &mut packed);
         }
-        let packed = Self {
-            bytes: UnsafeCell::default(),
-            packed: Cell::new(packed.into_boxed_slice()),
-            len: bytes.len() as u32,
-        };
-        packed.charge(1);
-        packed
+        packed.into_boxed_slice()
+    }
+
+    fn unpack_bytes(&self, packed: &[u8]) -> Box<[u8]> {
+        let mut bytes = Vec::with_capacity(self.exec_len());
+        let mut pos = 0;
+        while pos < packed.len() {
+            bytes.push(packed[pos]);
+            pos = Self::unpack_operands(Opcode::decode(packed[pos]), packed, pos + 1, &mut bytes);
+        }
+        bytes.into_boxed_slice()
+    }
+
+    // Kitesurf: the packed state, read in place. Only `expand`, the swap rounds, clone and
+    // drop replace it, and none of them runs while a caller holds what this returns.
+    fn peek_packed(&self) -> &Packed {
+        // SAFETY: see above; every replacement goes through `Cell::take`/`set` on this block,
+        // and no caller of this keeps the reference across one.
+        unsafe { &*self.packed.as_ptr() }
+    }
+
+    // Kitesurf: the swapped packed form's bytes, checked; the swap rounds keep this
+    // consistent, so a mismatch is a broken store, and running anything else is unsound.
+    fn read_swapped(&self, d: &SwapDesc) -> Vec<u8> {
+        let mut out = Vec::new();
+        let ok = crate::ks_code_store::current().is_some_and(|store| {
+            store.read(d.key, 0, d.len as usize, &mut out)
+                && out.len() == d.len as usize
+                && fnv1a(&out) == d.hash
+        });
+        if !ok {
+            crate::ks_code_stats::update(|s| s.store_failures += 1);
+            panic!("kitesurf: swapped bytecode could not be read back intact");
+        }
+        crate::ks_code_stats::update(|s| s.bytecode_reads += 1);
+        out
     }
 
     // Kitesurf: adds (sign 1) or refunds (-1) this bytecode's bytes to the code counters,
-    // under the form it holds now: packed until it first runs, expanded after.
+    // under the forms it holds now: resident or swapped packed, and expanded once it ran.
     fn charge(&self, sign: i64) {
-        let packed = self.packed.take();
-        let packed_len = crate::ks_code_stats::bytes(packed.len());
-        self.packed.set(packed);
-        // SAFETY: a shared read of the box, its length only; `Self::expand` is the one write,
-        // and it never runs while a counter update does.
+        let (packed, swapped) = match self.peek_packed() {
+            Packed::Resident(p) => (p.len(), None),
+            Packed::Swapped(d) => (0, Some(d.len as usize)),
+        };
+        // SAFETY: a shared read of the box's length only, taken and dropped before anything
+        // else can run.
         let expanded = crate::ks_code_stats::bytes(unsafe { (&*self.bytes.get()).len() });
         crate::ks_code_stats::update(|s| {
-            s.packed_bytes += sign * packed_len;
+            s.packed_bytes += sign * crate::ks_code_stats::bytes(packed);
+            if let Some(n) = swapped {
+                s.swapped_blocks += sign;
+                s.swapped_bytes += sign * crate::ks_code_stats::bytes(n);
+            }
             s.expanded_bytes += sign * expanded;
             s.blocks_run += sign * i64::from(expanded != 0);
         });
+    }
+
+    fn exec_len(&self) -> usize {
+        (self.len_pins.get() & LEN_MASK) as usize
+    }
+
+    fn pins(&self) -> u32 {
+        self.len_pins.get() >> 24
+    }
+
+    /// Kitesurf: a frame or a reader is on this block's executable bytes; a forced round
+    /// leaves pinned bytes alone. Saturates and then stays pinned for good.
+    #[inline]
+    pub(crate) fn pin(&self) {
+        if self.pins() < PINS_STICKY {
+            self.len_pins.set(self.len_pins.get() + PIN);
+        }
+    }
+
+    /// Kitesurf: undoes one `pin`; a block whose count saturated stays pinned, since what it
+    /// counted is no longer known.
+    #[inline]
+    pub(crate) fn unpin(&self) {
+        let pins = self.pins();
+        if pins != 0 && pins < PINS_STICKY {
+            self.len_pins.set(self.len_pins.get() - PIN);
+        }
+    }
+
+    /// Kitesurf: pins the block for as long as the returned guard lives: what a reader of
+    /// the executable bytes outside the dispatch loop holds while it decodes them.
+    pub(crate) fn pin_guard(&self) -> PinGuard<'_> {
+        self.pin();
+        PinGuard(self)
     }
 
     /// Whether [`Self::executable`] is still empty because the bytecode has not been expanded.
     /// An empty code block never is: there is nothing to pack.
     #[inline]
     pub(crate) fn is_packed(&self) -> bool {
-        // SAFETY: a shared read of the box; see `Self::expand` for the only write.
-        self.len != 0 && unsafe { (&*self.bytes.get()).is_empty() }
+        // SAFETY: a shared read of the box, whose slice is checked for emptiness and not
+        // kept past this expression.
+        self.exec_len() != 0 && unsafe { (&*self.bytes.get()).is_empty() }
     }
 
     /// The executable bytecode, expanding the packed form the first time it is asked for.
-    /// Everything but the dispatch loop reads it through here.
+    /// Callers outside the dispatch loop hold a `pin_guard` while they use the slice.
     #[inline]
     pub(crate) fn bytes(&self) -> &[u8] {
         if self.is_packed() {
             self.expand();
         }
-        // SAFETY: expanded above, and `Self::expand` never writes the box again.
+        // SAFETY: expanded above; only a forced round drops the box, and never a pinned one,
+        // which this block is for any caller that holds a pin guard.
         unsafe { &*self.bytes.get() }
     }
 
     /// Safety: empty while [`Self::is_packed`], and the slice must not outlive a call to
-    /// [`Self::expand`]. The dispatch loop reads it per instruction, its bounds check included.
+    /// [`Self::expand`], nor a forced round unless the block is pinned (frames pin theirs).
     #[inline(always)]
     pub(crate) unsafe fn executable(&self) -> &[u8] {
         // SAFETY: guaranteed by the caller.
         unsafe { &*self.bytes.get() }
     }
 
-    /// Expands the packed bytecode into [`Self::executable`]; a no-op once that has happened.
-    /// The box is only ever written here, while no reference into its (empty) contents is live.
+    /// Expands the packed bytecode into [`Self::executable`], fetching it from the code store
+    /// when it was swapped; a no-op while expanded. The store copy stays, so it can again.
     #[cold]
     #[inline(never)]
     pub(crate) fn expand(&self) {
         if !self.is_packed() {
             return;
         }
-        let packed = self.packed.take();
-        let mut bytes = Vec::with_capacity(self.len as usize);
-        let mut pos = 0;
-        while pos < packed.len() {
-            bytes.push(packed[pos]);
-            pos = Self::unpack_operands(Opcode::decode(packed[pos]), &packed, pos + 1, &mut bytes);
-        }
-        debug_assert_eq!(bytes.len(), self.len as usize);
-        let (packed_len, expanded) = (packed.len(), bytes.len());
+        let bytes = match self.packed.take() {
+            Packed::Resident(p) if !p.is_empty() => {
+                let bytes = self.unpack_bytes(&p);
+                let n = p.len();
+                crate::ks_code_stats::update(|s| s.packed_bytes -= crate::ks_code_stats::bytes(n));
+                bytes
+            }
+            Packed::Swapped(d) => {
+                // Kitesurf: back in its cell before the read, so a failed one still leaves a
+                // consistent block for unwinding to drop.
+                let desc: *const SwapDesc = &raw const *d;
+                self.packed.set(Packed::Swapped(d));
+                // SAFETY: the box was just put back, and nothing replaces this block's packed
+                // state before the read below returns.
+                let packed = self.read_swapped(unsafe { &*desc });
+                let bytes = self.unpack_bytes(&packed);
+                crate::ks_swap::remember_flushable(std::ptr::from_ref(self) as usize);
+                bytes
+            }
+            Packed::Resident(empty) => {
+                self.packed.set(Packed::Resident(empty));
+                panic!("kitesurf: bytecode has nothing to expand");
+            }
+        };
+        debug_assert_eq!(bytes.len(), self.exec_len());
+        let n = bytes.len();
         crate::ks_code_stats::update(|s| {
-            s.packed_bytes -= crate::ks_code_stats::bytes(packed_len);
-            s.expanded_bytes += crate::ks_code_stats::bytes(expanded);
+            s.expanded_bytes += crate::ks_code_stats::bytes(n);
             s.blocks_run += 1;
         });
         // SAFETY: `bytes()` expands before handing out a reference and the dispatch loop drops
         // its slice before expanding, so nothing borrows the empty box being replaced.
-        unsafe { *self.bytes.get() = bytes.into_boxed_slice() };
+        unsafe { *self.bytes.get() = bytes };
+    }
+
+    /// Kitesurf: moves a never-run block's packed form to the store. Returns the bytes it
+    /// freed; zero if the block ran, is small, or the store refused.
+    pub(crate) fn swap_packed(&self, store: &dyn crate::CodeStore) -> usize {
+        if !self.is_packed() {
+            return 0;
+        }
+        let packed = match self.packed.take() {
+            Packed::Resident(p) if p.len() > MIN_SWAP_BYTES => p,
+            other => {
+                self.packed.set(other);
+                return 0;
+            }
+        };
+        let hash = fnv1a(&packed);
+        let Some(key) = store.put(&packed) else {
+            self.packed.set(Packed::Resident(packed));
+            return 0;
+        };
+        let len = packed.len();
+        drop(packed);
+        self.packed.set(Packed::Swapped(Box::new(SwapDesc {
+            key,
+            len: len as u32,
+            hash,
+        })));
+        let n = crate::ks_code_stats::bytes(len);
+        crate::ks_code_stats::update(|s| {
+            s.packed_bytes -= n;
+            s.swapped_blocks += 1;
+            s.swapped_bytes += n;
+        });
+        len
+    }
+
+    /// Kitesurf: gives a block that ran before it could swap a copy in the store, so a forced
+    /// round can drop its executable bytes later. Returns whether it now has one.
+    pub(crate) fn store_expanded(&self, store: &dyn crate::CodeStore) -> bool {
+        let expanded = !self.is_packed() && self.exec_len() != 0 && self.pins() < PINS_STICKY;
+        if !expanded || !matches!(self.peek_packed(), Packed::Resident(p) if p.is_empty()) {
+            return false;
+        }
+        // SAFETY: a shared read; only a forced round drops these bytes, and none starts inside
+        // a round (idle or forced), which is the only caller.
+        let packed = Self::pack_bytes(unsafe { &*self.bytes.get() });
+        if packed.len() <= MIN_SWAP_BYTES {
+            return false;
+        }
+        let hash = fnv1a(&packed);
+        let Some(key) = store.put(&packed) else {
+            return false;
+        };
+        let len = packed.len();
+        drop(packed);
+        self.packed.set(Packed::Swapped(Box::new(SwapDesc {
+            key,
+            len: len as u32,
+            hash,
+        })));
+        crate::ks_code_stats::update(|s| {
+            s.swapped_blocks += 1;
+            s.swapped_bytes += crate::ks_code_stats::bytes(len);
+        });
+        crate::ks_swap::remember_flushable(std::ptr::from_ref(self) as usize);
+        true
+    }
+
+    /// Kitesurf: drops the executable bytes of an unpinned block whose packed form is in the
+    /// store; its next run fetches them back. Returns the bytes freed.
+    pub(crate) fn flush_executable(&self) -> usize {
+        if self.pins() != 0 || !matches!(self.peek_packed(), Packed::Swapped(_)) {
+            return 0;
+        }
+        // SAFETY: no pin means no frame runs these bytes and no reader decodes them, so no
+        // slice of the box is live while it is replaced.
+        let bytes = unsafe { std::mem::take(&mut *self.bytes.get()) };
+        let n = bytes.len();
+        drop(bytes);
+        if n != 0 {
+            crate::ks_code_stats::update(|s| {
+                s.expanded_bytes -= crate::ks_code_stats::bytes(n);
+                s.blocks_run -= 1;
+                s.flushes += 1;
+            });
+        }
+        n
     }
 
     /// Length of the executable bytecode, without expanding it.
     /// The code block printer uses this.
-    pub(crate) const fn len(&self) -> usize {
-        self.len as usize
+    pub(crate) fn len(&self) -> usize {
+        // SAFETY: a shared read of the box's length; a block past 16 MiB is only ever
+        // expanded, so its length is always read from here.
+        let expanded = unsafe { (&*self.bytes.get()).len() };
+        if expanded != 0 { expanded } else { self.exec_len() }
     }
 }
 
@@ -750,6 +1008,7 @@ impl Iterator for InstructionIterator<'_> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
+        let _pin = self.bytes.pin_guard();
         let start_pc = self.pc;
         let bytes = self.bytes.bytes();
         if self.pc >= bytes.len() {

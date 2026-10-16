@@ -628,6 +628,9 @@ impl Vm {
             .push_bytecode(current_pc, frame.code_block().source_info.clone());
 
         self.frames.push(frame);
+        // Kitesurf: pinned after the push, which can allocate and so run a forced swap round:
+        // until here the frame has not run, and a round may still drop the block's bytes.
+        self.frame().code_block.bytecode.pin();
     }
 
     pub(crate) fn push_frame_with_stack(
@@ -648,7 +651,11 @@ impl Vm {
             return None;
         }
         self.shadow_stack.pop();
-        self.frames.pop()
+        let frame = self.frames.pop();
+        if let Some(frame) = &frame {
+            frame.code_block.bytecode.unpin();
+        }
+        frame
     }
 
     /// Handles an exception thrown at position `pc`.

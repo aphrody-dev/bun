@@ -14,6 +14,12 @@ pub(crate) struct Stats {
     pub(crate) source_reads: i64,
     pub(crate) store_failures: i64,
     pub(crate) packed_bytes: i64,
+    pub(crate) swapped_blocks: i64,
+    pub(crate) swapped_bytes: i64,
+    pub(crate) bytecode_reads: i64,
+    pub(crate) flushes: i64,
+    pub(crate) flushable_blocks: i64,
+    pub(crate) forced_rounds: i64,
     pub(crate) expanded_bytes: i64,
     pub(crate) ic_bytes: i64,
     pub(crate) source_map_bytes: i64,
@@ -31,6 +37,12 @@ impl Stats {
         source_reads: 0,
         store_failures: 0,
         packed_bytes: 0,
+        swapped_blocks: 0,
+        swapped_bytes: 0,
+        bytecode_reads: 0,
+        flushes: 0,
+        flushable_blocks: 0,
+        forced_rounds: 0,
         expanded_bytes: 0,
         ic_bytes: 0,
         source_map_bytes: 0,
@@ -56,10 +68,10 @@ pub(crate) fn bytes(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// Kitesurf: live compiled code as (name, value) pairs: blocks, those that ran, resident and
-/// swapped source texts, store reads and failures, then bytes by kind. Shared strings uncounted.
+/// Kitesurf: live compiled code as (name, value) pairs: blocks, source texts and bytecode by
+/// form (resident, swapped, expanded), store traffic and swap rounds. Shared strings uncounted.
 #[must_use]
-pub fn ks_code_stats() -> [(&'static str, i64); 13] {
+pub fn ks_code_stats() -> [(&'static str, i64); 19] {
     let s = STATS.try_with(Cell::get).unwrap_or(Stats::ZERO);
     [
         ("blocks", s.blocks),
@@ -71,6 +83,12 @@ pub fn ks_code_stats() -> [(&'static str, i64); 13] {
         ("sourceReads", s.source_reads),
         ("storeFailures", s.store_failures),
         ("packedBytes", s.packed_bytes),
+        ("swappedBlocks", s.swapped_blocks),
+        ("swappedBytes", s.swapped_bytes),
+        ("bytecodeReads", s.bytecode_reads),
+        ("flushes", s.flushes),
+        ("flushableBlocks", s.flushable_blocks),
+        ("forcedRounds", s.forced_rounds),
         ("expandedBytes", s.expanded_bytes),
         ("icBytes", s.ic_bytes),
         ("sourceMapBytes", s.source_map_bytes),

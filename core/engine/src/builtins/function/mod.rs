@@ -672,6 +672,7 @@ impl BuiltInFunctionObject {
                 context.interner_mut(),
             );
 
+        crate::ks_swap::remember_root(&code, true);
         let saved = context.vm.frame_mut().environments.pop_to_global();
         let function_object = crate::vm::create_function_object(code, prototype, context);
         context

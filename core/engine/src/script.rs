@@ -161,6 +161,7 @@ impl Script {
 
             Gc::new(compiler.finish())
         };
+        crate::ks_swap::remember_root(&cb, false);
 
         *self.inner.phase.borrow_mut() = ScriptPhase::Codeblock(cb.clone());
 

@@ -114,7 +114,7 @@ mod ks_code_store;
 pub use ks_code_store::{CodeStore, ks_set_code_store};
 
 mod ks_swap;
-pub use ks_swap::ks_swap_at_idle;
+pub use ks_swap::{ks_swap_at_idle, ks_swap_under_pressure};
 
 mod spanned_source_text;
 use spanned_source_text::SourceText;
