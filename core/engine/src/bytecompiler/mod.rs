@@ -2833,9 +2833,11 @@ impl<'ctx> ByteCompiler<'ctx> {
             global_fns: self.global_fns.into_boxed_slice(),
             global_vars: self.global_vars.into_boxed_slice(),
             debug_id: CodeBlock::get_next_codeblock_id(),
+            ks_charge: crate::ks_code_stats::CodeCharge::default(),
             #[cfg(feature = "trace")]
             traced: Cell::new(false),
         }
+        .ks_charged()
     }
 
     fn compile_declaration_pattern(

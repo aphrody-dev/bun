@@ -74,6 +74,14 @@ pub(crate) struct SourceMap {
 
 const CHECKPOINT_EVERY: usize = 32;
 
+impl SourceMap {
+    /// Kitesurf: the heap bytes of the encoded entries and their checkpoints, for the code
+    /// counters. The path is shared with the rest of the script, so it is left out.
+    pub(crate) fn ks_heap_bytes(&self) -> usize {
+        self.data.len() + size_of_val::<[Checkpoint]>(&self.checkpoints)
+    }
+}
+
 /// Decoder state at the start of an entry: its pc, byte offset, and the last
 /// line/column seen before it (the bases its deltas are relative to).
 #[derive(Debug, Clone, Copy)]

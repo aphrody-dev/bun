@@ -107,6 +107,9 @@ pub mod vm;
 mod host_defined;
 mod sys;
 
+mod ks_code_stats;
+pub use ks_code_stats::ks_code_stats;
+
 mod spanned_source_text;
 use spanned_source_text::SourceText;
 pub use spanned_source_text::SpannedSourceText;

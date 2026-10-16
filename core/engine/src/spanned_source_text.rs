@@ -5,13 +5,32 @@ use boa_gc::{Finalize, Trace};
 
 struct Inner {
     source_text: boa_ast::SourceText,
+    charged: i64,
 }
 impl Inner {
     fn new(mut source_text: boa_ast::SourceText) -> Self {
         // Kept for the script's life, so drop the lexer's growth slack
         // and store Latin-1 when it fits (half of a bundle's retained source).
         source_text.compact();
-        Self { source_text }
+        let charged = crate::ks_code_stats::bytes(source_text.retained_bytes());
+        crate::ks_code_stats::update(|s| {
+            s.source_texts += 1;
+            s.source_bytes += charged;
+        });
+        Self {
+            source_text,
+            charged,
+        }
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let charged = self.charged;
+        crate::ks_code_stats::update(|s| {
+            s.source_texts -= 1;
+            s.source_bytes -= charged;
+        });
     }
 }
 

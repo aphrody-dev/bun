@@ -173,6 +173,11 @@ pub struct CodeBlock {
     // Used for identifying anonymous functions in compiled output and call frames.
     pub(crate) debug_id: u64,
 
+    // Kitesurf: this block's share of the code counters (crate::ks_code_stats), refunded
+    // when it drops; `ks_charged` sets it once the block's parts are in place.
+    #[unsafe_ignore_trace]
+    pub(crate) ks_charge: crate::ks_code_stats::CodeCharge,
+
     #[cfg(feature = "trace")]
     #[unsafe_ignore_trace]
     pub(crate) traced: Cell<bool>,
@@ -183,8 +188,30 @@ impl CodeBlock {
     /// The inline caches, built from [`Self::ic_names`] the first time any is used.
     #[inline]
     pub(crate) fn ic(&self) -> &[InlineCache] {
-        self.ic
-            .get_or_init(|| self.ic_names.iter().cloned().map(InlineCache::new).collect())
+        self.ic.get_or_init(|| {
+            let ic: Box<[InlineCache]> =
+                self.ic_names.iter().cloned().map(InlineCache::new).collect();
+            self.ks_charge.charge_ic(size_of_val::<[InlineCache]>(&ic));
+            ic
+        })
+    }
+
+    /// Kitesurf: charges this block to the code counters: the struct and the arrays it owns,
+    /// and its source map apart. Shared strings, scopes and nested blocks are not its own.
+    #[must_use]
+    pub(crate) fn ks_charged(mut self) -> Self {
+        let fixed = size_of::<Self>()
+            + self.mapped_arguments_binding_indices.capacity() * size_of::<Option<u32>>()
+            + self.constants.capacity() * size_of::<Constant>()
+            + size_of_val::<[BindingLocator]>(&self.bindings)
+            + self.handlers.capacity() * size_of::<Handler>()
+            + size_of_val::<[JsString]>(&self.ic_names)
+            + size_of_val::<[u32]>(&self.global_lexs)
+            + size_of_val::<[GlobalFunctionBinding]>(&self.global_fns)
+            + size_of_val::<[u32]>(&self.global_vars);
+        let map = self.source_info.map().ks_heap_bytes();
+        self.ks_charge = crate::ks_code_stats::CodeCharge::new(fixed, map);
+        self
     }
 
     /// Creates a new `CodeBlock`.
@@ -214,6 +241,7 @@ impl CodeBlock {
             global_fns: Box::default(),
             global_vars: Box::default(),
             debug_id: CodeBlock::get_next_codeblock_id(),
+            ks_charge: crate::ks_code_stats::CodeCharge::new(size_of::<Self>(), 0),
             #[cfg(feature = "trace")]
             traced: Cell::new(false),
         }

@@ -264,7 +264,14 @@ impl Clone for Bytecode {
             len: self.len,
         };
         self.packed.set(packed);
+        clone.charge(1);
         clone
+    }
+}
+
+impl Drop for Bytecode {
+    fn drop(&mut self) {
+        self.charge(-1);
     }
 }
 
@@ -285,11 +292,29 @@ impl Bytecode {
             packed.push(bytes[pc]);
             pc = Self::pack_operands(Opcode::decode(bytes[pc]), bytes, pc + 1, &mut packed);
         }
-        Self {
+        let packed = Self {
             bytes: UnsafeCell::default(),
             packed: Cell::new(packed.into_boxed_slice()),
             len: bytes.len() as u32,
-        }
+        };
+        packed.charge(1);
+        packed
+    }
+
+    // Kitesurf: adds (sign 1) or refunds (-1) this bytecode's bytes to the code counters,
+    // under the form it holds now: packed until it first runs, expanded after.
+    fn charge(&self, sign: i64) {
+        let packed = self.packed.take();
+        let packed_len = crate::ks_code_stats::bytes(packed.len());
+        self.packed.set(packed);
+        // SAFETY: a shared read of the box, its length only; `Self::expand` is the one write,
+        // and it never runs while a counter update does.
+        let expanded = crate::ks_code_stats::bytes(unsafe { (&*self.bytes.get()).len() });
+        crate::ks_code_stats::update(|s| {
+            s.packed_bytes += sign * packed_len;
+            s.expanded_bytes += sign * expanded;
+            s.blocks_run += sign * i64::from(expanded != 0);
+        });
     }
 
     /// Whether [`Self::executable`] is still empty because the bytecode has not been expanded.
@@ -335,6 +360,12 @@ impl Bytecode {
             pos = Self::unpack_operands(Opcode::decode(packed[pos]), &packed, pos + 1, &mut bytes);
         }
         debug_assert_eq!(bytes.len(), self.len as usize);
+        let (packed_len, expanded) = (packed.len(), bytes.len());
+        crate::ks_code_stats::update(|s| {
+            s.packed_bytes -= crate::ks_code_stats::bytes(packed_len);
+            s.expanded_bytes += crate::ks_code_stats::bytes(expanded);
+            s.blocks_run += 1;
+        });
         // SAFETY: `bytes()` expands before handing out a reference and the dispatch loop drops
         // its slice before expanding, so nothing borrows the empty box being replaced.
         unsafe { *self.bytes.get() = bytes.into_boxed_slice() };
