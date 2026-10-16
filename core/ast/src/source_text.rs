@@ -76,6 +76,17 @@ impl SourceText {
         };
     }
 
+    /// Kitesurf: the heap bytes this text holds, so an embedder can account for what a
+    /// script retains for `toString` apart from its compiled code.
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        match &self.repr {
+            Repr::Collecting(v) => v.capacity() * 2,
+            Repr::Latin1(v) => v.len(),
+            Repr::Utf16(v) => v.len() * 2,
+        }
+    }
+
     // Collection after `compact` is not expected, but stays correct: re-expand.
     #[inline]
     fn collecting(&mut self) -> &mut Vec<u16> {
