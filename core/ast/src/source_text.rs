@@ -87,6 +87,17 @@ impl SourceText {
         }
     }
 
+    /// Kitesurf: the compacted text as bytes an embedder can store, and whether they are
+    /// Latin-1 (else UTF-16LE); None until `compact` has run.
+    #[must_use]
+    pub fn stored_form(&self) -> Option<(Cow<'_, [u8]>, bool)> {
+        match &self.repr {
+            Repr::Collecting(_) => None,
+            Repr::Latin1(v) => Some((Cow::Borrowed(v), true)),
+            Repr::Utf16(v) => Some((Cow::Owned(v.iter().flat_map(|c| c.to_le_bytes()).collect()), false)),
+        }
+    }
+
     // Collection after `compact` is not expected, but stays correct: re-expand.
     #[inline]
     fn collecting(&mut self) -> &mut Vec<u16> {
