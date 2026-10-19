@@ -105,6 +105,9 @@ pub(crate) struct Inner {
     // Maps a name to its position in `bindings`. Minified bundles keep thousands of
     // bindings in one flat function scope, where a linear scan is quadratic.
     lookup: RefCell<rustc_hash::FxHashMap<JsString, usize>>,
+    // Kitesurf: set once the compiler is done with the scope and dropped `lookup`; the next
+    // query (a direct eval) rebuilds it. Compiled code resolves names by index, not here.
+    lookup_dropped: Cell<bool>,
     function: bool,
     // Has the `this` been accessed/escaped outside the function environment boundary.
     this_escaped: Cell<bool>,
@@ -117,11 +120,28 @@ impl Inner {
     /// `None`). Bindings are append-only, so a position never changes once taken.
     #[inline]
     fn pos(&self, name: &JsString) -> usize {
+        self.ensure_lookup();
         self.lookup
             .borrow()
             .get(name)
             .copied()
             .unwrap_or(usize::MAX)
+    }
+
+    // Kitesurf: rebuilds a dropped `lookup`. Callers that borrow `bindings` mutably must run
+    // this first; `pos` runs it for the rest, beside their shared borrow.
+    #[inline]
+    fn ensure_lookup(&self) {
+        if !self.lookup_dropped.get() {
+            return;
+        }
+        let bindings = self.bindings.borrow();
+        let mut lookup = self.lookup.borrow_mut();
+        lookup.reserve(bindings.len());
+        for (i, binding) in bindings.iter().enumerate() {
+            lookup.insert(binding.name.clone(), i);
+        }
+        self.lookup_dropped.set(false);
     }
 }
 
@@ -136,6 +156,7 @@ impl Scope {
                 index: Cell::default(),
                 bindings: RefCell::default(),
                 lookup: RefCell::default(),
+                lookup_dropped: Cell::new(false),
                 function: true,
                 this_escaped: Cell::new(false),
                 context: Rc::default(),
@@ -152,6 +173,7 @@ impl Scope {
                 index: Cell::new(parent.inner.index.get() + 1),
                 bindings: RefCell::default(),
                 lookup: RefCell::default(),
+                lookup_dropped: Cell::new(false),
                 function,
                 this_escaped: Cell::new(false),
                 context: parent.inner.context.clone(),
@@ -340,6 +362,7 @@ impl Scope {
         let mut crossed_function_border = false;
         let mut current = self;
         loop {
+            current.inner.ensure_lookup();
             if let Some(binding) = current
                 .inner
                 .bindings
@@ -388,6 +411,7 @@ impl Scope {
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
     pub fn create_mutable_binding(&self, name: JsString, function_scope: bool) -> BindingLocator {
+        self.inner.ensure_lookup();
         let mut bindings = self.inner.bindings.borrow_mut();
         let binding_index = bindings.len() as u32;
         if let Some(binding) = bindings.get(self.inner.pos(&name)) {
@@ -421,6 +445,7 @@ impl Scope {
     /// Crate an immutable binding.
     #[allow(clippy::cast_possible_truncation)]
     pub(crate) fn create_immutable_binding(&self, name: JsString, strict: bool) {
+        self.inner.ensure_lookup();
         let mut bindings = self.inner.bindings.borrow_mut();
         if self.inner.pos(&name) != usize::MAX {
             return;
@@ -540,6 +565,17 @@ impl Scope {
     #[must_use]
     pub fn unique_id(&self) -> u32 {
         self.inner.unique_id
+    }
+
+    /// Kitesurf: frees the name lookup map once the compiler is done with this scope; a later
+    /// query rebuilds it. A minified bundle's flat function scopes hold thousands of names.
+    pub fn ks_drop_lookup(&self) {
+        if let Ok(mut lookup) = self.inner.lookup.try_borrow_mut() {
+            if lookup.capacity() != 0 {
+                *lookup = rustc_hash::FxHashMap::default();
+                self.inner.lookup_dropped.set(true);
+            }
+        }
     }
 }
 
