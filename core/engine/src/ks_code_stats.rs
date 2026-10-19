@@ -24,6 +24,11 @@ pub(crate) struct Stats {
     pub(crate) ic_bytes: i64,
     pub(crate) source_map_bytes: i64,
     pub(crate) other_bytes: i64,
+    pub(crate) bodies_swapped: i64,
+    pub(crate) body_faults: i64,
+    pub(crate) body_records: i64,
+    pub(crate) body_record_bytes: i64,
+    pub(crate) body_skips: i64,
 }
 
 impl Stats {
@@ -47,6 +52,11 @@ impl Stats {
         ic_bytes: 0,
         source_map_bytes: 0,
         other_bytes: 0,
+        bodies_swapped: 0,
+        body_faults: 0,
+        body_records: 0,
+        body_record_bytes: 0,
+        body_skips: 0,
     };
 }
 
@@ -71,7 +81,7 @@ pub(crate) fn bytes(n: usize) -> i64 {
 /// Kitesurf: live compiled code as (name, value) pairs: blocks, source texts and bytecode by
 /// form (resident, swapped, expanded), store traffic and swap rounds. Shared strings uncounted.
 #[must_use]
-pub fn ks_code_stats() -> [(&'static str, i64); 19] {
+pub fn ks_code_stats() -> [(&'static str, i64); 24] {
     let s = STATS.try_with(Cell::get).unwrap_or(Stats::ZERO);
     [
         ("blocks", s.blocks),
@@ -93,6 +103,11 @@ pub fn ks_code_stats() -> [(&'static str, i64); 19] {
         ("icBytes", s.ic_bytes),
         ("sourceMapBytes", s.source_map_bytes),
         ("otherBytes", s.other_bytes),
+        ("bodiesSwapped", s.bodies_swapped),
+        ("bodyFaults", s.body_faults),
+        ("bodyRecords", s.body_records),
+        ("bodyRecordBytes", s.body_record_bytes),
+        ("bodySkips", s.body_skips),
     ]
 }
 
@@ -101,8 +116,8 @@ pub fn ks_code_stats() -> [(&'static str, i64); 19] {
 #[derive(Debug, Default)]
 pub(crate) struct CodeCharge {
     counted: bool,
-    fixed: i64,
-    map: i64,
+    fixed: Cell<i64>,
+    map: Cell<i64>,
     ic: Cell<i64>,
 }
 
@@ -120,10 +135,24 @@ impl CodeCharge {
         });
         Self {
             counted: true,
-            fixed,
-            map,
+            fixed: Cell::new(fixed),
+            map: Cell::new(map),
             ic: Cell::new(ic),
         }
+    }
+
+    /// Kitesurf: moves the charge to new sizes, as a body leaves memory or comes back; the
+    /// block's count and its inline caches stay as they are.
+    pub(crate) fn recharge(&self, fixed: usize, map: usize) {
+        if !self.counted {
+            return;
+        }
+        let (fixed, map) = (bytes(fixed), bytes(map));
+        let (old_fixed, old_map) = (self.fixed.replace(fixed), self.map.replace(map));
+        update(|s| {
+            s.other_bytes += fixed - old_fixed;
+            s.source_map_bytes += map - old_map;
+        });
     }
 
     pub(crate) fn charge_ic(&self, n: usize) {
@@ -141,7 +170,7 @@ impl Clone for CodeCharge {
         if !self.counted {
             return Self::default();
         }
-        Self::charge(self.fixed, self.map, self.ic.get())
+        Self::charge(self.fixed.get(), self.map.get(), self.ic.get())
     }
 }
 
@@ -153,8 +182,8 @@ impl Drop for CodeCharge {
         let ic = self.ic.get();
         update(|s| {
             s.blocks -= 1;
-            s.other_bytes -= self.fixed;
-            s.source_map_bytes -= self.map;
+            s.other_bytes -= self.fixed.get();
+            s.source_map_bytes -= self.map.get();
             s.ic_bytes -= ic;
         });
     }

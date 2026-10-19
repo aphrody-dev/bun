@@ -259,6 +259,13 @@ impl Default for Packed {
     }
 }
 
+// Kitesurf: a never-run block's bytecode as a body record carries it: its place in the
+// store, or its packed bytes when they stay resident (too small, or the store refused).
+pub(crate) enum KsBytecodeExport {
+    Desc { key: u32, len: u32, hash: u32 },
+    Inline(Box<[u8]>),
+}
+
 // Kitesurf: a swapped packed form's place in the code store and the hash it must read back
 // with: registers are read unchecked, so bytes that differ must never run.
 pub(crate) struct SwapDesc {
@@ -571,6 +578,60 @@ impl Bytecode {
             s.swapped_bytes += n;
         });
         len
+    }
+
+    /// Kitesurf: what a body record needs to rebuild this never-run bytecode, and its
+    /// executable length; packs it to `store` first. None if it ever expanded or is pinned.
+    pub(crate) fn ks_export(&self, store: &dyn crate::CodeStore) -> Option<(KsBytecodeExport, u32)> {
+        let exec_len = self.exec_len() as u32;
+        if exec_len == 0 {
+            return Some((KsBytecodeExport::Inline(Box::default()), 0));
+        }
+        if self.pins() != 0 || !self.is_packed() {
+            return None;
+        }
+        self.swap_packed(store);
+        let export = match self.peek_packed() {
+            Packed::Swapped(d) => KsBytecodeExport::Desc {
+                key: d.key,
+                len: d.len,
+                hash: d.hash,
+            },
+            Packed::Resident(p) if !p.is_empty() => KsBytecodeExport::Inline(p.clone()),
+            Packed::Resident(_) => return None,
+        };
+        Some((export, exec_len))
+    }
+
+    /// Kitesurf: hands this bytecode's store copy to the body record that exported it, so
+    /// dropping the block does not release it; the block must never run again.
+    pub(crate) fn ks_disown(&self) {
+        match self.packed.take() {
+            Packed::Swapped(d) => {
+                let n = crate::ks_code_stats::bytes(d.len as usize);
+                crate::ks_code_stats::update(|s| {
+                    s.swapped_blocks -= 1;
+                    s.swapped_bytes -= n;
+                });
+            }
+            other => self.packed.set(other),
+        }
+    }
+
+    /// Kitesurf: a never-run block's bytecode, rebuilt from what [`Self::ks_export`] gave; it
+    /// owns the store copy from here on.
+    pub(crate) fn ks_import(export: KsBytecodeExport, exec_len: u32) -> Self {
+        let packed = match export {
+            KsBytecodeExport::Desc { key, len, hash } => Packed::Swapped(Box::new(SwapDesc { key, len, hash })),
+            KsBytecodeExport::Inline(p) => Packed::Resident(p),
+        };
+        let bytecode = Self {
+            bytes: UnsafeCell::default(),
+            packed: Cell::new(packed),
+            len_pins: Cell::new(exec_len & LEN_MASK),
+        };
+        bytecode.charge(1);
+        bytecode
     }
 
     /// Kitesurf: gives a block that ran before it could swap a copy in the store, so a forced

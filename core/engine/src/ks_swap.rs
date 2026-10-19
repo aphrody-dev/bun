@@ -84,7 +84,7 @@ impl Drop for RoundGuard {
 
 // Kitesurf: swaps every packed block of the tree and stores a copy of each function that
 // already ran, which then counts as flushable; run-once top-level code is not worth one.
-fn walk(block: &CodeBlock, store: &dyn crate::CodeStore, keep_expanded: bool, depth: usize) -> usize {
+fn walk_packed(block: &CodeBlock, store: &dyn crate::CodeStore, keep_expanded: bool, depth: usize) -> usize {
     if depth > MAX_DEPTH {
         return 0;
     }
@@ -92,9 +92,55 @@ fn walk(block: &CodeBlock, store: &dyn crate::CodeStore, keep_expanded: bool, de
     if keep_expanded {
         block.bytecode.store_expanded(store);
     }
-    for constant in &block.body().constants {
+    let Some(body) = block.resident_body() else {
+        return freed;
+    };
+    for constant in &body.constants {
         if let Constant::Function(inner) = constant {
-            freed += walk(inner, store, true, depth + 1);
+            freed += walk_packed(inner, store, true, depth + 1);
+        }
+    }
+    freed
+}
+
+// Kitesurf: as `walk_packed`, but a nested block that never ran leaves its whole body to the
+// store (crate::ks_body); `outside` gathers the scopes of the blocks walked through, which ran.
+fn walk(
+    block: &CodeBlock,
+    store: &dyn crate::CodeStore,
+    keep_expanded: bool,
+    depth: usize,
+    outside: &mut FxHashSet<usize>,
+) -> usize {
+    if depth > MAX_DEPTH {
+        return 0;
+    }
+    let mut freed = block.bytecode.swap_packed(store);
+    if keep_expanded {
+        block.bytecode.store_expanded(store);
+    }
+    let Some(body) = block.resident_body() else {
+        return freed;
+    };
+    for constant in &body.constants {
+        if let Constant::Scope(scope) = constant {
+            let mut cur = Some(scope.clone());
+            while let Some(s) = cur {
+                if !outside.insert(s.ks_ptr()) {
+                    break;
+                }
+                cur = s.outer().cloned();
+            }
+        }
+    }
+    for constant in &body.constants {
+        let Constant::Function(inner) = constant else { continue };
+        if inner.ks_ran() {
+            freed += walk(inner, store, true, depth + 1, outside);
+        } else if inner.resident_body().is_some() {
+            freed += inner.bytecode.swap_packed(store);
+            let moved = crate::ks_body::swap_out(inner, store, outside);
+            freed += if moved > 0 { moved } else { walk_packed(inner, store, true, depth + 1) };
         }
     }
     freed
@@ -115,7 +161,8 @@ pub fn ks_swap_at_idle() -> usize {
         .unwrap_or_default();
     for (weak, is_function) in &roots {
         if let Some(root) = weak.upgrade() {
-            swapped += usize::from(walk(&root, &*store, *is_function, 0) > 0);
+            let mut outside = FxHashSet::default();
+            swapped += usize::from(walk(&root, &*store, *is_function, 0, &mut outside) > 0);
         }
     }
     if swapped > 0 || !roots.is_empty() {

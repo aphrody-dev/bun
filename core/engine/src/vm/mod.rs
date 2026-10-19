@@ -28,7 +28,7 @@ pub(crate) use opcode::{Instruction, InstructionIterator, Opcode};
 pub(crate) use {
     call_frame::CallFrameFlags,
     code_block::{
-        CodeBlockFlags, CodeBody, Constant, Handler, create_function_object,
+        BodyState, CodeBlockFlags, CodeBody, Constant, Handler, create_function_object,
         create_function_object_fast,
     },
     completion_record::CompletionRecord,

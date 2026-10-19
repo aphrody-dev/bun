@@ -141,6 +141,7 @@ impl CallFrame {
         environments: EnvironmentStack,
         realm: Realm,
     ) -> Self {
+        code_block.ks_mark_ran();
         Self {
             pc: 0,
             fp: 0,

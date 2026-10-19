@@ -12,9 +12,9 @@ use crate::{
 };
 use bitflags::bitflags;
 use boa_ast::scope::{BindingLocator, Scope};
-use boa_gc::{Finalize, Gc, Trace, empty_trace};
+use boa_gc::{Finalize, Gc, Trace, custom_trace, empty_trace};
 use itertools::Itertools;
-use std::{cell::Cell, cell::OnceCell, fmt::Display, fmt::Write as _};
+use std::{cell::Cell, cell::OnceCell, cell::UnsafeCell, fmt::Display, fmt::Write as _};
 use thin_vec::ThinVec;
 
 use super::{
@@ -50,6 +50,10 @@ bitflags! {
 
         /// If the function requires a function scope.
         const HAS_FUNCTION_SCOPE = 0b1_0000_0000;
+
+        /// Kitesurf: a frame of this block was ever pushed. Only a block that never ran can
+        /// leave its body to the code store: no frame and no nested function hold it yet.
+        const KS_RAN = 0b10_0000_0000;
 
         /// Trace instruction execution to `stdout`.
         #[cfg(feature = "trace")]
@@ -123,9 +127,8 @@ pub(crate) struct GlobalFunctionBinding {
 /// A `CodeBlock` is generated for each function compiled by the
 /// [`ByteCompiler`](crate::bytecompiler::ByteCompiler). It stores the bytecode and the other
 /// attributes of the function.
-#[derive(Debug, Trace, Finalize)]
+#[derive(Finalize)]
 pub struct CodeBlock {
-    #[unsafe_ignore_trace]
     pub(crate) flags: Cell<CodeBlockFlags>,
 
     /// The number of arguments expected.
@@ -140,11 +143,9 @@ pub struct CodeBlock {
 
     /// The function's source text, for `Function.prototype.toString`, its only reader,
     /// which so never needs the body.
-    #[unsafe_ignore_trace]
     pub(crate) text_spanned: SpannedSourceText,
 
     /// Bytecode
-    #[unsafe_ignore_trace]
     pub(crate) bytecode: Bytecode,
 
     // Used for identifying anonymous functions in compiled output and call frames.
@@ -152,16 +153,43 @@ pub struct CodeBlock {
 
     // Kitesurf: this block's share of the code counters (crate::ks_code_stats), refunded
     // when it drops; `ks_charged` sets it once the block's parts are in place.
-    #[unsafe_ignore_trace]
     pub(crate) ks_charge: crate::ks_code_stats::CodeCharge,
 
-    // Kitesurf: what only running the block reads; the fields above are what making a
-    // function object, printing its source and running its bytecode need.
-    body: Box<CodeBody>,
+    // Kitesurf: resident, or in the code store (crate::ks_body); see `replace_body` for when
+    // it may change, which is what makes the references `body()` hands out sound.
+    body: UnsafeCell<BodyState>,
 
     #[cfg(feature = "trace")]
-    #[unsafe_ignore_trace]
     pub(crate) traced: Cell<bool>,
+}
+
+/// Kitesurf: where a block's body is: in memory, or in the code store under a
+/// descriptor (crate::ks_body).
+pub(crate) enum BodyState {
+    Resident(Box<CodeBody>),
+    Swapped(Box<crate::ks_body::BodyDesc>),
+}
+
+// SAFETY: the shell holds no GC pointers; a resident body is traced, a swapped one has its
+// edges in the store. A fault-in installs the body only once it is complete.
+unsafe impl Trace for CodeBlock {
+    custom_trace!(this, mark, {
+        if let Some(body) = this.resident_body() {
+            mark(body);
+        }
+    });
+}
+
+impl std::fmt::Debug for CodeBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeBlock")
+            .field("name", &self.name)
+            .field("length", &self.length)
+            .field("flags", &self.flags.get())
+            .field("bytecode", &self.bytecode)
+            .field("body", &self.resident_body())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Kitesurf: the part of a [`CodeBlock`] that only running it reads: constants, bindings,
@@ -270,7 +298,7 @@ impl CodeBlock {
             bytecode: Bytecode::default(),
             debug_id: CodeBlock::get_next_codeblock_id(),
             ks_charge: crate::ks_code_stats::CodeCharge::new(fixed, 0),
-            body: Box::new(body),
+            body: UnsafeCell::new(BodyState::Resident(Box::new(body))),
             #[cfg(feature = "trace")]
             traced: Cell::new(false),
         }
@@ -288,11 +316,90 @@ impl CodeBlock {
         self.body().source_info.map().path()
     }
 
-    /// Kitesurf: the part only running the block reads, behind one accessor so that it can
-    /// later live elsewhere.
+    /// Kitesurf: the part only running the block reads, fetched from the code store if it
+    /// was swapped out.
     #[inline]
     pub(crate) fn body(&self) -> &CodeBody {
-        &self.body
+        match self.resident_body() {
+            Some(body) => body,
+            None => crate::ks_body::fault_in(self),
+        }
+    }
+
+    /// Kitesurf: the body if it is in memory, without fetching it: what tracing and the
+    /// swap rounds read, since neither may run a fault-in.
+    #[inline]
+    pub(crate) fn resident_body(&self) -> Option<&CodeBody> {
+        // SAFETY: a shared read of the state under `replace_body`'s contract: nothing
+        // replaces the state while the returned reference lives.
+        match unsafe { &*self.body.get() } {
+            BodyState::Resident(body) => Some(body),
+            BodyState::Swapped(_) => None,
+        }
+    }
+
+    /// Kitesurf: the swap descriptor, if the body is in the store; a fault-in reads it and
+    /// then replaces it.
+    pub(crate) fn body_desc(&self) -> Option<&crate::ks_body::BodyDesc> {
+        // SAFETY: a shared read of the state under `replace_body`'s contract: nothing
+        // replaces the state while the returned reference lives.
+        match unsafe { &*self.body.get() } {
+            BodyState::Resident(_) => None,
+            BodyState::Swapped(desc) => Some(desc),
+        }
+    }
+
+    /// Kitesurf: swaps the body state. Safety: no reference from `body`, `resident_body` or
+    /// `body_desc` may be live; bodies leave only never-run blocks at idle, and return on read.
+    pub(crate) unsafe fn replace_body(&self, state: BodyState) -> BodyState {
+        // SAFETY: the caller guarantees no reference into the state is live, so the exclusive
+        // access below aliases nothing.
+        unsafe { std::mem::replace(&mut *self.body.get(), state) }
+    }
+
+    /// Kitesurf: a block whose body is in the store, as a fault-in rebuilds each block
+    /// nested in the body it reads back.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ks_shell(
+        flags: CodeBlockFlags,
+        length: u32,
+        this_mode: ThisMode,
+        name: JsString,
+        text_spanned: SpannedSourceText,
+        bytecode: Bytecode,
+        debug_id: u64,
+        desc: crate::ks_body::BodyDesc,
+    ) -> Self {
+        Self {
+            flags: Cell::new(flags),
+            length,
+            this_mode,
+            name,
+            text_spanned,
+            bytecode,
+            debug_id,
+            ks_charge: crate::ks_code_stats::CodeCharge::new(Self::ks_shell_bytes(), 0),
+            body: UnsafeCell::new(BodyState::Swapped(Box::new(desc))),
+            #[cfg(feature = "trace")]
+            traced: Cell::new(false),
+        }
+    }
+
+    /// Kitesurf: what a block whose body is in the store keeps in memory: the shell and
+    /// its descriptor, for the code counters.
+    pub(crate) fn ks_shell_bytes() -> usize {
+        size_of::<Self>() + size_of::<crate::ks_body::BodyDesc>()
+    }
+
+    pub(crate) fn ks_ran(&self) -> bool {
+        self.flags.get().contains(CodeBlockFlags::KS_RAN)
+    }
+
+    pub(crate) fn ks_mark_ran(&self) {
+        let flags = self.flags.get();
+        if !flags.contains(CodeBlockFlags::KS_RAN) {
+            self.flags.set(flags | CodeBlockFlags::KS_RAN);
+        }
     }
 
     /// Kitesurf: assembles a block from its two parts as the compiler finishes it, charging
@@ -315,7 +422,7 @@ impl CodeBlock {
             bytecode,
             debug_id: CodeBlock::get_next_codeblock_id(),
             ks_charge: crate::ks_code_stats::CodeCharge::default(),
-            body: Box::new(body),
+            body: UnsafeCell::new(BodyState::Resident(Box::new(body))),
             #[cfg(feature = "trace")]
             traced: Cell::new(false),
         }

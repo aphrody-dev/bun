@@ -252,6 +252,22 @@ impl SpannedSourceText {
         self.source_text.clone()
     }
 
+    /// Kitesurf: the span alone, for an embedder that rebuilds this text from its parts
+    /// around a source text it already holds.
+    pub(crate) fn span(&self) -> Option<LinearSpan> {
+        self.span
+    }
+
+    /// Kitesurf: whether `other` points into the same source text, which the blocks of
+    /// one swapped subtree must share.
+    pub(crate) fn ks_same_source(&self, other: &Self) -> bool {
+        match (&self.source_text.source_text, &other.source_text.source_text) {
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
     /// Test if the span is empty.
     #[inline]
     #[must_use]

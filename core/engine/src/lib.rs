@@ -109,6 +109,8 @@ mod sys;
 
 mod ks_code_stats;
 pub use ks_code_stats::ks_code_stats;
+mod ks_body;
+pub use ks_body::ks_debug_dump;
 
 mod ks_code_store;
 pub use ks_code_store::{CodeStore, ks_set_code_store};

@@ -69,6 +69,23 @@ impl SourceMap {
     pub(crate) fn ks_heap_bytes(&self) -> usize {
         self.data.len() + size_of_val::<[Checkpoint]>(&self.checkpoints)
     }
+
+    /// Kitesurf: the encoded entries and checkpoints (`pc, offset, line, column`), for an
+    /// embedder that moves the map out of memory; [`Self::ks_from_parts`] rebuilds it.
+    pub(crate) fn ks_parts(&self) -> (&[u8], impl Iterator<Item = [u32; 4]> + '_) {
+        let checkpoints = self.checkpoints.iter().map(|c| [c.pc, c.offset, c.line, c.column]);
+        (&self.data, checkpoints)
+    }
+
+    /// Kitesurf: the map [`Self::ks_parts`] read, rebuilt for `path`, which every block of
+    /// a script shares and so is not stored with each.
+    pub(crate) fn ks_from_parts(data: Box<[u8]>, checkpoints: &[[u32; 4]], path: SourcePath) -> Self {
+        let checkpoints = checkpoints
+            .iter()
+            .map(|&[pc, offset, line, column]| Checkpoint { pc, offset, line, column })
+            .collect();
+        Self { data, checkpoints, path }
+    }
 }
 
 /// Decoder state at the start of an entry: its pc, byte offset, and the last
