@@ -12,7 +12,6 @@ use boa_gc::{Finalize, Trace};
 use boa_string::JsString;
 pub(crate) use builder::SourceMapBuilder;
 
-use crate::SpannedSourceText;
 
 #[cfg(test)]
 mod tests;
@@ -26,16 +25,11 @@ pub(crate) struct SourceInfo {
 }
 
 impl SourceInfo {
-    pub(crate) fn new(
-        source_map: SourceMap,
-        function_name: JsString,
-        source_text_spanned: SpannedSourceText,
-    ) -> Self {
+    pub(crate) fn new(source_map: SourceMap, function_name: JsString) -> Self {
         Self {
             inner: Rc::new(Inner {
                 map: source_map,
                 function_name,
-                text_spanned: source_text_spanned,
             }),
         }
     }
@@ -48,17 +42,12 @@ impl SourceInfo {
         &self.inner.function_name
     }
 
-    pub(crate) fn text_spanned(&self) -> &SpannedSourceText {
-        &self.inner.text_spanned
-    }
 }
 
 #[derive(Debug, Default, Clone)]
 struct Inner {
     map: SourceMap,
     function_name: JsString,
-
-    text_spanned: SpannedSourceText,
 }
 
 /// Bytecode to source code mapping.

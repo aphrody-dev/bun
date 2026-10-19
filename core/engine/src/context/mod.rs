@@ -935,7 +935,7 @@ impl Context {
         //       i. Assert: d is either a FunctionDeclaration, a GeneratorDeclaration, an AsyncFunctionDeclaration, or an AsyncGeneratorDeclaration.
         //       ii. NOTE: If there are multiple function declarations for the same name, the last declaration is used.
         //       iii. Let fn be the sole element of the BoundNames of d.
-        for fun in codeblock.global_fns.iter().rev() {
+        for fun in codeblock.body().global_fns.iter().rev() {
             // ...
             // 1. Let fnDefinable be ? env.CanDeclareGlobalFunction(fn).
             // 2. If fnDefinable is false, throw a TypeError exception.
@@ -946,7 +946,7 @@ impl Context {
         }
 
         // 10. For each element d of varDeclarations, do
-        for global_var in &codeblock.global_vars {
+        for global_var in &codeblock.body().global_vars {
             // ...
             // a. Let vnDefinable be ? env.CanDeclareGlobalVar(vn).
             // b. If vnDefinable is false, throw a TypeError exception.
@@ -957,7 +957,7 @@ impl Context {
         }
 
         // 16. For each Parse Node f of functionsToInitialize, do
-        for fun in &codeblock.global_fns {
+        for fun in &codeblock.body().global_fns {
             // ...
             // c. Perform ? env.CreateGlobalFunctionBinding(fn, fo, false).
             let function = create_function_object_fast(
@@ -969,7 +969,7 @@ impl Context {
         }
 
         // 17. For each String vn of declaredVarNames, do
-        for global_declared_var in &codeblock.global_vars {
+        for global_declared_var in &codeblock.body().global_vars {
             // a. Perform ? env.CreateGlobalVarBinding(vn, false).
             let name = codeblock.constant_string(*global_declared_var as usize);
             self.create_global_var_binding(name, configurable_globals)?;
@@ -989,7 +989,7 @@ impl Context {
         codeblock: &CodeBlock,
     ) -> JsResult<()> {
         // 3. For each element name of lexNames, do
-        for global_lex in &codeblock.global_lexs {
+        for global_lex in &codeblock.body().global_lexs {
             // c. Let hasRestrictedGlobal be ? env.HasRestrictedGlobalProperty(name).
             // d. If hasRestrictedGlobal is true, throw a SyntaxError exception.
             let name = codeblock.constant_string(*global_lex as usize);

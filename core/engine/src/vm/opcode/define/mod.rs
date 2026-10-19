@@ -18,7 +18,7 @@ impl DefVar {
     #[inline(always)]
     pub(super) fn operation(index: IndexOperand, context: &mut Context) {
         // TODO: spec specifies to return `empty` on empty vars, but we're trying to initialize.
-        let binding_locator = context.vm.frame().code_block.bindings[usize::from(index)].clone();
+        let binding_locator = context.vm.frame().code_block.body().bindings[usize::from(index)].clone();
 
         {
             let frame = context.vm.frame_mut();
@@ -45,7 +45,7 @@ pub(crate) struct DefEvalVar;
 impl DefEvalVar {
     #[inline(always)]
     pub(super) fn operation(index: IndexOperand, context: &mut Context) {
-        let binding_locator = context.vm.frame().code_block.bindings[usize::from(index)].clone();
+        let binding_locator = context.vm.frame().code_block.body().bindings[usize::from(index)].clone();
 
         if context.is_deleted_binding(&binding_locator) {
             context.restore_deleted_binding(&binding_locator);
@@ -86,7 +86,7 @@ impl DefInitVar {
         let value = context.vm.get_register(value.into()).clone();
         let frame = context.vm.frame();
         let strict = frame.code_block.strict();
-        let mut binding_locator = frame.code_block.bindings[usize::from(index)].clone();
+        let mut binding_locator = frame.code_block.body().bindings[usize::from(index)].clone();
 
         if context.is_deleted_binding(&binding_locator) {
             context.restore_deleted_binding(&binding_locator);
@@ -119,7 +119,7 @@ impl PutLexicalValue {
         context: &mut Context,
     ) {
         let value = context.vm.get_register(value.into()).clone();
-        let binding_locator = context.vm.frame().code_block.bindings[usize::from(index)].clone();
+        let binding_locator = context.vm.frame().code_block.body().bindings[usize::from(index)].clone();
         {
             let frame = context.vm.frame_mut();
             let global = frame.realm.environment();

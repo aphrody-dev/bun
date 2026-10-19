@@ -92,7 +92,7 @@ fn walk(block: &CodeBlock, store: &dyn crate::CodeStore, keep_expanded: bool, de
     if keep_expanded {
         block.bytecode.store_expanded(store);
     }
-    for constant in &block.constants {
+    for constant in &block.body().constants {
         if let Constant::Function(inner) = constant {
             freed += walk(inner, store, true, depth + 1);
         }

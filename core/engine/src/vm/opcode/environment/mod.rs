@@ -98,7 +98,7 @@ impl ThisForObjectEnvironmentName {
         (dst, index): (RegisterOperand, IndexOperand),
         context: &mut Context,
     ) -> JsResult<()> {
-        let binding_locator = context.vm.frame().code_block.bindings[usize::from(index)].clone();
+        let binding_locator = context.vm.frame().code_block.body().bindings[usize::from(index)].clone();
         let this = context
             .this_from_object_environment_binding(&binding_locator)?
             .map_or(JsValue::undefined(), Into::into);

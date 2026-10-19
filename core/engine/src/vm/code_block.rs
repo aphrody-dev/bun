@@ -123,7 +123,7 @@ pub(crate) struct GlobalFunctionBinding {
 /// A `CodeBlock` is generated for each function compiled by the
 /// [`ByteCompiler`](crate::bytecompiler::ByteCompiler). It stores the bytecode and the other
 /// attributes of the function.
-#[derive(Clone, Debug, Trace, Finalize)]
+#[derive(Debug, Trace, Finalize)]
 pub struct CodeBlock {
     #[unsafe_ignore_trace]
     pub(crate) flags: Cell<CodeBlockFlags>,
@@ -131,20 +131,50 @@ pub struct CodeBlock {
     /// The number of arguments expected.
     pub(crate) length: u32,
 
-    pub(crate) parameter_length: u32,
-
-    pub(crate) register_count: u32,
-
     /// `[[ThisMode]]`
     pub(crate) this_mode: ThisMode,
 
-    /// Used for constructing a `MappedArguments` object.
+    /// The function's name, for function objects and call frames; kept beside the body's
+    /// source info so that making a function object reads nothing else.
+    pub(crate) name: JsString,
+
+    /// The function's source text, for `Function.prototype.toString`, its only reader,
+    /// which so never needs the body.
     #[unsafe_ignore_trace]
-    pub(crate) mapped_arguments_binding_indices: ThinVec<Option<u32>>,
+    pub(crate) text_spanned: SpannedSourceText,
 
     /// Bytecode
     #[unsafe_ignore_trace]
     pub(crate) bytecode: Bytecode,
+
+    // Used for identifying anonymous functions in compiled output and call frames.
+    pub(crate) debug_id: u64,
+
+    // Kitesurf: this block's share of the code counters (crate::ks_code_stats), refunded
+    // when it drops; `ks_charged` sets it once the block's parts are in place.
+    #[unsafe_ignore_trace]
+    pub(crate) ks_charge: crate::ks_code_stats::CodeCharge,
+
+    // Kitesurf: what only running the block reads; the fields above are what making a
+    // function object, printing its source and running its bytecode need.
+    body: Box<CodeBody>,
+
+    #[cfg(feature = "trace")]
+    #[unsafe_ignore_trace]
+    pub(crate) traced: Cell<bool>,
+}
+
+/// Kitesurf: the part of a [`CodeBlock`] that only running it reads: constants, bindings,
+/// handlers, inline caches, source map and global tables.
+#[derive(Debug, Trace, Finalize)]
+pub(crate) struct CodeBody {
+    pub(crate) parameter_length: u32,
+
+    pub(crate) register_count: u32,
+
+    /// Used for constructing a `MappedArguments` object.
+    #[unsafe_ignore_trace]
+    pub(crate) mapped_arguments_binding_indices: ThinVec<Option<u32>>,
 
     pub(crate) constants: ThinVec<Constant>,
 
@@ -169,18 +199,22 @@ pub struct CodeBlock {
     pub(crate) global_lexs: Box<[u32]>,
     pub(crate) global_fns: Box<[GlobalFunctionBinding]>,
     pub(crate) global_vars: Box<[u32]>,
+}
 
-    // Used for identifying anonymous functions in compiled output and call frames.
-    pub(crate) debug_id: u64,
-
-    // Kitesurf: this block's share of the code counters (crate::ks_code_stats), refunded
-    // when it drops; `ks_charged` sets it once the block's parts are in place.
-    #[unsafe_ignore_trace]
-    pub(crate) ks_charge: crate::ks_code_stats::CodeCharge,
-
-    #[cfg(feature = "trace")]
-    #[unsafe_ignore_trace]
-    pub(crate) traced: Cell<bool>,
+impl CodeBody {
+    /// Kitesurf: the heap bytes this body owns, apart from its source map: the box and the
+    /// arrays. Shared strings, scopes and nested blocks are not its own.
+    pub(crate) fn ks_fixed_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.mapped_arguments_binding_indices.capacity() * size_of::<Option<u32>>()
+            + self.constants.capacity() * size_of::<Constant>()
+            + size_of_val::<[BindingLocator]>(&self.bindings)
+            + self.handlers.capacity() * size_of::<Handler>()
+            + size_of_val::<[JsString]>(&self.ic_names)
+            + size_of_val::<[u32]>(&self.global_lexs)
+            + size_of_val::<[GlobalFunctionBinding]>(&self.global_fns)
+            + size_of_val::<[u32]>(&self.global_vars)
+    }
 }
 
 /// ---- `CodeBlock` public API ----
@@ -188,9 +222,10 @@ impl CodeBlock {
     /// The inline caches, built from [`Self::ic_names`] the first time any is used.
     #[inline]
     pub(crate) fn ic(&self) -> &[InlineCache] {
-        self.ic.get_or_init(|| {
+        let body = self.body();
+        body.ic.get_or_init(|| {
             let ic: Box<[InlineCache]> =
-                self.ic_names.iter().cloned().map(InlineCache::new).collect();
+                body.ic_names.iter().cloned().map(InlineCache::new).collect();
             self.ks_charge.charge_ic(size_of_val::<[InlineCache]>(&ic));
             ic
         })
@@ -200,16 +235,8 @@ impl CodeBlock {
     /// and its source map apart. Shared strings, scopes and nested blocks are not its own.
     #[must_use]
     pub(crate) fn ks_charged(mut self) -> Self {
-        let fixed = size_of::<Self>()
-            + self.mapped_arguments_binding_indices.capacity() * size_of::<Option<u32>>()
-            + self.constants.capacity() * size_of::<Constant>()
-            + size_of_val::<[BindingLocator]>(&self.bindings)
-            + self.handlers.capacity() * size_of::<Handler>()
-            + size_of_val::<[JsString]>(&self.ic_names)
-            + size_of_val::<[u32]>(&self.global_lexs)
-            + size_of_val::<[GlobalFunctionBinding]>(&self.global_fns)
-            + size_of_val::<[u32]>(&self.global_vars);
-        let map = self.source_info.map().ks_heap_bytes();
+        let fixed = size_of::<Self>() + self.body().ks_fixed_bytes();
+        let map = self.body().source_info.map().ks_heap_bytes();
         self.ks_charge = crate::ks_code_stats::CodeCharge::new(fixed, map);
         self
     }
@@ -219,29 +246,31 @@ impl CodeBlock {
     pub fn new(name: JsString, length: u32, strict: bool) -> Self {
         let mut flags = CodeBlockFlags::empty();
         flags.set(CodeBlockFlags::STRICT, strict);
-        Self {
-            bytecode: Bytecode::default(),
+        let body = CodeBody {
+            parameter_length: 0,
+            register_count: 0,
+            mapped_arguments_binding_indices: ThinVec::new(),
             constants: ThinVec::default(),
             bindings: Box::default(),
-            flags: Cell::new(flags),
-            length,
-            register_count: 0,
-            this_mode: ThisMode::Global,
-            mapped_arguments_binding_indices: ThinVec::new(),
-            parameter_length: 0,
             handlers: ThinVec::default(),
             ic_names: Box::default(),
             ic: OnceCell::new(),
-            source_info: SourceInfo::new(
-                SourceMap::new(Box::default(), SourcePath::None),
-                name,
-                SpannedSourceText::new_empty(),
-            ),
+            source_info: SourceInfo::new(SourceMap::new(Box::default(), SourcePath::None), name.clone()),
             global_lexs: Box::default(),
             global_fns: Box::default(),
             global_vars: Box::default(),
+        };
+        let fixed = size_of::<Self>() + body.ks_fixed_bytes();
+        Self {
+            flags: Cell::new(flags),
+            length,
+            this_mode: ThisMode::Global,
+            name,
+            text_spanned: SpannedSourceText::new_empty(),
+            bytecode: Bytecode::default(),
             debug_id: CodeBlock::get_next_codeblock_id(),
-            ks_charge: crate::ks_code_stats::CodeCharge::new(size_of::<Self>(), 0),
+            ks_charge: crate::ks_code_stats::CodeCharge::new(fixed, 0),
+            body: Box::new(body),
             #[cfg(feature = "trace")]
             traced: Cell::new(false),
         }
@@ -250,13 +279,47 @@ impl CodeBlock {
     /// Retrieves the name associated with this code block.
     #[must_use]
     pub fn name(&self) -> &JsString {
-        self.source_info.function_name()
+        &self.name
     }
 
     /// Retrieves the path of this code block.
     #[must_use]
     pub fn path(&self) -> &SourcePath {
-        self.source_info.map().path()
+        self.body().source_info.map().path()
+    }
+
+    /// Kitesurf: the part only running the block reads, behind one accessor so that it can
+    /// later live elsewhere.
+    #[inline]
+    pub(crate) fn body(&self) -> &CodeBody {
+        &self.body
+    }
+
+    /// Kitesurf: assembles a block from its two parts as the compiler finishes it, charging
+    /// it to the code counters.
+    pub(crate) fn from_parts(
+        flags: CodeBlockFlags,
+        length: u32,
+        this_mode: ThisMode,
+        name: JsString,
+        text_spanned: SpannedSourceText,
+        bytecode: Bytecode,
+        body: CodeBody,
+    ) -> Self {
+        Self {
+            flags: Cell::new(flags),
+            length,
+            this_mode,
+            name,
+            text_spanned,
+            bytecode,
+            debug_id: CodeBlock::get_next_codeblock_id(),
+            ks_charge: crate::ks_code_stats::CodeCharge::default(),
+            body: Box::new(body),
+            #[cfg(feature = "trace")]
+            traced: Cell::new(false),
+        }
+        .ks_charged()
     }
 
     /// Check if the function is traced.
@@ -343,7 +406,8 @@ impl CodeBlock {
     /// Find exception [`Handler`] in the code block given the current program counter (`pc`).
     #[inline]
     pub(crate) fn find_handler(&self, pc: u32) -> Option<(usize, &Handler)> {
-        self.handlers
+        self.body()
+            .handlers
             .iter()
             .enumerate()
             .rev()
@@ -357,7 +421,7 @@ impl CodeBlock {
     /// If the type of the [`Constant`] is not [`Constant::String`].
     /// Or `index` is greater or equal to length of `constants`.
     pub(crate) fn constant_string(&self, index: usize) -> JsString {
-        if let Some(Constant::String(value)) = self.constants.get(index) {
+        if let Some(Constant::String(value)) = self.body().constants.get(index) {
             return value.clone();
         }
 
@@ -371,7 +435,7 @@ impl CodeBlock {
     /// If the type of the [`Constant`] is not [`Constant::Function`].
     /// Or `index` is greater or equal to length of `constants`.
     pub(crate) fn constant_function(&self, index: usize) -> Gc<Self> {
-        if let Some(Constant::Function(value)) = self.constants.get(index) {
+        if let Some(Constant::Function(value)) = self.body().constants.get(index) {
             return value.clone();
         }
 
@@ -385,7 +449,7 @@ impl CodeBlock {
     /// If the type of the [`Constant`] is not [`Constant::Scope`].
     /// Or `index` is greater or equal to length of `constants`.
     pub(crate) fn constant_scope(&self, index: usize) -> Scope {
-        if let Some(Constant::Scope(value)) = self.constants.get(index) {
+        if let Some(Constant::Scope(value)) = self.body().constants.get(index) {
             return value.clone();
         }
 
@@ -393,7 +457,7 @@ impl CodeBlock {
     }
 
     pub(crate) fn source_info(&self) -> &SourceInfo {
-        &self.source_info
+        &self.body().source_info
     }
 
     pub(crate) fn get_next_codeblock_id() -> u64 {
@@ -693,7 +757,7 @@ impl CodeBlock {
                 value,
                 ic_index,
             } => {
-                let ic = &self.ic_names[u32::from(*ic_index) as usize].display_escaped();
+                let ic = &self.body().ic_names[u32::from(*ic_index) as usize].display_escaped();
                 format!("dst:{dst}, value:{value}, ic:{ic}")
             }
             Instruction::GetPropertyByNameWithThis {
@@ -702,7 +766,7 @@ impl CodeBlock {
                 value,
                 ic_index,
             } => {
-                let ic = &self.ic_names[u32::from(*ic_index) as usize].display_escaped();
+                let ic = &self.body().ic_names[u32::from(*ic_index) as usize].display_escaped();
                 format!("dst:{dst}, receiver:{receiver}, value:{value}, ic:{ic}")
             }
             Instruction::SetPropertyByName {
@@ -710,7 +774,7 @@ impl CodeBlock {
                 object,
                 ic_index,
             } => {
-                let ic = &self.ic_names[u32::from(*ic_index) as usize].display_escaped();
+                let ic = &self.body().ic_names[u32::from(*ic_index) as usize].display_escaped();
                 format!("object:{object}, value:{value}, ic:{ic}")
             }
             Instruction::SetPropertyByNameWithThis {
@@ -719,7 +783,7 @@ impl CodeBlock {
                 object,
                 ic_index,
             } => {
-                let ic = &self.ic_names[u32::from(*ic_index) as usize].display_escaped();
+                let ic = &self.body().ic_names[u32::from(*ic_index) as usize].display_escaped();
                 format!("object:{object}, receiver:{receiver}, value:{value}, ic:{ic}")
             }
             Instruction::GetPropertyByValue {
@@ -1023,15 +1087,15 @@ impl Display for CodeBlock {
         writeln!(
             f,
             "\nRegister Count: {}, Flags: {:?}",
-            self.register_count,
+            self.body().register_count,
             self.flags.get()
         )?;
         f.write_str("Constants:")?;
-        if self.constants.is_empty() {
+        if self.body().constants.is_empty() {
             f.write_str(" <empty>\n")?;
         } else {
             f.write_char('\n')?;
-            for (i, value) in self.constants.iter().enumerate() {
+            for (i, value) in self.body().constants.iter().enumerate() {
                 write!(f, "    {i:04}: ")?;
                 match value {
                     Constant::String(v) => {
@@ -1060,11 +1124,11 @@ impl Display for CodeBlock {
             }
         }
         f.write_str("Bindings:")?;
-        if self.bindings.is_empty() {
+        if self.body().bindings.is_empty() {
             f.write_str(" <empty>\n")?;
         } else {
             f.write_char('\n')?;
-            for (i, binding_locator) in self.bindings.iter().enumerate() {
+            for (i, binding_locator) in self.body().bindings.iter().enumerate() {
                 writeln!(
                     f,
                     "    {i:04}: {}, scope: {:?}",
@@ -1074,11 +1138,11 @@ impl Display for CodeBlock {
             }
         }
         f.write_str("Handlers:")?;
-        if self.handlers.is_empty() {
+        if self.body().handlers.is_empty() {
             f.write_str(" <empty>\n")?;
         } else {
             f.write_char('\n')?;
-            for (i, handler) in self.handlers.iter().enumerate() {
+            for (i, handler) in self.body().handlers.iter().enumerate() {
                 writeln!(
                     f,
                     "    {i:04}: Range: [{:04}, {:04}): Handler: {:04}, Environment: {:02}",

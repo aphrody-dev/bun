@@ -20,7 +20,7 @@ impl GetName {
         context: &mut Context,
     ) -> JsResult<()> {
         let mut binding_locator =
-            context.vm.frame().code_block.bindings[usize::from(index)].clone();
+            context.vm.frame().code_block.body().bindings[usize::from(index)].clone();
         context.find_runtime_binding(&mut binding_locator)?;
         let result = context.get_binding_live(&binding_locator)?.ok_or_else(|| {
             let name = binding_locator.name().to_std_string_escaped();
@@ -51,7 +51,7 @@ impl GetNameGlobal {
         context: &mut Context,
     ) -> JsResult<()> {
         let mut binding_locator =
-            context.vm.frame().code_block.bindings[usize::from(index)].clone();
+            context.vm.frame().code_block.body().bindings[usize::from(index)].clone();
         context.find_runtime_binding(&mut binding_locator)?;
 
         if binding_locator.is_global() {
@@ -133,7 +133,7 @@ impl GetLocator {
     #[inline(always)]
     pub(crate) fn operation(index: IndexOperand, context: &mut Context) -> JsResult<()> {
         let mut binding_locator =
-            context.vm.frame().code_block.bindings[usize::from(index)].clone();
+            context.vm.frame().code_block.body().bindings[usize::from(index)].clone();
         context.find_runtime_binding(&mut binding_locator)?;
 
         context.vm.frame_mut().binding_stack.push(binding_locator);
@@ -163,7 +163,7 @@ impl GetNameAndLocator {
         context: &mut Context,
     ) -> JsResult<()> {
         let mut binding_locator =
-            context.vm.frame().code_block.bindings[usize::from(index)].clone();
+            context.vm.frame().code_block.body().bindings[usize::from(index)].clone();
         context.find_runtime_binding(&mut binding_locator)?;
         let result = context.get_binding_live(&binding_locator)?.ok_or_else(|| {
             let name = binding_locator.name().to_std_string_escaped();
@@ -196,7 +196,7 @@ impl GetNameOrUndefined {
         context: &mut Context,
     ) -> JsResult<()> {
         let mut binding_locator =
-            context.vm.frame().code_block.bindings[usize::from(index)].clone();
+            context.vm.frame().code_block.body().bindings[usize::from(index)].clone();
 
         let is_global = binding_locator.is_global();
 

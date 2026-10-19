@@ -17,7 +17,7 @@ pub(crate) struct StoreLiteral;
 impl StoreLiteral {
     #[inline(always)]
     pub(crate) fn operation((dst, index): (RegisterOperand, IndexOperand), context: &mut Context) {
-        let constant = &context.vm.frame().code_block().constants[usize::from(index)];
+        let constant = &context.vm.frame().code_block().body().constants[usize::from(index)];
         let value: JsValue = match constant {
             Constant::BigInt(v) => v.clone().into(),
             Constant::String(v) => v.clone().into(),

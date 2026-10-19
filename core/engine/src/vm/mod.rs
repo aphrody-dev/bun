@@ -28,7 +28,8 @@ pub(crate) use opcode::{Instruction, InstructionIterator, Opcode};
 pub(crate) use {
     call_frame::CallFrameFlags,
     code_block::{
-        CodeBlockFlags, Constant, Handler, create_function_object, create_function_object_fast,
+        CodeBlockFlags, CodeBody, Constant, Handler, create_function_object,
+        create_function_object_fast,
     },
     completion_record::CompletionRecord,
     inline_cache::InlineCache,
@@ -199,7 +200,7 @@ impl Stack {
     /// Get the rest arguments of the given frame.
     pub(crate) fn pop_rest_arguments(&mut self, frame: &CallFrame) -> Option<Vec<JsValue>> {
         let argument_count = frame.argument_count as usize;
-        let param_count = frame.code_block().parameter_length as usize;
+        let param_count = frame.code_block().body().parameter_length as usize;
         if argument_count < param_count {
             return None;
         }
@@ -608,7 +609,7 @@ impl Vm {
             let current_stack_length = self.stack.stack.len() as u32;
             frame.fp = current_stack_length - frame.argument_count - CallFrame::FUNCTION_PROLOGUE;
 
-            let register_count = frame.code_block.register_count as usize;
+            let register_count = frame.code_block.body().register_count as usize;
             frame.rp = self.stack.stack.len() as u32;
             self.stack.stack.resize(
                 self.stack.stack.len() + register_count,
@@ -625,7 +626,7 @@ impl Vm {
 
         let current_pc = self.frame().pc;
         self.shadow_stack
-            .push_bytecode(current_pc, frame.code_block().source_info.clone());
+            .push_bytecode(current_pc, frame.code_block().source_info().clone());
 
         self.frames.push(frame);
         // Kitesurf: pinned after the push, which can allocate and so run a forced swap round:
@@ -670,9 +671,9 @@ impl Vm {
 
         let catch_address = handler.handler();
         let environment_sp = frame.env_fp + handler.environment_count;
-        // Nothing above the registers is live at a catch; only half-built calls
-        // push there.
-        let registers_end = frame.rp as usize + frame.code_block().register_count as usize;
+        // Kitesurf: nothing above the registers is live at a catch (only half-built calls
+        // push there), and 0.20's stack_count truncation has no register-VM equivalent.
+        let registers_end = frame.rp as usize + frame.code_block().body().register_count as usize;
 
         // Go to handler location.
         frame.pc = u32::from(catch_address);

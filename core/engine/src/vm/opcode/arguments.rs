@@ -32,7 +32,7 @@ impl CreateMappedArgumentsObject {
         };
         let arguments = MappedArguments::new(
             &function_object,
-            &code.mapped_arguments_binding_indices,
+            &code.body().mapped_arguments_binding_indices,
             args,
             &env,
             context,

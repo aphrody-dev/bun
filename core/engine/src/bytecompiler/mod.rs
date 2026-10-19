@@ -35,7 +35,6 @@ mod utils;
 
 use std::{
     borrow::{Borrow, BorrowMut},
-    cell::Cell,
     ops::{Deref, DerefMut},
 };
 
@@ -44,7 +43,7 @@ use crate::{
     builtins::function::{ThisMode, arguments::MappedArguments},
     js_string,
     vm::{
-        CallFrame, CodeBlock, CodeBlockFlags, Constant, GeneratorResumeKind, GlobalFunctionBinding,
+        CallFrame, CodeBlock, CodeBlockFlags, CodeBody, Constant, GeneratorResumeKind, GlobalFunctionBinding,
         Handler,
         opcode::{Address, BindingOpcode, BytecodeEmitter, RegisterOperand},
         source_info::{SourceInfo, SourceMap, SourceMapBuilder, SourcePath},
@@ -2821,33 +2820,32 @@ impl<'ctx> ByteCompiler<'ctx> {
             }
         }
 
-        CodeBlock {
-            length: self.length,
-            register_count,
-            this_mode: self.this_mode,
+        let body = CodeBody {
             parameter_length: self.params.as_ref().len() as u32,
+            register_count,
             mapped_arguments_binding_indices,
-            bytecode: self.bytecode.into_bytecode(),
             constants: self.constants,
             bindings: self.bindings.into_boxed_slice(),
             handlers: self.handlers,
-            flags: Cell::new(self.code_block_flags),
             ic_names: self.ic.into_boxed_slice(),
             ic: std::cell::OnceCell::new(),
             source_info: SourceInfo::new(
                 SourceMap::new(source_map_entries, self.source_path),
-                self.function_name,
-                self.spanned_source_text,
+                self.function_name.clone(),
             ),
             global_lexs: self.global_lexs.into_boxed_slice(),
             global_fns: self.global_fns.into_boxed_slice(),
             global_vars: self.global_vars.into_boxed_slice(),
-            debug_id: CodeBlock::get_next_codeblock_id(),
-            ks_charge: crate::ks_code_stats::CodeCharge::default(),
-            #[cfg(feature = "trace")]
-            traced: Cell::new(false),
-        }
-        .ks_charged()
+        };
+        CodeBlock::from_parts(
+            self.code_block_flags,
+            self.length,
+            self.this_mode,
+            self.function_name,
+            self.spanned_source_text,
+            self.bytecode.into_bytecode(),
+            body,
+        )
     }
 
     fn compile_declaration_pattern(

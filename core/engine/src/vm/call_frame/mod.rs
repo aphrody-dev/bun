@@ -96,7 +96,7 @@ impl CallFrame {
     #[inline]
     #[must_use]
     pub fn position(&self) -> CallFrameLocation {
-        let source_info = &self.code_block.source_info;
+        let source_info = &self.code_block.source_info();
         CallFrameLocation {
             function_name: source_info.function_name().clone(),
             path: source_info.map().path().clone(),

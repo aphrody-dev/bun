@@ -52,7 +52,7 @@ impl SetName {
     ) -> JsResult<()> {
         let value = context.vm.get_register(value.into()).clone();
         let code_block = context.vm.frame().code_block();
-        let mut binding_locator = code_block.bindings[usize::from(index)].clone();
+        let mut binding_locator = code_block.body().bindings[usize::from(index)].clone();
         let strict = code_block.strict();
 
         context.find_runtime_binding(&mut binding_locator)?;
