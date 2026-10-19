@@ -22,7 +22,7 @@ mod tests;
 
 use crate::{
     Error,
-    lexer::{InputElement, TokenKind},
+    lexer::{InputElement, Token, TokenKind},
     parser::{
         AllowAwait, AllowIn, AllowYield, Cursor, OrAbrupt, ParseResult, TokenParser,
         expression::assignment::ExponentiationExpression,
@@ -35,7 +35,7 @@ use boa_ast::{
         Identifier,
         operator::{
             Binary, BinaryInPrivate,
-            binary::{BinaryOp, LogicalOp},
+            binary::{ArithmeticOp, BinaryOp, BitwiseOp, LogicalOp, RelationalOp},
         },
     },
     function::PrivateName,
@@ -51,62 +51,6 @@ pub(in crate::parser) use {
         AsyncGeneratorMethod, AsyncMethod, GeneratorMethod, PropertyName,
     },
 };
-
-/// Generates an expression parser for a number of expressions whose production rules are of the following pattern.
-///
-/// ```text
-/// <TargetExpression>[allowed_identifiers]
-///     => <InnerExpression>[?allowed_identifiers]
-///     => <TargetExpression>[?allowed_identifiers] <op1> <InnerExpression>[?allowed_identifiers]
-///     => <TargetExpression>[?allowed_identifiers] <op2> <InnerExpression>[?allowed_identifiers]
-///     ...
-/// ```
-///
-/// This macro has 2 mandatory identifiers:
-///  - The `$name` identifier is the name of the `TargetExpression` struct that the parser will be implemented for.
-///  - The `$lower` identifier is the name of the `InnerExpression` struct according to the pattern above.
-///
-/// A list of punctuators (operands between the `TargetExpression` and `InnerExpression`) are passed as the third parameter.
-///
-/// The fifth parameter is an `Option<InputElement>` which sets the goal symbol to set before parsing (or None to leave it as is).
-macro_rules! expression {
-    ($name:ident, $lower:ident, [$( $op:path ),*], [$( $low_param:ident ),*], $goal:expr ) => {
-        impl<R> TokenParser<R> for $name
-        where
-            R: ReadChar
-        {
-            type Output = FormalParameterListOrExpression;
-
-            fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner)-> ParseResult<Self::Output> {
-
-                if $goal.is_some() {
-                    cursor.set_goal($goal.unwrap());
-                }
-
-                let lhs = $lower::new($( self.$low_param ),*).parse(cursor, interner)?;
-                let FormalParameterListOrExpression::Expression(mut lhs) = lhs else {
-                    return Ok(lhs);
-                };
-
-                while let Some(tok) = cursor.peek(0, interner)? {
-                    match *tok.kind() {
-                        TokenKind::Punctuator(op) if $( op == $op )||* => {
-                            cursor.advance(interner);
-                            lhs = Binary::new(
-                                op.as_binary_op().expect("Could not get binary operation."),
-                                lhs,
-                                $lower::new($( self.$low_param ),*).parse(cursor, interner)?.try_into_expression()?
-                            ).into();
-                        }
-                        _ => break
-                    }
-                }
-
-                Ok(lhs.into())
-            }
-        }
-    };
-}
 
 /// Expression parsing.
 ///
@@ -211,27 +155,13 @@ fn comma_chain(first: ast::Expression, rest: Vec<ast::Expression>) -> ast::Expre
     balanced(&mut all.into_iter(), n)
 }
 
-/// Parses a logical expression expression.
-///
-/// More information:
-///  - [MDN documentation][mdn]
-///  - [ECMAScript specification][spec]
-///
-/// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Logical_Operators
-/// [spec]: https://tc39.es/ecma262/#prod-ShortCircuitExpression
+/// Parses every binary operator looser than `**` in one frame, by operator precedence: a
+/// parser per grammar level cost nine frames per operand, ~4 KiB of wasm stack per nesting.
 #[derive(Debug, Clone, Copy)]
 struct ShortCircuitExpression {
     allow_in: AllowIn,
     allow_yield: AllowYield,
     allow_await: AllowAwait,
-    previous: PreviousExpr,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum PreviousExpr {
-    None,
-    Logical,
-    Coalesce,
 }
 
 impl ShortCircuitExpression {
@@ -246,27 +176,120 @@ impl ShortCircuitExpression {
             allow_in: allow_in.into(),
             allow_yield: allow_yield.into(),
             allow_await: allow_await.into(),
-            previous: PreviousExpr::None,
+        }
+    }
+}
+
+const PREC_LOGICAL_OR: u8 = 1; // `||` and `??`, which cannot mix without parentheses
+const PREC_RELATIONAL: u8 = 7;
+const PREC_MULTIPLICATIVE: u8 = 10;
+
+const fn precedence(op: BinaryOp) -> u8 {
+    match op {
+        BinaryOp::Logical(LogicalOp::Or | LogicalOp::Coalesce) => PREC_LOGICAL_OR,
+        BinaryOp::Logical(LogicalOp::And) => 2,
+        BinaryOp::Bitwise(BitwiseOp::Or) => 3,
+        BinaryOp::Bitwise(BitwiseOp::Xor) => 4,
+        BinaryOp::Bitwise(BitwiseOp::And) => 5,
+        BinaryOp::Relational(
+            RelationalOp::Equal
+            | RelationalOp::NotEqual
+            | RelationalOp::StrictEqual
+            | RelationalOp::StrictNotEqual,
+        ) => 6,
+        BinaryOp::Relational(_) => PREC_RELATIONAL,
+        BinaryOp::Bitwise(BitwiseOp::Shl | BitwiseOp::Shr | BitwiseOp::UShr) => 8,
+        BinaryOp::Arithmetic(ArithmeticOp::Add | ArithmeticOp::Sub) => 9,
+        BinaryOp::Arithmetic(_) | BinaryOp::Comma => PREC_MULTIPLICATIVE,
+    }
+}
+
+/// A left operand and its operator, waiting for the right operand. `#x in o` has no
+/// `Binary` node, so its private name waits in a variant of its own.
+enum Pending {
+    Binary(ast::Expression, BinaryOp),
+    PrivateIn(PrivateName),
+}
+
+impl Pending {
+    const fn precedence(&self) -> u8 {
+        match self {
+            Self::Binary(_, op) => precedence(*op),
+            Self::PrivateIn(_) => PREC_RELATIONAL,
         }
     }
 
-    fn with_previous<I, Y, A>(
-        allow_in: I,
-        allow_yield: Y,
-        allow_await: A,
-        previous: PreviousExpr,
-    ) -> Self
-    where
-        I: Into<AllowIn>,
-        Y: Into<AllowYield>,
-        A: Into<AllowAwait>,
-    {
-        Self {
-            allow_in: allow_in.into(),
-            allow_yield: allow_yield.into(),
-            allow_await: allow_await.into(),
-            previous,
+    fn reduce(self, rhs: ast::Expression) -> ast::Expression {
+        match self {
+            Self::Binary(lhs, op) => Binary::new(op, lhs, rhs).into(),
+            Self::PrivateIn(name) => BinaryInPrivate::new(name, rhs).into(),
         }
+    }
+}
+
+/// The binary operator `tok` stands for, if it is one parsed here. `in` only counts when
+/// `allow_in`, but an escaped `in` or `instanceof` is an error either way.
+fn binary_operator(tok: &Token, allow_in: AllowIn) -> ParseResult<Option<BinaryOp>> {
+    Ok(match *tok.kind() {
+        TokenKind::Punctuator(
+            op @ (Punctuator::Coalesce
+            | Punctuator::BoolOr
+            | Punctuator::BoolAnd
+            | Punctuator::Or
+            | Punctuator::Xor
+            | Punctuator::And
+            | Punctuator::Eq
+            | Punctuator::NotEq
+            | Punctuator::StrictEq
+            | Punctuator::StrictNotEq
+            | Punctuator::LessThan
+            | Punctuator::GreaterThan
+            | Punctuator::LessThanOrEq
+            | Punctuator::GreaterThanOrEq
+            | Punctuator::LeftSh
+            | Punctuator::RightSh
+            | Punctuator::URightSh
+            | Punctuator::Add
+            | Punctuator::Sub
+            | Punctuator::Mul
+            | Punctuator::Div
+            | Punctuator::Mod),
+        ) => op.as_binary_op(),
+        TokenKind::Keyword((Keyword::InstanceOf | Keyword::In, true)) => {
+            return Err(Error::general(
+                "Keyword must not contain escaped characters",
+                tok.span().start(),
+            ));
+        }
+        TokenKind::Keyword((op @ Keyword::InstanceOf, false)) => op.as_binary_op(),
+        TokenKind::Keyword((op @ Keyword::In, false)) if allow_in.0 => op.as_binary_op(),
+        _ => None,
+    })
+}
+
+/// Consumes `#name in` and returns the name, if that is what comes next. Only valid where a
+/// `RelationalExpression` may start: `#x in o` is not a `ShiftExpression`.
+fn private_in<R: ReadChar>(
+    cursor: &mut Cursor<R>,
+    interner: &mut Interner,
+) -> ParseResult<Option<PrivateName>> {
+    let token = cursor.peek(0, interner).or_abrupt()?;
+    let TokenKind::PrivateIdentifier(identifier) = *token.kind() else {
+        return Ok(None);
+    };
+    let identifier_span = token.span();
+    let token = cursor.peek(1, interner).or_abrupt()?;
+    match token.kind() {
+        TokenKind::Keyword((Keyword::In, true)) => Err(Error::general(
+            "Keyword must not contain escaped characters",
+            token.span().start(),
+        )),
+        TokenKind::Keyword((Keyword::In, false)) => {
+            cursor.advance(interner);
+            cursor.advance(interner);
+            Ok(Some(PrivateName::new(identifier, identifier_span)))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -277,19 +300,46 @@ where
     type Output = FormalParameterListOrExpression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let current_node =
-            BitwiseORExpression::new(self.allow_in, self.allow_yield, self.allow_await)
+        let mut pending: Vec<Pending> = Vec::new();
+        let mut prev_prec = 0; // the operator before this operand; 0 before the first
+        let mut seen_logical = false;
+        let mut seen_coalesce = false;
+
+        let mut rhs = loop {
+            if self.allow_in.0
+                && prev_prec < PREC_RELATIONAL
+                && let Some(name) = private_in(cursor, interner)?
+            {
+                pending.push(Pending::PrivateIn(name));
+                prev_prec = PREC_RELATIONAL;
+                continue;
+            }
+
+            // The per-level parsers set the goal on entering MultiplicativeExpression, which
+            // the right operand of `*`, `/` and `%` skipped.
+            if prev_prec != PREC_MULTIPLICATIVE {
+                cursor.set_goal(InputElement::Div);
+            }
+            let operand = ExponentiationExpression::new(self.allow_yield, self.allow_await)
                 .parse(cursor, interner)?;
-        let FormalParameterListOrExpression::Expression(mut current_node) = current_node else {
-            return Ok(current_node);
-        };
+            let operand = if pending.is_empty() {
+                match operand {
+                    FormalParameterListOrExpression::Expression(expr) => expr,
+                    params => return Ok(params),
+                }
+            } else {
+                operand.try_into_expression()?
+            };
 
-        let mut previous = self.previous;
-
-        while let Some(tok) = cursor.peek(0, interner)? {
-            match tok.kind() {
-                TokenKind::Punctuator(Punctuator::BoolAnd) => {
-                    if previous == PreviousExpr::Coalesce {
+            let Some(tok) = cursor.peek(0, interner)? else {
+                break operand;
+            };
+            let Some(op) = binary_operator(tok, self.allow_in)? else {
+                break operand;
+            };
+            match op {
+                BinaryOp::Logical(LogicalOp::And | LogicalOp::Or) => {
+                    if seen_coalesce {
                         return Err(Error::expected(
                             ["??".to_owned()],
                             tok.to_string(interner),
@@ -297,40 +347,10 @@ where
                             "logical expression (cannot use '??' without parentheses within '||' or '&&')",
                         ));
                     }
-                    cursor.advance(interner);
-                    previous = PreviousExpr::Logical;
-                    let rhs =
-                        BitwiseORExpression::new(self.allow_in, self.allow_yield, self.allow_await)
-                            .parse(cursor, interner)?
-                            .try_into_expression()?;
-
-                    current_node =
-                        Binary::new(BinaryOp::Logical(LogicalOp::And), current_node, rhs).into();
+                    seen_logical = true;
                 }
-                TokenKind::Punctuator(Punctuator::BoolOr) => {
-                    if previous == PreviousExpr::Coalesce {
-                        return Err(Error::expected(
-                            ["??".to_owned()],
-                            tok.to_string(interner),
-                            tok.span(),
-                            "logical expression (cannot use '??' without parentheses within '||' or '&&')",
-                        ));
-                    }
-                    cursor.advance(interner);
-                    previous = PreviousExpr::Logical;
-                    let rhs = Self::with_previous(
-                        self.allow_in,
-                        self.allow_yield,
-                        self.allow_await,
-                        PreviousExpr::Logical,
-                    )
-                    .parse(cursor, interner)?
-                    .try_into_expression()?;
-                    current_node =
-                        Binary::new(BinaryOp::Logical(LogicalOp::Or), current_node, rhs).into();
-                }
-                TokenKind::Punctuator(Punctuator::Coalesce) => {
-                    if previous == PreviousExpr::Logical {
+                BinaryOp::Logical(LogicalOp::Coalesce) => {
+                    if seen_logical {
                         return Err(Error::expected(
                             ["&&".to_owned(), "||".to_owned()],
                             tok.to_string(interner),
@@ -338,421 +358,36 @@ where
                             "cannot use '??' unparenthesized within '||' or '&&'",
                         ));
                     }
-                    cursor.advance(interner);
-                    previous = PreviousExpr::Coalesce;
-                    let rhs =
-                        BitwiseORExpression::new(self.allow_in, self.allow_yield, self.allow_await)
-                            .parse(cursor, interner)?
-                            .try_into_expression()?;
-                    current_node =
-                        Binary::new(BinaryOp::Logical(LogicalOp::Coalesce), current_node, rhs)
-                            .into();
+                    seen_coalesce = true;
                 }
-                _ => break,
+                _ => {}
             }
-        }
-        Ok(current_node.into())
-    }
-}
+            cursor.advance(interner);
 
-/// Parses a bitwise `OR` expression.
-///
-/// More information:
-///  - [MDN documentation][mdn]
-///  - [ECMAScript specification][spec]
-///
-/// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Bitwise_Operators#Bitwise_OR
-/// [spec]: https://tc39.es/ecma262/#prod-BitwiseORExpression
-#[derive(Debug, Clone, Copy)]
-struct BitwiseORExpression {
-    allow_in: AllowIn,
-    allow_yield: AllowYield,
-    allow_await: AllowAwait,
-}
-
-impl BitwiseORExpression {
-    /// Creates a new `BitwiseORExpression` parser.
-    pub(super) fn new<I, Y, A>(allow_in: I, allow_yield: Y, allow_await: A) -> Self
-    where
-        I: Into<AllowIn>,
-        Y: Into<AllowYield>,
-        A: Into<AllowAwait>,
-    {
-        Self {
-            allow_in: allow_in.into(),
-            allow_yield: allow_yield.into(),
-            allow_await: allow_await.into(),
-        }
-    }
-}
-
-expression!(
-    BitwiseORExpression,
-    BitwiseXORExpression,
-    [Punctuator::Or],
-    [allow_in, allow_yield, allow_await],
-    None::<InputElement>
-);
-
-/// Parses a bitwise `XOR` expression.
-///
-/// More information:
-///  - [MDN documentation][mdn]
-///  - [ECMAScript specification][spec]
-///
-/// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Bitwise_Operators#Bitwise_XOR
-/// [spec]: https://tc39.es/ecma262/#prod-BitwiseXORExpression
-#[derive(Debug, Clone, Copy)]
-struct BitwiseXORExpression {
-    allow_in: AllowIn,
-    allow_yield: AllowYield,
-    allow_await: AllowAwait,
-}
-
-impl BitwiseXORExpression {
-    /// Creates a new `BitwiseXORExpression` parser.
-    pub(super) fn new<I, Y, A>(allow_in: I, allow_yield: Y, allow_await: A) -> Self
-    where
-        I: Into<AllowIn>,
-        Y: Into<AllowYield>,
-        A: Into<AllowAwait>,
-    {
-        Self {
-            allow_in: allow_in.into(),
-            allow_yield: allow_yield.into(),
-            allow_await: allow_await.into(),
-        }
-    }
-}
-
-expression!(
-    BitwiseXORExpression,
-    BitwiseANDExpression,
-    [Punctuator::Xor],
-    [allow_in, allow_yield, allow_await],
-    None::<InputElement>
-);
-
-/// Parses a bitwise `AND` expression.
-///
-/// More information:
-///  - [MDN documentation][mdn]
-///  - [ECMAScript specification][spec]
-///
-/// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Bitwise_Operators#Bitwise_AND
-/// [spec]: https://tc39.es/ecma262/#prod-BitwiseANDExpression
-#[derive(Debug, Clone, Copy)]
-struct BitwiseANDExpression {
-    allow_in: AllowIn,
-    allow_yield: AllowYield,
-    allow_await: AllowAwait,
-}
-
-impl BitwiseANDExpression {
-    /// Creates a new `BitwiseANDExpression` parser.
-    pub(super) fn new<I, Y, A>(allow_in: I, allow_yield: Y, allow_await: A) -> Self
-    where
-        I: Into<AllowIn>,
-        Y: Into<AllowYield>,
-        A: Into<AllowAwait>,
-    {
-        Self {
-            allow_in: allow_in.into(),
-            allow_yield: allow_yield.into(),
-            allow_await: allow_await.into(),
-        }
-    }
-}
-
-expression!(
-    BitwiseANDExpression,
-    EqualityExpression,
-    [Punctuator::And],
-    [allow_in, allow_yield, allow_await],
-    None::<InputElement>
-);
-
-/// Parses an equality expression.
-///
-/// More information:
-///  - [MDN documentation][mdn]
-///  - [ECMAScript specification][spec]
-///
-/// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Comparison_Operators#Equality_operators
-/// [spec]: https://tc39.es/ecma262/#sec-equality-operators
-#[derive(Debug, Clone, Copy)]
-struct EqualityExpression {
-    allow_in: AllowIn,
-    allow_yield: AllowYield,
-    allow_await: AllowAwait,
-}
-
-impl EqualityExpression {
-    /// Creates a new `EqualityExpression` parser.
-    pub(super) fn new<I, Y, A>(allow_in: I, allow_yield: Y, allow_await: A) -> Self
-    where
-        I: Into<AllowIn>,
-        Y: Into<AllowYield>,
-        A: Into<AllowAwait>,
-    {
-        Self {
-            allow_in: allow_in.into(),
-            allow_yield: allow_yield.into(),
-            allow_await: allow_await.into(),
-        }
-    }
-}
-
-expression!(
-    EqualityExpression,
-    RelationalExpression,
-    [
-        Punctuator::Eq,
-        Punctuator::NotEq,
-        Punctuator::StrictEq,
-        Punctuator::StrictNotEq
-    ],
-    [allow_in, allow_yield, allow_await],
-    None::<InputElement>
-);
-
-/// Parses a relational expression.
-///
-/// More information:
-///  - [MDN documentation][mdn]
-///  - [ECMAScript specification][spec]
-///
-/// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Comparison_Operators#Relational_operators
-/// [spec]: https://tc39.es/ecma262/#sec-relational-operators
-#[derive(Debug, Clone, Copy)]
-struct RelationalExpression {
-    allow_in: AllowIn,
-    allow_yield: AllowYield,
-    allow_await: AllowAwait,
-}
-
-impl RelationalExpression {
-    /// Creates a new `RelationalExpression` parser.
-    pub(super) fn new<I, Y, A>(allow_in: I, allow_yield: Y, allow_await: A) -> Self
-    where
-        I: Into<AllowIn>,
-        Y: Into<AllowYield>,
-        A: Into<AllowAwait>,
-    {
-        Self {
-            allow_in: allow_in.into(),
-            allow_yield: allow_yield.into(),
-            allow_await: allow_await.into(),
-        }
-    }
-}
-
-impl<R> TokenParser<R> for RelationalExpression
-where
-    R: ReadChar,
-{
-    type Output = FormalParameterListOrExpression;
-
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        if self.allow_in.0 {
-            let token = cursor.peek(0, interner).or_abrupt()?;
-            if let TokenKind::PrivateIdentifier(identifier) = token.kind() {
-                let identifier = *identifier;
-                let identifier_span = token.span();
-                let token = cursor.peek(1, interner).or_abrupt()?;
-                match token.kind() {
-                    TokenKind::Keyword((Keyword::In, true)) => {
-                        return Err(Error::general(
-                            "Keyword must not contain escaped characters",
-                            token.span().start(),
-                        ));
-                    }
-                    TokenKind::Keyword((Keyword::In, false)) => {
-                        cursor.advance(interner);
-                        cursor.advance(interner);
-
-                        let rhs = ShiftExpression::new(self.allow_yield, self.allow_await)
-                            .parse(cursor, interner)?
-                            .try_into_expression()?;
-
-                        return Ok(BinaryInPrivate::new(
-                            PrivateName::new(identifier, identifier_span),
-                            rhs,
-                        )
-                        .into());
-                    }
-                    _ => {}
+            let prec = precedence(op);
+            let mut lhs = operand;
+            while let Some(top) = pending.last() {
+                // boa always built `a || b || c` leaning right; keep that tree so the bytecode
+                // does not change. Every other level leans left, as the grammar does.
+                let right_assoc = op == BinaryOp::Logical(LogicalOp::Or)
+                    && matches!(top, Pending::Binary(_, BinaryOp::Logical(LogicalOp::Or)));
+                let top_prec = top.precedence();
+                if top_prec < prec || (top_prec == prec && right_assoc) {
+                    break;
                 }
+                let top = pending.pop().expect("peeked above");
+                lhs = top.reduce(lhs);
             }
-        }
-
-        let lhs =
-            ShiftExpression::new(self.allow_yield, self.allow_await).parse(cursor, interner)?;
-        let FormalParameterListOrExpression::Expression(mut lhs) = lhs else {
-            return Ok(lhs);
+            pending.push(Pending::Binary(lhs, op));
+            prev_prec = prec;
         };
 
-        while let Some(tok) = cursor.peek(0, interner)? {
-            match *tok.kind() {
-                TokenKind::Punctuator(op)
-                    if op == Punctuator::LessThan
-                        || op == Punctuator::GreaterThan
-                        || op == Punctuator::LessThanOrEq
-                        || op == Punctuator::GreaterThanOrEq =>
-                {
-                    cursor.advance(interner);
-                    lhs = Binary::new(
-                        op.as_binary_op().expect("Could not get binary operation."),
-                        lhs,
-                        ShiftExpression::new(self.allow_yield, self.allow_await)
-                            .parse(cursor, interner)?
-                            .try_into_expression()?,
-                    )
-                    .into();
-                }
-                TokenKind::Keyword((Keyword::InstanceOf | Keyword::In, true)) => {
-                    return Err(Error::general(
-                        "Keyword must not contain escaped characters",
-                        tok.span().start(),
-                    ));
-                }
-                TokenKind::Keyword((op, false))
-                    if op == Keyword::InstanceOf
-                        || (op == Keyword::In && self.allow_in == AllowIn(true)) =>
-                {
-                    cursor.advance(interner);
-                    lhs = Binary::new(
-                        op.as_binary_op().expect("Could not get binary operation."),
-                        lhs,
-                        ShiftExpression::new(self.allow_yield, self.allow_await)
-                            .parse(cursor, interner)?
-                            .try_into_expression()?,
-                    )
-                    .into();
-                }
-                _ => break,
-            }
+        while let Some(top) = pending.pop() {
+            rhs = top.reduce(rhs);
         }
-
-        Ok(lhs.into())
+        Ok(rhs.into())
     }
 }
-
-/// Parses a bitwise shift expression.
-///
-/// More information:
-///  - [MDN documentation][mdn]
-///  - [ECMAScript specification][spec]
-///
-/// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Bitwise_Operators#Bitwise_shift_operators
-/// [spec]: https://tc39.es/ecma262/#sec-bitwise-shift-operators
-#[derive(Debug, Clone, Copy)]
-struct ShiftExpression {
-    allow_yield: AllowYield,
-    allow_await: AllowAwait,
-}
-
-impl ShiftExpression {
-    /// Creates a new `ShiftExpression` parser.
-    pub(super) fn new<Y, A>(allow_yield: Y, allow_await: A) -> Self
-    where
-        Y: Into<AllowYield>,
-        A: Into<AllowAwait>,
-    {
-        Self {
-            allow_yield: allow_yield.into(),
-            allow_await: allow_await.into(),
-        }
-    }
-}
-
-expression!(
-    ShiftExpression,
-    AdditiveExpression,
-    [
-        Punctuator::LeftSh,
-        Punctuator::RightSh,
-        Punctuator::URightSh
-    ],
-    [allow_yield, allow_await],
-    None::<InputElement>
-);
-
-/// Parses an additive expression.
-///
-/// This can be either an addition or a subtraction.
-///
-/// More information:
-///  - [MDN documentation][mdn]
-///  - [ECMAScript specification][spec]
-///
-/// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Arithmetic_Operators
-/// [spec]: https://tc39.es/ecma262/#sec-additive-operators
-#[derive(Debug, Clone, Copy)]
-struct AdditiveExpression {
-    allow_yield: AllowYield,
-    allow_await: AllowAwait,
-}
-
-impl AdditiveExpression {
-    /// Creates a new `AdditiveExpression` parser.
-    pub(super) fn new<Y, A>(allow_yield: Y, allow_await: A) -> Self
-    where
-        Y: Into<AllowYield>,
-        A: Into<AllowAwait>,
-    {
-        Self {
-            allow_yield: allow_yield.into(),
-            allow_await: allow_await.into(),
-        }
-    }
-}
-
-expression!(
-    AdditiveExpression,
-    MultiplicativeExpression,
-    [Punctuator::Add, Punctuator::Sub],
-    [allow_yield, allow_await],
-    None::<InputElement>
-);
-
-/// Parses a multiplicative expression.
-///
-/// This can be either a multiplication, division or a modulo (remainder) expression.
-///
-/// More information:
-///  - [MDN documentation][mdn]
-///  - [ECMAScript specification][spec]
-///
-/// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Arithmetic_Operators#Division
-/// [spec]: https://tc39.es/ecma262/#sec-multiplicative-operators
-#[derive(Debug, Clone, Copy)]
-struct MultiplicativeExpression {
-    allow_yield: AllowYield,
-    allow_await: AllowAwait,
-}
-
-impl MultiplicativeExpression {
-    /// Creates a new `MultiplicativeExpression` parser.
-    pub(super) fn new<Y, A>(allow_yield: Y, allow_await: A) -> Self
-    where
-        Y: Into<AllowYield>,
-        A: Into<AllowAwait>,
-    {
-        Self {
-            allow_yield: allow_yield.into(),
-            allow_await: allow_await.into(),
-        }
-    }
-}
-
-expression!(
-    MultiplicativeExpression,
-    ExponentiationExpression,
-    [Punctuator::Mul, Punctuator::Div, Punctuator::Mod],
-    [allow_yield, allow_await],
-    Some(InputElement::Div)
-);
 
 /// Returns an error if `arguments` or `eval` are used as identifier in strict mode.
 fn check_strict_arguments_or_eval(ident: Identifier, position: Position) -> ParseResult<()> {

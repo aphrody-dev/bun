@@ -1,4 +1,7 @@
-use crate::parser::tests::{check_invalid_script, check_script_parser};
+use crate::{
+    Parser, Source,
+    parser::tests::{check_invalid_script, check_script_parser},
+};
 use boa_ast::{
     Declaration, Expression, LinearPosition, LinearSpan, Span, Statement, StatementList,
     declaration::{LexicalDeclaration, Variable},
@@ -12,6 +15,7 @@ use boa_ast::{
         },
     },
     function::{AsyncArrowFunction, FormalParameter, FormalParameterList, FunctionBody},
+    scope::Scope,
 };
 use boa_interner::{Interner, Sym};
 use boa_macros::utf16;
@@ -1169,6 +1173,24 @@ fn check_logical_expressions() {
     check_invalid_script("a && b ?? c");
     check_invalid_script("a ?? b || c");
     check_invalid_script("a || b ?? c");
+}
+
+#[test]
+fn private_in_is_a_relational_operand() {
+    for js in [
+        "class C { #x; m(o) { return #x in o in p; } }",
+        "class C { #x; m(o) { return #x in o < 1 == #x in o; } }",
+        "class C { #x; m(o) { return a && #x in o * 2; } }",
+    ] {
+        assert!(
+            Parser::new(Source::from_bytes(js))
+                .parse_script(&Scope::new_global(), &mut Interner::default())
+                .is_ok(),
+            "{js}"
+        );
+    }
+    check_invalid_script("class C { #x; m(o) { return a + #x in o; } }");
+    check_invalid_script("class C { #x; m(o) { return a < #x in o; } }");
 }
 
 #[test]
