@@ -2811,6 +2811,16 @@ impl<'ctx> ByteCompiler<'ctx> {
 
         let source_map_entries = self.source_map_builder.build(final_bytecode_len.as_u32());
 
+        // Kitesurf: names resolved to indices by now, and a later direct eval rebuilds the map
+        // it needs. The realm's scope stays mapped, since every script compiles against it.
+        for constant in &self.constants {
+            if let Constant::Scope(scope) = constant {
+                if !scope.is_global() {
+                    scope.ks_drop_lookup();
+                }
+            }
+        }
+
         CodeBlock {
             length: self.length,
             register_count,
