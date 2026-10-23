@@ -418,7 +418,11 @@ impl DocumentMutator<'_> {
             self.mark_enclosing_svg_for_reconstruction(node_id);
         }
 
-        if name.local == local_name!("id") && node_is_in_document {
+        // Shadow-tree ids stay out of the document id map, as in process_added_subtree.
+        if name.local == local_name!("id")
+            && node_is_in_document
+            && self.doc.nodes[node_id].containing_shadow_root_id().is_none()
+        {
             if let Some(old_id) = self.doc.nodes[node_id]
                 .element_data()
                 .map(|element| element.id.clone())
@@ -931,10 +935,24 @@ impl DocumentMutator<'_> {
         // would remove both the old and the newly-inserted entries from the
         // parent's child list, and anchor indices would be computed against a
         // child list that still contains the moved nodes.
+        //
+        // A connected-to-connected move never flips is_in_document, so the id map is not
+        // re-derived below. Collect the moved nodes that cross a shadow boundary instead.
+        let new_in_shadow = new_parent_is_in_document && {
+            let parent = &self.doc.nodes[parent_id];
+            parent.is_shadow_root() || parent.containing_shadow_root_id().is_some()
+        };
+        let mut crossed_shadow_boundary = Vec::new();
         for child_id in child_ids.iter().copied() {
             let child = &mut self.doc.nodes[child_id];
             let child_was_in_doc = child.flags.is_in_document();
             self.mutations_occurred |= child_was_in_doc;
+            if new_parent_is_in_document
+                && child_was_in_doc
+                && child.containing_shadow_root_id().is_some() != new_in_shadow
+            {
+                crossed_shadow_boundary.push(child_id);
+            }
             // Reparenting invalidates any slot assignment; the next
             // resolve's flush_slot_assignments re-establishes it.
             child.assigned_slot = None;
@@ -989,6 +1007,9 @@ impl DocumentMutator<'_> {
             } else if !new_parent_is_in_document && child_was_in_doc {
                 self.process_removed_subtree(child_id);
             }
+        }
+        for child_id in crossed_shadow_boundary {
+            self.reindex_subtree_ids(child_id, new_in_shadow);
         }
 
         // Insertions invalidate after linking, since the collector
@@ -1291,6 +1312,34 @@ impl<'doc> DocumentMutator<'doc> {
         self.eager_op_queue = ops;
     }
 
+    /// Re-derives id map membership for a connected subtree whose shadow containment
+    /// changed: only connected light-tree ids belong in the map, so template contents stay out.
+    /// `in_shadow` is the root's containment; descendants derive theirs from the traversal
+    /// parent, in iter_subtree_mut's order, so no id node walks its ancestors.
+    fn reindex_subtree_ids(&mut self, node_id: NodeId, in_shadow: bool) {
+        reindex_subtree_ids_inner(self.doc, node_id, in_shadow);
+        fn reindex_subtree_ids_inner(doc: &mut BaseDocument, node_id: NodeId, in_shadow: bool) {
+            let node = &doc.nodes[node_id];
+            if let Some(id_attr) = node.attr(local_name!("id")).map(ToString::to_string) {
+                let indexed = node.flags.is_in_document() && !in_shadow;
+                doc.remove_from_id_map(&id_attr, node_id);
+                if indexed {
+                    doc.add_to_id_map(&id_attr, node_id);
+                }
+            }
+            // A shadow root's parent is its host, so it shares the host's containment.
+            let node = &doc.nodes[node_id];
+            let children_in_shadow = in_shadow || node.is_shadow_root();
+            if let Some(shadow_root_id) = node.attached_shadow_root_id() {
+                reindex_subtree_ids_inner(doc, shadow_root_id, in_shadow);
+            }
+            for index in 0..doc.nodes[node_id].children.len() {
+                let child_id = doc.nodes[node_id].children[index];
+                reindex_subtree_ids_inner(doc, child_id, children_in_shadow);
+            }
+        }
+    }
+
     fn process_added_subtree(&mut self, node_id: NodeId) {
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             let in_template_contents = doc.nodes[node_id]
@@ -1314,9 +1363,9 @@ impl<'doc> DocumentMutator<'doc> {
             }
 
             // If the node has an "id" attribute, store it in the ID map.
-            if let Some(id_attr) = node.attr(local_name!("id")).map(ToString::to_string) {
+            if let Some(id_attr) = node.attr(local_name!("id")).map(Atom::from) {
                 if node.containing_shadow_root_id().is_none() {
-                    doc.add_to_id_map(&id_attr, node_id);
+                    doc.add_atom_to_id_map(id_attr, node_id);
                 }
             }
 

@@ -33,7 +33,6 @@ use linebender_resource_handle::Blob;
 use markup5ever::{LocalName, local_name};
 use parley::{FontContext, PlainEditorDriver};
 use selectors::{Element, matching::QuirksMode};
-use smallvec::SmallVec;
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, Bound, HashMap, HashSet};
@@ -421,10 +420,13 @@ pub struct BaseDocument {
     /// Whether there are subdocuments that are animating (so we should re-render every frame)
     pub(crate) subdoc_is_animating: bool,
 
-    /// Map of id attribute values to node IDs for fast lookups.
-    /// May contain multiple nodes for the same id: `get_element_by_id`
-    /// returns the first in tree order.
-    pub(crate) nodes_to_id: HashMap<String, SmallVec<[NodeId; 1]>>,
+    /// Map of id attribute values to the first node added with that id. Keyed by atom:
+    /// elements already intern their id, so the map shares that string instead of copying it.
+    pub(crate) nodes_to_id: HashMap<Atom, NodeId>,
+    /// The later nodes sharing an id with a `nodes_to_id` entry, in the order they were added.
+    /// Duplicate ids are rare, so they stay out of the main map's buckets; with any present,
+    /// `get_element_by_id` returns the first of them all in tree order.
+    pub(crate) id_duplicates: HashMap<Atom, Vec<NodeId>>,
     /// Map of `<style>` and `<link>` node IDs to their associated stylesheet
     // Value carries the registration scope (None = document stylist,
     // Some(id) = that shadow root) so removal targets the right set:
@@ -658,6 +660,7 @@ impl BaseDocument {
             animations: DocumentAnimationSet::default(),
             snapshots,
             nodes_to_id,
+            id_duplicates: HashMap::new(),
             viewport,
             media_type,
             pending_device_changes: DeviceChanges::empty(),

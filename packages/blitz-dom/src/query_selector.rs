@@ -8,17 +8,21 @@ use style::dom_apis::{
 use style::selector_parser::{SelectorImpl, SelectorParser};
 use style_traits::ParseError;
 
-use crate::{BaseDocument, Node};
+use crate::{Atom, BaseDocument, Node};
 
 impl BaseDocument {
     /// Find the node with the specified id attribute (if one exists).
     /// If multiple nodes have the same id, the first in tree order is returned.
     pub fn get_element_by_id(&self, id: &str) -> Option<NodeId> {
-        match self.nodes_to_id.get(id)?.as_slice() {
-            [] => None,
-            [node_id] => Some(*node_id),
-            candidates => self.first_in_tree_order(candidates),
-        }
+        let id = Atom::from(id);
+        let first = *self.nodes_to_id.get(&id)?;
+        let Some(later) = self.id_duplicates.get(&id) else {
+            return Some(first);
+        };
+        let candidates: Vec<NodeId> = std::iter::once(first)
+            .chain(later.iter().copied())
+            .collect();
+        self.first_in_tree_order(&candidates)
     }
 
     /// Find the first of `candidates` in tree order
@@ -38,18 +42,56 @@ impl BaseDocument {
         if id.is_empty() {
             return;
         }
-        let node_ids = self.nodes_to_id.entry(id.to_string()).or_default();
-        if !node_ids.contains(&node_id) {
-            node_ids.push(node_id);
+        self.add_atom_to_id_map(Atom::from(id), node_id);
+    }
+
+    /// [`Self::add_to_id_map`] for an id already interned.
+    pub(crate) fn add_atom_to_id_map(&mut self, id: Atom, node_id: NodeId) {
+        if id.is_empty() {
+            return;
+        }
+        match self.nodes_to_id.entry(id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(node_id);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                if *entry.get() != node_id {
+                    let later = self.id_duplicates.entry(entry.key().clone()).or_default();
+                    if !later.contains(&node_id) {
+                        later.push(node_id);
+                    }
+                }
+            }
         }
     }
 
     /// Remove a node from the id-to-node map
     pub(crate) fn remove_from_id_map(&mut self, id: &str, node_id: NodeId) {
-        if let Some(node_ids) = self.nodes_to_id.get_mut(id) {
-            node_ids.retain(|nid| *nid != node_id);
-            if node_ids.is_empty() {
-                self.nodes_to_id.remove(id);
+        let id = Atom::from(id);
+        let Some(&first) = self.nodes_to_id.get(&id) else {
+            return;
+        };
+        let later = self.id_duplicates.get_mut(&id);
+        if first != node_id {
+            if let Some(later) = later {
+                later.retain(|nid| *nid != node_id);
+                if later.is_empty() {
+                    self.id_duplicates.remove(&id);
+                }
+            }
+            return;
+        }
+        // The earliest remaining duplicate takes the main entry, keeping insertion order.
+        match later {
+            Some(later) => {
+                let next = later.remove(0);
+                if later.is_empty() {
+                    self.id_duplicates.remove(&id);
+                }
+                self.nodes_to_id.insert(id, next);
+            }
+            None => {
+                self.nodes_to_id.remove(&id);
             }
         }
     }

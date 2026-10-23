@@ -101,7 +101,7 @@ impl BaseDocument {
     ) -> impl Iterator<Item = BlitzDomNodeId> + 'a {
         nodes_reference
             .split_ascii_whitespace()
-            .filter_map(|dom_id| self.nodes_to_id.get(dom_id)?.first().copied())
+            .filter_map(|dom_id| self.get_element_by_id(dom_id))
     }
 
     fn build_accessibility_node(
