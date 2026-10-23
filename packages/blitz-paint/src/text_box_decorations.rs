@@ -64,7 +64,9 @@ pub(crate) fn paint_span_fragment_backgrounds(
             Some(s) => s,
             None => continue,
         };
-        let decos = &style.box_decorations;
+        let Some(decos) = style.box_decorations.as_deref() else {
+            continue;
+        };
         if decos.is_empty() {
             // Defensive: if a fragment was emitted with empty
             // decorations, there's nothing to paint. The line
@@ -138,7 +140,9 @@ pub(crate) fn paint_span_fragment_borders(
             Some(s) => s,
             None => continue,
         };
-        let decos = &style.box_decorations;
+        let Some(decos) = style.box_decorations.as_deref() else {
+            continue;
+        };
         let top_w = decos.border_block_start_width as f64;
         let right_w = decos.border_inline_end_width as f64;
         let bottom_w = decos.border_block_end_width as f64;
