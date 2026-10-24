@@ -998,7 +998,7 @@ impl RoundTree for LayoutPassState<'_> {
         layout_data.final_layout = *layout;
         // This is the only wholesale write of a location, so it is also the
         // only place a baked sticky shift can silently disappear.
-        layout_data.pin_offset = taffy::Point { x: 0.0, y: 0.0 };
+        layout_data.set_pin_offset(taffy::Point { x: 0.0, y: 0.0 });
     }
 
     fn is_out_of_flow(&self, node_id: NodeId) -> bool {

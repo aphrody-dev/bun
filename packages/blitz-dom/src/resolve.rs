@@ -2,6 +2,7 @@
 
 use blitz_traits::node_id::NodeId;
 use std::cell::RefCell;
+use std::collections::HashSet;
 
 use debug_timer::debug_timer;
 use kurbo::{Affine, Rect};
@@ -33,6 +34,39 @@ use crate::{
     },
     node::{SpecialElementData, TextBrush},
 };
+
+struct UndisplayedLayoutTraversal {
+    pending: Vec<NodeId>,
+    visited: HashSet<NodeId>,
+}
+
+impl UndisplayedLayoutTraversal {
+    fn new(root_id: NodeId) -> Self {
+        Self {
+            pending: vec![root_id],
+            visited: HashSet::new(),
+        }
+    }
+
+    fn next(&mut self, doc: &BaseDocument) -> Option<NodeId> {
+        while let Some(id) = self.pending.pop() {
+            if !self.visited.insert(id) {
+                continue;
+            }
+            let Some(node) = doc.nodes.get(id) else {
+                continue;
+            };
+            self.pending.extend(node.children.iter().copied());
+            self.pending
+                .extend(node.assigned_nodes().into_iter().flatten().copied());
+            self.pending.extend(node.before());
+            self.pending.extend(node.after());
+            self.pending.extend(node.attached_shadow_root_id());
+            return Some(id);
+        }
+        None
+    }
+}
 
 fn snap_table_tracks(
     tracks: &mut taffy::DetailedGridTracksInfo<style::Atom>,
@@ -640,6 +674,45 @@ impl BaseDocument {
         }
     }
 
+    /// Drop the box state of a subtree whose root has just become `display: none`.
+    /// Stylo clears the descendants' styles; without this their inline layouts,
+    /// layout output and anonymous blocks stay allocated until the subtree is
+    /// shown again. Showing it rebuilds all of them from fresh styles.
+    pub(crate) fn release_undisplayed_layout(&mut self, root_id: NodeId) {
+        let mut traversal = UndisplayedLayoutTraversal::new(root_id);
+        while let Some(id) = traversal.next(self) {
+            let Some(node) = self.nodes.get_mut(id) else {
+                continue;
+            };
+            let is_root = id == root_id;
+            let anonymous_blocks = node.take_anonymous_blocks();
+            node.layout_children.get_mut().take();
+            node.paint_children.get_mut().take();
+            if !is_root {
+                // The root keeps its own box slot: its container may still list it.
+                node.layout_parent.set(None);
+            }
+            // A user or script set the scroll offset, and layout cannot rebuild
+            // it, so a scrolled box keeps its layout data while hidden. Text and
+            // comment nodes have no layout data, so ask only element kinds.
+            let scrolled = node.element_data().is_some_and(|_| {
+                let offset = node.scroll_offset();
+                offset.x != 0.0 || offset.y != 0.0
+            });
+            if let Some(element) = node.element_data_mut() {
+                element.set_inline_layout_data(None);
+                element.set_list_item_data(None);
+                element.clear_detailed_layout_info();
+                if !is_root && !scrolled {
+                    element.layout_data = None;
+                }
+            }
+            for anon_id in anonymous_blocks {
+                self.deallocate_anonymous_block(anon_id);
+            }
+        }
+    }
+
     /// Every layout child must point back at its container via
     /// `layout_parent`, which `propagate_damage_flags` relies on to reach
     /// anonymous boxes.
@@ -913,5 +986,86 @@ impl BaseDocument {
         for (id, content_w) in stale {
             self.rebreak_inline_to_width(id, content_w);
         }
+    }
+}
+
+#[cfg(test)]
+mod undisplayed_layout_tests {
+    use super::*;
+    use crate::node::ShadowRootMode;
+    use crate::{Attribute, DocumentConfig, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+    use std::collections::HashSet;
+
+    #[test]
+    fn nested_slot_edges_visit_each_reachable_node_once_and_release_layout() {
+        const NESTED_HOSTS: usize = 4;
+
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let document_root = doc.root_node().id;
+        let block_style = || Attribute::new(qual_name!("style"), "display:block".to_string());
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![block_style()]);
+        let body = mutator.create_element(qual_name!("body"), vec![block_style()]);
+        let outer = mutator.create_element(qual_name!("div"), vec![block_style()]);
+        mutator.append_children(body, &[outer]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(document_root, &[html]);
+
+        let mut expected_nodes = vec![outer];
+        let mut slot_assignments = Vec::new();
+        let mut host = outer;
+        for _ in 0..NESTED_HOSTS {
+            let shadow_root = mutator.attach_shadow(host, ShadowRootMode::Open);
+            let slot = mutator.create_element(qual_name!("slot"), vec![block_style()]);
+            mutator.append_children(shadow_root, &[slot]);
+            let child = mutator.create_element(qual_name!("div"), vec![block_style()]);
+            mutator.append_children(host, &[child]);
+            expected_nodes.extend([shadow_root, slot, child]);
+            slot_assignments.push((slot, child));
+            host = child;
+        }
+        drop(mutator);
+        doc.resolve(0.0);
+
+        for (slot, child) in &slot_assignments {
+            assert!(
+                doc.nodes[*slot]
+                    .assigned_nodes()
+                    .is_some_and(|assigned| assigned.contains(child)),
+                "slot must reach its host's light child"
+            );
+        }
+
+        let expected: HashSet<_> = expected_nodes.into_iter().collect();
+        let mut traversal = UndisplayedLayoutTraversal::new(outer);
+        let mut visited = Vec::new();
+        while let Some(id) = traversal.next(&doc) {
+            visited.push(id);
+        }
+        let unique: HashSet<_> = visited.iter().copied().collect();
+        assert_eq!(
+            visited.len(),
+            expected.len(),
+            "cleanup traversal must visit each reachable node once"
+        );
+        assert_eq!(unique, expected);
+
+        assert!(doc.nodes[host]
+            .element_data()
+            .unwrap()
+            .layout_data
+            .is_some());
+        doc.mutate()
+            .set_attribute(outer, qual_name!("style"), "display:none");
+        doc.resolve(0.0);
+        assert!(doc.nodes[host]
+            .element_data()
+            .unwrap()
+            .layout_data
+            .is_none());
     }
 }

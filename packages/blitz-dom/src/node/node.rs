@@ -725,7 +725,7 @@ impl Node {
     /// (see `set_pin_offset`).
     #[inline]
     pub fn pin_offset(&self) -> &taffy::Point<f32> {
-        &self.layout_data().pin_offset
+        self.layout_data().pin_offset()
     }
 
     /// Reconcile the baked post-layout shift to `(x, y)`, moving the location
@@ -737,25 +737,25 @@ impl Node {
     /// Returns whether the box moved.
     pub fn set_pin_offset(&mut self, x: f32, y: f32) -> bool {
         let layout_data = self.layout_data_mut();
-        let dx = x - layout_data.pin_offset.x;
-        let dy = y - layout_data.pin_offset.y;
+        let dx = x - layout_data.pin_offset().x;
+        let dy = y - layout_data.pin_offset().y;
         if dx == 0.0 && dy == 0.0 {
             return false;
         }
         layout_data.final_layout.location.x += dx;
         layout_data.final_layout.location.y += dy;
-        layout_data.pin_offset = taffy::Point { x, y };
+        layout_data.set_pin_offset(taffy::Point { x, y });
         true
     }
 
     #[inline]
     pub fn scroll_offset(&self) -> &crate::Point<f64> {
-        &self.layout_data().scroll_offset
+        self.layout_data().scroll_offset()
     }
 
     #[inline]
     pub fn scroll_offset_mut(&mut self) -> &mut crate::Point<f64> {
-        &mut self.layout_data_mut().scroll_offset
+        self.layout_data_mut().scroll_offset_mut()
     }
 
     pub fn set_scroll_offset(&mut self, offset: crate::Point<f64>) {

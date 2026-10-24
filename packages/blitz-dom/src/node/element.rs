@@ -103,9 +103,8 @@ pub struct LayoutData {
     pub cache: Cache,
     pub unrounded_layout: Layout,
     pub final_layout: Layout,
-    /// Post-layout shift currently baked into `final_layout.location`.
-    pub pin_offset: taffy::Point<f32>,
-    pub scroll_offset: crate::Point<f64>,
+    /// Allocated by the first offset written: few boxes are scrolled or pinned.
+    offsets: Option<Box<BoxOffsets>>,
     pub scrollable_overflow: KurboRect,
     /// The writing mode this node's layout algorithm ran in (the root takes it from `<body>`),
     /// recorded by the layout pass for CSSOM geometry lookups.
@@ -122,8 +121,7 @@ impl LayoutData {
             cache: Cache::new(),
             unrounded_layout: Layout::new(),
             final_layout: Layout::new(),
-            pin_offset: taffy::Point { x: 0.0, y: 0.0 },
-            scroll_offset: crate::Point::ZERO,
+            offsets: None,
             scrollable_overflow: KurboRect::ZERO,
             #[cfg(feature = "writing-mode")]
             writing_mode: stylo_taffy::WritingMode::empty(),
@@ -135,6 +133,46 @@ impl LayoutData {
 impl Default for LayoutData {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BoxOffsets {
+    /// Post-layout shift currently baked into `final_layout.location`.
+    pin: taffy::Point<f32>,
+    scroll: crate::Point<f64>,
+}
+
+static NO_OFFSETS: BoxOffsets = BoxOffsets {
+    pin: taffy::Point { x: 0.0, y: 0.0 },
+    scroll: crate::Point::ZERO,
+};
+
+impl LayoutData {
+    fn offsets(&self) -> &BoxOffsets {
+        self.offsets.as_deref().unwrap_or(&NO_OFFSETS)
+    }
+
+    fn offsets_mut(&mut self) -> &mut BoxOffsets {
+        self.offsets.get_or_insert_with(|| Box::new(NO_OFFSETS))
+    }
+
+    pub fn pin_offset(&self) -> &taffy::Point<f32> {
+        &self.offsets().pin
+    }
+
+    pub fn set_pin_offset(&mut self, pin: taffy::Point<f32>) {
+        if self.offsets.is_some() || pin != NO_OFFSETS.pin {
+            self.offsets_mut().pin = pin;
+        }
+    }
+
+    pub fn scroll_offset(&self) -> &crate::Point<f64> {
+        &self.offsets().scroll
+    }
+
+    pub fn scroll_offset_mut(&mut self) -> &mut crate::Point<f64> {
+        &mut self.offsets_mut().scroll
     }
 }
 
@@ -499,6 +537,10 @@ impl ElementData {
     pub fn set_grid_info(&mut self, info: taffy::DetailedGridInfo<Atom>) {
         let info = taffy::DetailedLayoutInfo::Grid(Box::new(info));
         self.update_rare(|rare| rare.detailed_layout_info = Some(info));
+    }
+
+    pub(crate) fn clear_detailed_layout_info(&mut self) {
+        self.update_rare(|rare| rare.detailed_layout_info = None);
     }
 
     /// Data associated with display: list-item, if the element is a list item.

@@ -5225,3 +5225,115 @@ pub(crate) fn set_codepoint_bits(bits: &mut [u64], text: &str) {
         bits[cp >> 6] |= 1u64 << (cp & 63);
     }
 }
+
+#[cfg(test)]
+mod display_none_retention_tests {
+    use super::*;
+    use crate::{Attribute, qual_name};
+    use blitz_traits::shell::ColorScheme;
+
+    #[test]
+    fn display_none_descendants_keep_no_style_or_layout_state() {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let style = |value: &str| Attribute::new(qual_name!("style"), value.to_string());
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![]);
+        let hidden = mutator.create_element(qual_name!("div"), vec![style("display:none")]);
+        let p = mutator.create_element(qual_name!("p"), vec![style("color:red")]);
+        let span = mutator.create_element(qual_name!("span"), vec![]);
+        let text = mutator.create_text_node("hidden text");
+        let shown = mutator.create_element(qual_name!("p"), vec![]);
+        let shown_text = mutator.create_text_node("shown");
+        mutator.append_children(span, &[text]);
+        mutator.append_children(p, &[span]);
+        mutator.append_children(hidden, &[p]);
+        mutator.append_children(shown, &[shown_text]);
+        mutator.append_children(body, &[hidden, shown]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+
+        assert!(doc.nodes[hidden].primary_styles().is_some());
+        for id in [p, span] {
+            let node = &mut doc.nodes[id];
+            assert!(node.primary_styles().is_none(), "{id} kept styles");
+            assert!(node.try_layout_data_mut().is_none(), "{id} kept layout data");
+            assert!(node.layout_children.borrow().is_none(), "{id} has layout children");
+        }
+        assert!(doc.resolve_undisplayed_style(p).is_some());
+        assert!(doc.nodes[p].primary_styles().is_none(), "on-demand style was stored");
+        assert_eq!(doc.resolved_style_value(p, "color"), "rgb(255, 0, 0)");
+    }
+
+    #[test]
+    fn hiding_a_styled_subtree_drops_descendant_state() {
+        check_hiding_drops_descendant_state(false);
+    }
+
+    // Inline content beside the hidden root changes how its container builds
+    // boxes: the container no longer revisits the hidden child at all.
+    #[test]
+    fn hiding_a_subtree_beside_inline_content_drops_descendant_state() {
+        check_hiding_drops_descendant_state(true);
+    }
+
+    fn check_hiding_drops_descendant_state(inline_sibling: bool) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let style = |value: &str| Attribute::new(qual_name!("style"), value.to_string());
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![style("display:block")]);
+        let body = mutator.create_element(qual_name!("body"), vec![style("display:block")]);
+        let outer = mutator.create_element(qual_name!("div"), vec![style("display:block")]);
+        let block = mutator.create_element(qual_name!("div"), vec![style("display:block")]);
+        let inner = mutator.create_element(qual_name!("div"), vec![style("display:block")]);
+        let text = mutator.create_text_node("some text");
+        let bare = mutator.create_text_node("bare text");
+        let tail = mutator.create_element(qual_name!("div"), vec![style("display:block")]);
+        mutator.append_children(inner, &[text]);
+        mutator.append_children(block, &[bare, inner, tail]);
+        mutator.append_children(outer, &[block]);
+        if inline_sibling {
+            let sibling = mutator.create_text_node("sibling");
+            mutator.append_children(body, &[sibling]);
+        }
+        mutator.append_children(body, &[outer]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        let state = |doc: &mut BaseDocument, id: NodeId| {
+            let node = &mut doc.nodes[id];
+            let styled = node.primary_styles().is_some();
+            let children = node.layout_children.borrow().is_some();
+            let inline = node.element_data().is_some_and(|e| e.inline_layout_data().is_some());
+            let layout = node.try_layout_data_mut().is_some();
+            (styled, children, inline, layout)
+        };
+        assert_eq!(state(&mut doc, inner), (true, true, true, true));
+        let anonymous = doc.nodes[block].anonymous_blocks().to_vec();
+        assert!(!anonymous.is_empty(), "text beside a block needs an anonymous block");
+        let shown_height = doc.nodes[block].final_layout().size.height;
+
+        doc.mutate().set_attribute(outer, qual_name!("style"), "display:none");
+        doc.resolve(0.0);
+        for id in [block, inner] {
+            assert_eq!(state(&mut doc, id), (false, false, false, false), "{id}");
+        }
+        assert!(anonymous.iter().all(|id| doc.get_node(*id).is_none()));
+
+        doc.mutate().set_attribute(outer, qual_name!("style"), "display:block");
+        doc.resolve(0.0);
+        assert_eq!(state(&mut doc, inner), (true, true, true, true));
+        assert_eq!(doc.nodes[block].final_layout().size.height, shown_height);
+    }
+}

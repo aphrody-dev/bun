@@ -43,6 +43,10 @@ pub(crate) const CONSTRUCT_DESCENDENT: RestyleDamage =
 pub(crate) const ALL_DAMAGE: RestyleDamage =
     RestyleDamage::from_bits_retain(0b_0000_0000_1110_1111);
 
+fn is_display_none(display: style::values::computed::Display) -> bool {
+    display.outside() == DisplayOutside::None && display.inside() == DisplayInside::None
+}
+
 impl BaseDocument {
     /// Union `RestyleDamage` up the tree and clear the layout caches of every
     /// node whose subtree needs relayout.
@@ -76,6 +80,28 @@ impl BaseDocument {
             return RestyleDamage::empty();
         };
         let mut damage = own_damage;
+
+        // Release here, not at box construction: a container's construction
+        // may skip a display:none child, and then nothing revisits its subtree.
+        if own_damage.contains(CONSTRUCT_BOX) {
+            let node = &self.nodes[node_id];
+            let was_displayed = !is_display_none(*node.display_constructed_as());
+            let display = node.display_style();
+            if let Some(display) = display.filter(|d| is_display_none(*d)) {
+                if was_displayed {
+                    self.release_undisplayed_layout(node_id);
+                    *self.nodes[node_id].display_constructed_as_mut() = display;
+                }
+            } else if !was_displayed {
+                // Shown again. Box construction records the display for the nodes it collects as
+                // layout children, but a table row, a row group, a flattened inline and a
+                // display:contents element are consumed elsewhere and would keep the `none` that
+                // the has-box walks stop at, so record it here.
+                if let Some(display) = display {
+                    *self.nodes[node_id].display_constructed_as_mut() = display;
+                }
+            }
+        }
 
         // Skip subtrees which contain no damage. Anonymous nodes are never
         // skipped themselves because damage marking walks the DOM parent

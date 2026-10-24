@@ -257,6 +257,9 @@ impl crate::document::BaseDocument {
             thread_local: &mut thread_local,
         };
         let styles = resolve_style(&mut context, node, RuleInclusion::All, None, None);
+        // Dropping the thread-local context runs its queued sequential tasks,
+        // which stylo requires to happen inside the layout thread state.
+        drop(thread_local);
 
         style::thread_state::exit(ThreadState::LAYOUT);
 

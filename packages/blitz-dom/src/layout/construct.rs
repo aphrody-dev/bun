@@ -1678,7 +1678,7 @@ pub(crate) fn find_inline_layout_embedded_boxes(
 
     iter_flat_children_and_pseudos!(doc.nodes, inline_context_root_node_id, |child_id| {
         find_inline_layout_embedded_boxes_recursive(
-            &mut doc.nodes,
+            doc,
             inline_context_root_node_id,
             child_id,
             layout_children,
@@ -1711,12 +1711,12 @@ pub(crate) fn find_inline_layout_embedded_boxes(
     }
 
     fn find_inline_layout_embedded_boxes_recursive(
-        nodes: &mut crate::NodeTree,
+        doc: &mut BaseDocument,
         parent_id: NodeId,
         node_id: NodeId,
         layout_children: &mut ThinVec<NodeId>,
     ) {
-        let node = &mut nodes[node_id];
+        let node = &mut doc.nodes[node_id];
 
         // Set layout_parent for node.
         node.layout_parent.set(Some(parent_id));
@@ -1735,12 +1735,14 @@ pub(crate) fn find_inline_layout_embedded_boxes(
                 match (display.outside(), display.inside()) {
                     (DisplayOutside::None, DisplayInside::None) => {
                         node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+                        release_flattened_layout(doc, node_id);
                     }
                     (DisplayOutside::None, DisplayInside::Contents) => {
                         node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-                        iter_flat_children!(nodes, node_id, |child_id| {
+                        release_flattened_layout(doc, node_id);
+                        iter_flat_children!(doc.nodes, node_id, |child_id| {
                             find_inline_layout_embedded_boxes_recursive(
-                                nodes,
+                                doc,
                                 parent_id,
                                 child_id,
                                 layout_children,
@@ -1749,21 +1751,24 @@ pub(crate) fn find_inline_layout_embedded_boxes(
                     }
                     (DisplayOutside::Inline, DisplayInside::Flow) => {
                         let tag_name = &element_data.name.local;
+                        let is_atomic = is_inline_box_element(tag_name);
+                        let is_br = *tag_name == local_name!("br");
 
-                        if is_inline_box_element(tag_name) {
+                        if is_atomic {
                             layout_children.push(node_id);
-                        } else if *tag_name == local_name!("br") {
-                            node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                         } else {
                             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-                            iter_flat_children_and_pseudos!(nodes, node_id, |child_id| {
-                                find_inline_layout_embedded_boxes_recursive(
-                                    nodes,
-                                    node_id,
-                                    child_id,
-                                    layout_children,
-                                );
-                            });
+                            release_flattened_layout(doc, node_id);
+                            if !is_br {
+                                iter_flat_children_and_pseudos!(doc.nodes, node_id, |child_id| {
+                                    find_inline_layout_embedded_boxes_recursive(
+                                        doc,
+                                        node_id,
+                                        child_id,
+                                        layout_children,
+                                    );
+                                });
+                            }
                         }
                     }
                     // Inline box
@@ -1780,6 +1785,17 @@ pub(crate) fn find_inline_layout_embedded_boxes(
             NodeData::ShadowRoot(_) => {}
             NodeData::Document(_) => unreachable!(),
         }
+    }
+
+    /// A node flattened into an ancestor's inline formatting context owns no
+    /// box children. Drop the list and any anonymous blocks it built while it
+    /// was still a box container, before the walk assigns new layout parents.
+    fn release_flattened_layout(doc: &mut BaseDocument, node_id: NodeId) {
+        let anonymous_blocks = doc.nodes[node_id].take_anonymous_blocks();
+        for anon_id in anonymous_blocks {
+            doc.deallocate_anonymous_block(anon_id);
+        }
+        doc.nodes[node_id].layout_children.get_mut().take();
     }
 }
 
