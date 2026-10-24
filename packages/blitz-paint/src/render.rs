@@ -1066,12 +1066,13 @@ impl ElementCx<'_, '_> {
                 x: pos.x,
                 y: pos.y + text_layout.block_offset as f64,
             };
+            let layout = text_layout.layout(self.context.dom.tree());
             let transform =
                 self.transform * Affine::translate((pos.x * self.scale, pos.y * self.scale));
 
             crate::text_box_decorations::paint_span_fragment_backgrounds(
                 scene,
-                &text_layout.layout,
+                layout,
                 self.context.dom,
                 transform,
                 self.node.id,
@@ -1081,7 +1082,7 @@ impl ElementCx<'_, '_> {
             if let Some(&(sel_start, sel_end)) = self.context.selection_ranges.get(&self.node.id) {
                 crate::text::draw_text_selection(
                     scene,
-                    &text_layout.layout,
+                    layout,
                     transform,
                     sel_start,
                     sel_end,
@@ -1092,7 +1093,7 @@ impl ElementCx<'_, '_> {
             let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             crate::text::stroke_text(
                 scene,
-                text_layout.layout.lines(),
+                layout.lines(),
                 self.context.dom,
                 transform,
                 self.scale,
@@ -1103,7 +1104,7 @@ impl ElementCx<'_, '_> {
 
             crate::text_box_decorations::paint_span_fragment_borders(
                 scene,
-                &text_layout.layout,
+                layout,
                 self.context.dom,
                 transform,
                 self.node.id,
@@ -1204,7 +1205,10 @@ impl ElementCx<'_, '_> {
             let y_offset = if let Some((text_layout, first_text_line)) = &self
                 .element
                 .inline_layout_data()
-                .and_then(|text_layout| Some((text_layout, text_layout.layout.lines().next()?)))
+                .and_then(|text_layout| {
+                    let layout = text_layout.layout(self.context.dom.tree());
+                    Some((text_layout, layout.lines().next()?))
+                })
             {
                 (first_text_line.metrics().baseline
                     - layout.lines().next().unwrap().metrics().baseline)
