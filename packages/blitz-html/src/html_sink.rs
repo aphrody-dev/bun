@@ -7,9 +7,10 @@ use std::borrow::Cow;
 use std::cell::{Cell, Ref, RefCell, RefMut};
 
 use blitz_dom::node::Attribute;
-use blitz_dom::{DocumentMutator, HtmlParserProvider, NodeId};
+use blitz_dom::{DocumentMutator, ElementData, HtmlParserProvider, NodeId};
 use html5ever::{
-    QualName,
+    LocalName, Namespace, QualName,
+    interface::ElemName,
     tendril::{StrTendril, TendrilSink},
     tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink},
 };
@@ -17,9 +18,27 @@ use html5ever::{
 /// Convert an html5ever Attribute which uses tendril for its value to a blitz Attribute
 /// which uses String.
 fn html5ever_to_blitz_attr(attr: html5ever::Attribute) -> Attribute {
-    Attribute {
-        name: attr.name,
-        value: attr.value.to_string(),
+    Attribute::new(attr.name, attr.value.to_string())
+}
+
+/// An element's name as the parser sees it, borrowed from the document.
+pub struct SinkElemName<'a>(Ref<'a, ElementData>);
+
+impl std::fmt::Debug for SinkElemName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0.expanded_name())
+    }
+}
+
+impl ElemName for SinkElemName<'_> {
+    #[inline(always)]
+    fn ns(&self) -> &Namespace {
+        self.0.namespace()
+    }
+
+    #[inline(always)]
+    fn local_name(&self) -> &LocalName {
+        &self.0.name.local
     }
 }
 
@@ -361,7 +380,7 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     type Handle = NodeId;
 
     type ElemName<'a>
-        = Ref<'a, QualName>
+        = SinkElemName<'a>
     where
         Self: 'a;
 
@@ -381,10 +400,10 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     }
 
     fn elem_name<'a>(&'a self, target: &'a Self::Handle) -> Self::ElemName<'a> {
-        Ref::map(self.document_mutator.borrow(), |docm| {
+        SinkElemName(Ref::map(self.document_mutator.borrow(), |docm| {
             docm.element_name(*target)
                 .expect("TreeSink::elem_name called on a node which is not an element!")
-        })
+        }))
     }
 
     fn create_element(
