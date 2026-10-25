@@ -138,7 +138,7 @@ impl<'a> ImageLayerStyles<'a> {
 impl ElementCx<'_, '_> {
     pub(super) fn draw_background(&self, scene: &mut impl PaintScene) {
         let bg_styles = &self.style.get_background();
-        let image_data = &self.element.background_images;
+        let image_data = self.element.background_images();
         let layer_count = bg_styles.background_image.0.len();
 
         // The background color is clipped by the clip of the last layer in the list
@@ -382,7 +382,7 @@ impl ElementCx<'_, '_> {
             if node.transform().is_some() {
                 return true;
             }
-            current = node.parent;
+            current = node.parent.get();
         }
         false
     }

@@ -466,14 +466,14 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         let overflow = *node.scrollable_overflow();
         let transform = parent_style_transform
             * Affine::translate(box_position)
-            * node.transform().as_deref().copied().unwrap_or_default();
+            * node.transform().unwrap_or_default();
 
         let screen_transform = Affine::translate(Vec2 {
             x: -self.initial_x,
             y: -self.initial_y,
         }) * transform;
         let screen_bbox = screen_transform.transform_rect_bbox(overflow.union(border_box));
-        let screen_bbox = match node.rehomed_reach.get() {
+        let screen_bbox = match node.rehomed_reach() {
             Some((x0, y0, x1, y1)) => {
                 let reach = Rect::new(
                     x0 as f64 * self.scale,
@@ -521,7 +521,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         if should_clip
             && clip_area < 0.01
             && overflow_area < 0.01
-            && node.rehomed_reach.get().is_none()
+            && node.rehomed_reach().is_none()
         {
             return;
         }
@@ -831,7 +831,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 _ => None,
             },
             text_input: element.text_input_data(),
-            list_item: element.list_item_data.as_deref(),
+            list_item: element.list_item_data(),
             devtools: self.dom.devtools(),
             custom_widget_scene,
         }
@@ -1057,8 +1057,7 @@ impl ElementCx<'_, '_> {
     fn draw_inline_layout(&self, scene: &mut impl PaintScene, pos: Point) {
         if self.node.flags.is_inline_root() {
             let text_layout = self.element
-                .inline_layout_data
-                .as_ref()
+                .inline_layout_data()
                 .unwrap_or_else(|| {
                     panic!("Tried to render node marked as inline root that does not have an inline layout: {:?}", self.node);
                 });
@@ -1204,8 +1203,7 @@ impl ElementCx<'_, '_> {
             // Align the marker with the baseline of the first line of text in the list item
             let y_offset = if let Some((text_layout, first_text_line)) = &self
                 .element
-                .inline_layout_data
-                .as_ref()
+                .inline_layout_data()
                 .and_then(|text_layout| Some((text_layout, text_layout.layout.lines().next()?)))
             {
                 (first_text_line.metrics().baseline
@@ -1247,7 +1245,7 @@ impl ElementCx<'_, '_> {
     ) {
         // Negative z_index hoisted nodes
 
-        if let Some(hoisted) = &self.node.stacking_context {
+        if let Some(hoisted) = self.node.stacking_context() {
             for hoisted_child in hoisted.neg_z_hoisted_children() {
                 let position = hoisted_child.position(self.node.tree(), self.node.id);
                 self.render_hoisted_child(
@@ -1264,7 +1262,7 @@ impl ElementCx<'_, '_> {
         if let Some(children) = &*self.node.paint_children.borrow() {
             for child_id in children {
                 let child = &self.context.dom.as_ref().tree()[*child_id];
-                let child_transform = match child.paint_parent_override.get() {
+                let child_transform = match child.paint_parent_override() {
                     Some(parent) if parent == self.node.id => {
                         if skip_rehomed {
                             continue;
@@ -1297,7 +1295,7 @@ impl ElementCx<'_, '_> {
         }
 
         // Positive z_index hoisted nodes
-        if let Some(hoisted) = &self.node.stacking_context {
+        if let Some(hoisted) = self.node.stacking_context() {
             for hoisted_child in hoisted.pos_z_hoisted_children() {
                 let position = hoisted_child.position(self.node.tree(), self.node.id);
                 self.render_hoisted_child(
@@ -1427,7 +1425,7 @@ impl ElementCx<'_, '_> {
         };
         for child_id in children {
             let child = &self.context.dom.as_ref().tree()[*child_id];
-            if child.paint_parent_override.get() != Some(self.node.id) {
+            if child.paint_parent_override() != Some(self.node.id) {
                 continue;
             }
             let translation = child.rehomed_paint_translate(self.node.id);
