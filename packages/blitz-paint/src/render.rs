@@ -1263,8 +1263,8 @@ impl ElementCx<'_, '_> {
         }
 
         // Regular children
-        if let Some(children) = &*self.node.paint_children.borrow() {
-            for child_id in children {
+        if let Some(children) = self.node.paint_children() {
+            for child_id in children.iter() {
                 let child = &self.context.dom.as_ref().tree()[*child_id];
                 let child_transform = match child.paint_parent_override() {
                     Some(parent) if parent == self.node.id => {
@@ -1424,10 +1424,10 @@ impl ElementCx<'_, '_> {
         parent_style_transform: Affine,
         clip_rect: Rect,
     ) {
-        let Some(children) = &*self.node.paint_children.borrow() else {
+        let Some(children) = self.node.paint_children() else {
             return;
         };
-        for child_id in children {
+        for child_id in children.iter() {
             let child = &self.context.dom.as_ref().tree()[*child_id];
             if child.paint_parent_override() != Some(self.node.id) {
                 continue;
