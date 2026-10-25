@@ -394,7 +394,7 @@ impl BaseDocument {
         let h = self.nodes[node_id].final_layout().size.height as f64 * scale;
         let mut overflow = Rect::new(0.0, 0.0, w, h);
 
-        let layout_children = std::mem::take(self.nodes[node_id].layout_children.get_mut());
+        let layout_children = self.nodes[node_id].take_layout_children();
 
         if let Some(ref children) = layout_children {
             for &child_id in children {
@@ -427,7 +427,7 @@ impl BaseDocument {
         }
 
         *self.nodes[node_id].scrollable_overflow_mut() = overflow;
-        *self.nodes[node_id].layout_children.get_mut() = layout_children;
+        self.nodes[node_id].set_layout_children(layout_children);
 
         let scaled_x = self.nodes[node_id].final_layout().location.x as f64 * scale;
         let scaled_y = self.nodes[node_id].final_layout().location.y as f64 * scale;
@@ -591,7 +591,7 @@ impl BaseDocument {
                     && !node.has_damaged_descendants()
                     && !node.is_anonymous()
                     && node.attached_shadow_root_id().is_none()
-                    && node.layout_children.borrow().is_some()
+                    && node.layout_children().is_some()
                 {
                     return;
                 }
@@ -607,7 +607,7 @@ impl BaseDocument {
             // panics) leaves it None forever. Without this the
             // whole page silently resolves to zero height on the next pass.
             let ks_gate_open = damage.intersects(CONSTRUCT_FC | CONSTRUCT_BOX)
-                || doc.nodes[node_id].layout_children.borrow().is_none();
+                || doc.nodes[node_id].layout_children().is_none();
             if ks_gate_open {
                 //} || flags.contains(NodeFlags::IS_INLINE_ROOT) {
 
@@ -653,14 +653,13 @@ impl BaseDocument {
                     }
                 }
 
-                *doc.nodes[node_id].layout_children.borrow_mut() = Some(layout_children.clone());
-                // *doc.nodes[node_id].paint_children.borrow_mut() = Some(layout_children);
+                doc.nodes[node_id].set_layout_children(Some(layout_children.clone()));
 
                 damage.remove(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                 // damage.insert(RestyleDamage::RELAYOUT | RestyleDamage::REPAINT);
             } else {
                 //if damage.contains(CONSTRUCT_DESCENDENT) {
-                let layout_children = doc.nodes[node_id].layout_children.borrow_mut().take();
+                let layout_children = doc.nodes[node_id].take_layout_children();
                 if let Some(layout_children) = layout_children {
                     for child_id in layout_children.iter().copied() {
                         // Anonymous blocks and pseudo-elements can be removed from the
@@ -672,7 +671,7 @@ impl BaseDocument {
                         doc.nodes[child_id].layout_parent.set(Some(node_id));
                     }
 
-                    *doc.nodes[node_id].layout_children.borrow_mut() = Some(layout_children);
+                    doc.nodes[node_id].set_layout_children(Some(layout_children));
                 }
 
                 // damage.remove(CONSTRUCT_DESCENDENT);
@@ -695,8 +694,8 @@ impl BaseDocument {
             };
             let is_root = id == root_id;
             let anonymous_blocks = node.take_anonymous_blocks();
-            node.layout_children.get_mut().take();
-            node.paint_children.get_mut().take();
+            node.take_layout_children();
+            node.take_paint_children();
             if !is_root {
                 // The root keeps its own box slot: its container may still list it.
                 node.layout_parent.set(None);
@@ -733,10 +732,10 @@ impl BaseDocument {
             if !node.flags.contains(NodeFlags::IS_IN_DOCUMENT) {
                 continue;
             }
-            let Some(children) = node.layout_children.borrow().clone() else {
+            let Some(children) = node.layout_children() else {
                 continue;
             };
-            for child_id in children {
+            for &child_id in children.iter() {
                 let Some(child) = self.nodes.get(child_id) else {
                     panic!("layout child {child_id:?} of {parent_id:?} is not in the slab");
                 };

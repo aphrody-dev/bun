@@ -670,16 +670,12 @@ impl TraversePartialTree for LayoutPassState<'_> {
         Self: 'a;
 
     fn child_ids(&self, node_id: NodeId) -> Self::ChildIter<'_> {
-        let layout_children = self.node_from_id(node_id).layout_children.borrow(); //.unwrap().as_ref();
-        RefCellChildIter::new(Ref::map(layout_children, |children| {
-            children.as_ref().map(|c| c.as_slice()).unwrap_or(&[])
-        }))
+        RefCellChildIter::new(self.node_from_id(node_id).layout_children())
     }
 
     fn child_count(&self, node_id: NodeId) -> usize {
         self.node_from_id(node_id)
-            .layout_children
-            .borrow()
+            .layout_children()
             .as_ref()
             .map(|c| c.len())
             .unwrap_or(0)
@@ -688,8 +684,7 @@ impl TraversePartialTree for LayoutPassState<'_> {
     fn get_child_id(&self, node_id: NodeId, index: usize) -> NodeId {
         taffy_node_id(
             self.node_from_id(node_id)
-                .layout_children
-                .borrow()
+                .layout_children()
                 .as_ref()
                 .unwrap()[index],
         )
@@ -1040,16 +1035,12 @@ impl TraversePartialTree for TaffyDebugTree<'_> {
         Self: 'a;
 
     fn child_ids(&self, node_id: NodeId) -> Self::ChildIter<'_> {
-        let layout_children = self.node_from_id(node_id).layout_children.borrow();
-        RefCellChildIter::new(Ref::map(layout_children, |children| {
-            children.as_ref().map(|c| c.as_slice()).unwrap_or(&[])
-        }))
+        RefCellChildIter::new(self.node_from_id(node_id).layout_children())
     }
 
     fn child_count(&self, node_id: NodeId) -> usize {
         self.node_from_id(node_id)
-            .layout_children
-            .borrow()
+            .layout_children()
             .as_ref()
             .map(|c| c.len())
             .unwrap_or(0)
@@ -1058,8 +1049,7 @@ impl TraversePartialTree for TaffyDebugTree<'_> {
     fn get_child_id(&self, node_id: NodeId, index: usize) -> NodeId {
         taffy_node_id(
             self.node_from_id(node_id)
-                .layout_children
-                .borrow()
+                .layout_children()
                 .as_ref()
                 .unwrap()[index],
         )
@@ -1110,11 +1100,11 @@ impl PrintTree for TaffyDebugTree<'_> {
 // }
 
 pub struct RefCellChildIter<'a> {
-    items: Ref<'a, [crate::NodeId]>,
+    items: Option<Ref<'a, thin_vec::ThinVec<crate::NodeId>>>,
     idx: usize,
 }
 impl<'a> RefCellChildIter<'a> {
-    fn new(items: Ref<'a, [crate::NodeId]>) -> RefCellChildIter<'a> {
+    fn new(items: Option<Ref<'a, thin_vec::ThinVec<crate::NodeId>>>) -> RefCellChildIter<'a> {
         RefCellChildIter { items, idx: 0 }
     }
 }
@@ -1122,7 +1112,7 @@ impl<'a> RefCellChildIter<'a> {
 impl Iterator for RefCellChildIter<'_> {
     type Item = NodeId;
     fn next(&mut self) -> Option<Self::Item> {
-        self.items.get(self.idx).map(|id| {
+        self.items.as_ref()?.get(self.idx).map(|id| {
             self.idx += 1;
             taffy_node_id(*id)
         })

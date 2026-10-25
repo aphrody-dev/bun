@@ -573,7 +573,7 @@ impl BaseDocument {
         end: NodeId,
     ) -> Vec<NodeId> {
         let parent = &self.nodes[parent_id];
-        let layout_children = parent.layout_children.borrow();
+        let layout_children = parent.layout_children();
         let Some(children) = layout_children.as_ref() else {
             return Vec::new();
         };
@@ -603,7 +603,7 @@ impl BaseDocument {
     /// Recursively collect all inline roots from a node's layout_children subtree
     fn collect_all_inline_roots_in_subtree(&self, node_id: NodeId, result: &mut Vec<NodeId>) {
         let node = &self.nodes[node_id];
-        let layout_children = node.layout_children.borrow();
+        let layout_children = node.layout_children();
         let Some(children) = layout_children.as_ref() else {
             return;
         };
@@ -630,7 +630,7 @@ impl BaseDocument {
         result: &mut Vec<NodeId>,
     ) {
         let parent = &self.nodes[parent_id];
-        let layout_children = parent.layout_children.borrow();
+        let layout_children = parent.layout_children();
         let Some(children) = layout_children.as_ref() else {
             return;
         };

@@ -175,6 +175,34 @@ mod compact_node_tests {
     use super::*;
 
     #[test]
+    fn box_child_lists_preserve_empty_state_and_reset_on_clone() {
+        let mut doc = crate::BaseDocument::new(Default::default());
+        let element = doc.mutate().create_element(crate::qual_name!("div"), vec![]);
+        let text = doc.create_text_node("text");
+        let node = &doc.nodes[element];
+        assert!(node.layout_children().is_none());
+        node.set_layout_children(Some(ThinVec::new()));
+        node.set_paint_children(Some([text].into_iter().collect()));
+        let layout = node.layout_children().unwrap();
+        let paint = node.paint_children().unwrap();
+        assert_eq!(layout.len(), 0);
+        assert_eq!(&paint[..], &[text]);
+        drop(paint);
+        drop(layout);
+
+        let clone = doc.deep_clone_node(element);
+        assert!(doc.nodes[clone].layout_children().is_none());
+        assert!(doc.nodes[clone].paint_children().is_none());
+        assert_eq!(doc.nodes[element].take_layout_children(), Some(ThinVec::new()));
+        assert_eq!(doc.nodes[element].take_layout_children(), None);
+        assert!(doc.nodes[text].layout_children().is_none());
+        assert!(doc.nodes[text].paint_children().is_none());
+        doc.nodes[text].take_layout_children();
+        doc.nodes[text].take_paint_children();
+        assert!(doc.nodes[text].rare.get().is_none());
+    }
+
+    #[test]
     fn laying_out_in_flow_boxes_keeps_rare_storage_cold() {
         use crate::{Attribute, DocumentConfig, qual_name};
         use blitz_traits::shell::{ColorScheme, Viewport};
@@ -345,6 +373,12 @@ struct NodeRare {
     anonymous_blocks: ThinVec<NodeId>,
 }
 
+#[derive(Default)]
+pub(crate) struct LayoutChildLists {
+    layout: RefCell<Option<ThinVec<NodeId>>>,
+    paint: RefCell<Option<ThinVec<NodeId>>>,
+}
+
 pub struct Node {
     // The actual tree we belong to. This is unsafe!!
     tree: *mut crate::NodeTree,
@@ -358,11 +392,6 @@ pub struct Node {
 
     /// Our parent in the layout hierachy: a separate list that includes anonymous collections of inline elements
     pub layout_parent: NodeIdCell,
-    /// A separate child list that includes anonymous collections of inline elements
-    pub layout_children: RefCell<Option<ThinVec<NodeId>>>,
-    /// The same as layout_children, but sorted by z-index
-    pub paint_children: RefCell<Option<ThinVec<NodeId>>>,
-
     /// Sparse shadow, out-of-flow, and paint bookkeeping.
     rare: OnceCell<Box<NodeRare>>,
 
@@ -425,6 +454,47 @@ universal_accessors! {
 }
 
 impl Node {
+    fn child_lists(&self) -> Option<&LayoutChildLists> {
+        match &self.data {
+            NodeData::Element(data) | NodeData::AnonymousBlock(data) => Some(&data.child_lists),
+            NodeData::Document(data) => Some(&data.child_lists),
+            _ => None,
+        }
+    }
+
+    /// Derived box children do not exist on text, comment or shadow-root nodes.
+    pub fn layout_children(&self) -> Option<Ref<'_, ThinVec<NodeId>>> {
+        Ref::filter_map(self.child_lists()?.layout.borrow(), |children| children.as_ref()).ok()
+    }
+
+    pub fn paint_children(&self) -> Option<Ref<'_, ThinVec<NodeId>>> {
+        Ref::filter_map(self.child_lists()?.paint.borrow(), |children| children.as_ref()).ok()
+    }
+
+    pub fn take_layout_children(&self) -> Option<ThinVec<NodeId>> {
+        self.child_lists()?.layout.borrow_mut().take()
+    }
+
+    pub fn take_paint_children(&self) -> Option<ThinVec<NodeId>> {
+        self.child_lists()?.paint.borrow_mut().take()
+    }
+
+    pub fn set_layout_children(&self, children: Option<ThinVec<NodeId>>) {
+        if let Some(lists) = self.child_lists() {
+            *lists.layout.borrow_mut() = children;
+        } else {
+            assert!(children.is_none(), "only box nodes have layout children");
+        }
+    }
+
+    pub fn set_paint_children(&self, children: Option<ThinVec<NodeId>>) {
+        if let Some(lists) = self.child_lists() {
+            *lists.paint.borrow_mut() = children;
+        } else {
+            assert!(children.is_none(), "only box nodes have paint children");
+        }
+    }
+
     fn rare(&self) -> &NodeRare {
         self.rare.get_or_init(|| Box::new(NodeRare::default()))
     }
@@ -879,8 +949,6 @@ impl Node {
             parent: OptNodeId::default(),
             children: ThinVec::new(),
             layout_parent: NodeIdCell::new(None),
-            layout_children: RefCell::new(None),
-            paint_children: RefCell::new(None),
             rare: OnceCell::new(),
 
             flags: NodeFlags::empty(),
@@ -2337,7 +2405,8 @@ impl Node {
         }
 
         // Call `.hit()` on each child in turn. If any return `Some` then return that value. Else return `Some(self.id).
-        for child_id in self.paint_children.borrow().iter().flatten().rev() {
+        let paint_children = self.paint_children();
+        for child_id in paint_children.iter().flat_map(|children| children.iter()).rev() {
             let child = self.with(*child_id);
             let child_position = child.taffy_position();
             let mut child_x = x;
@@ -2374,6 +2443,7 @@ impl Node {
                 return Some(hit);
             }
         }
+        drop(paint_children);
 
         // Negative z_index hoisted children
         if matches_hoisted_content {
@@ -2831,7 +2901,7 @@ impl std::fmt::Debug for Node {
             .field("id", &self.id)
             .field("is_inline_root", &self.flags.is_inline_root())
             .field("children", &self.children)
-            .field("layout_children", &self.layout_children.borrow())
+            .field("layout_children", &self.layout_children())
             // .field("style", &self.style)
             .field("node", &self.data)
             .field("stylo_element_data", &self.try_stylo_element_data())

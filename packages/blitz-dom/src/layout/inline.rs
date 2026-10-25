@@ -1407,7 +1407,7 @@ impl LayoutPassState<'_> {
         // did not get a candidate above is offered to the out-of-flow
         // pass with its static position at the start of the content box.
         let missing_oof: Vec<NodeId> = {
-            let lc = self.nodes[node_id].layout_children.borrow();
+            let lc = self.nodes[node_id].layout_children();
             lc.as_deref()
                 .map(|children| {
                     children

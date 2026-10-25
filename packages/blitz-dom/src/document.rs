@@ -1355,7 +1355,9 @@ impl BaseDocument {
             .get(node_id)
             .map(|node| {
                 let mut ids = node.children.to_vec();
-                ids.extend(node.layout_children.borrow().iter().flatten().copied());
+                if let Some(children) = node.layout_children() {
+                    ids.extend(children.iter().copied());
+                }
                 ids
             })
             .unwrap_or_default();
@@ -3935,7 +3937,7 @@ impl BaseDocument {
             return (Some(parent_id), None);
         };
 
-        let layout_children = parent.layout_children.borrow();
+        let layout_children = parent.layout_children();
         let Some(children) = layout_children.as_ref() else {
             return (Some(parent_id), None);
         };
@@ -4129,7 +4131,7 @@ impl BaseDocument {
         target_index: usize,
     ) -> Option<NodeId> {
         let parent = self.get_node(parent_id)?;
-        let layout_children = parent.layout_children.borrow();
+        let layout_children = parent.layout_children();
         let children = layout_children.as_ref()?;
 
         children
@@ -5309,7 +5311,7 @@ mod display_none_retention_tests {
             let node = &mut doc.nodes[id];
             assert!(node.primary_styles().is_none(), "{id} kept styles");
             assert!(node.try_layout_data_mut().is_none(), "{id} kept layout data");
-            assert!(node.layout_children.borrow().is_none(), "{id} has layout children");
+            assert!(node.layout_children().is_none(), "{id} has layout children");
         }
         assert!(doc.resolve_undisplayed_style(p).is_some());
         assert!(doc.nodes[p].primary_styles().is_none(), "on-demand style was stored");
@@ -5359,7 +5361,7 @@ mod display_none_retention_tests {
         let state = |doc: &mut BaseDocument, id: NodeId| {
             let node = &mut doc.nodes[id];
             let styled = node.primary_styles().is_some();
-            let children = node.layout_children.borrow().is_some();
+            let children = node.layout_children().is_some();
             let inline = node.element_data().is_some_and(|e| e.inline_layout_data().is_some());
             let layout = node.try_layout_data_mut().is_some();
             (styled, children, inline, layout)

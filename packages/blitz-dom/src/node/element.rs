@@ -91,6 +91,7 @@ pub struct ElementData {
     pub display_constructed_as: StyloDisplay,
     /// Layout output state (`None` until layout first writes to this node).
     pub layout_data: Option<Box<LayoutData>>,
+    pub(crate) child_lists: super::node::LayoutChildLists,
 }
 
 /// Taffy layout output state (cache, layouts, scroll offset and overflow).
@@ -644,6 +645,7 @@ impl DocumentData {
 /// carries the same style/layout fields that were previously stored directly on
 /// [`Node`](super::Node).
 pub struct DocumentData {
+    pub(crate) child_lists: super::node::LayoutChildLists,
     pub stylo_element_data: StyloData,
     /// Selector flags deposited here by `apply_selector_flags` when a
     /// `for_parent()` flag is applied while matching the root `<html>` element,
@@ -681,6 +683,7 @@ impl std::fmt::Debug for DocumentData {
 impl DocumentData {
     pub fn new() -> Self {
         Self {
+            child_lists: Default::default(),
             stylo_element_data: Default::default(),
             selector_flags: SelectorFlagsCell::default(),
             dirty_descendants: AtomicBool::new(true),
@@ -761,6 +764,7 @@ impl Clone for ElementData {
             }),
 
             // Runtime state: reset to defaults.
+            child_lists: Default::default(),
             stylo_element_data: Default::default(),
             selector_flags: SelectorFlagsCell::default(),
             element_state: self.element_state,
@@ -880,6 +884,7 @@ impl ElementData {
             None => NameNs::Other,
         };
         let mut data = ElementData {
+            child_lists: Default::default(),
             name: ElementName { local },
             bits: ElementBits::new(name_ns),
             id: id_attr_atom,

@@ -1795,7 +1795,7 @@ pub(crate) fn find_inline_layout_embedded_boxes(
         for anon_id in anonymous_blocks {
             doc.deallocate_anonymous_block(anon_id);
         }
-        doc.nodes[node_id].layout_children.get_mut().take();
+        doc.nodes[node_id].take_layout_children();
     }
 }
 

@@ -283,7 +283,7 @@ impl BaseDocument {
         };
 
         self.nodes[node_id].clear_rehomed_paint_children();
-        let children = self.nodes[node_id].layout_children.borrow_mut().take();
+        let children = self.nodes[node_id].take_layout_children();
         if let Some(mut children) = children {
             // Anonymous blocks and pseudo-elements can be removed from the
             // slab between resolve and this paint-tree pass; drop stale ids
@@ -336,12 +336,15 @@ impl BaseDocument {
             let mut next_hoisted = 0;
 
             let mut paint_children = self.nodes[node_id]
-                .paint_children
-                .borrow_mut()
-                .take()
+                .take_paint_children()
                 .unwrap_or_default();
             paint_children.clear();
-            paint_children.reserve(children.len() + hoisted_past_parent.len());
+            let contributor_bound = children.len() + hoisted_past_parent.len();
+            if paint_children.capacity() == 0 {
+                paint_children.reserve_exact(contributor_bound);
+            } else {
+                paint_children.reserve(contributor_bound);
+            }
 
             for (index, &child_id) in children.iter().enumerate() {
                 if !owned_here(self, child_id) && self.paints_rehomed(child_id) {
@@ -400,8 +403,8 @@ impl BaseDocument {
                 .sort_by_cached_key(|id| node_to_paint_order(&self.nodes[*id], is_flex_or_grid));
 
             let node = &self.nodes[node_id];
-            *node.paint_children.borrow_mut() = Some(paint_children);
-            *node.layout_children.borrow_mut() = Some(children);
+            node.set_paint_children(Some(paint_children));
+            node.set_layout_children(Some(children));
         }
 
         let node = &mut self.nodes[node_id];
@@ -611,7 +614,7 @@ fn is_positioned_only_wrapper(node: &Node, depth: u8) -> bool {
     if paints_itself || border.left > 0.0 || border.right > 0.0 || border.top > 0.0 || border.bottom > 0.0 {
         return false;
     }
-    let children = node.paint_children.borrow();
+    let children = node.paint_children();
     let Some(children) = children.as_ref().filter(|c| !c.is_empty()) else {
         return false;
     };

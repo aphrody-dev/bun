@@ -128,7 +128,7 @@ impl BaseDocument {
 
         println!("Layout Parent: {:?}", node.layout_parent.get());
 
-        let layout_children: Option<Vec<_>> = node.layout_children.borrow().as_ref().map(|lc| {
+        let layout_children: Option<Vec<_>> = node.layout_children().as_ref().map(|lc| {
             lc.iter()
                 .map(|id| &self.nodes[*id])
                 .map(|node| (node.id, node.order(), node.node_debug_str()))
@@ -138,7 +138,7 @@ impl BaseDocument {
             println!("Layout Children: {layout_children:?}");
         }
 
-        let paint_children: Option<Vec<_>> = node.paint_children.borrow().as_ref().map(|lc| {
+        let paint_children: Option<Vec<_>> = node.paint_children().as_ref().map(|lc| {
             lc.iter()
                 .map(|id| &self.nodes[*id])
                 .map(|node| (node.id, node.order(), node.node_debug_str()))
