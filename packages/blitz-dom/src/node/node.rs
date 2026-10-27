@@ -11,8 +11,7 @@ use keyboard_types::Modifiers;
 use kurbo::{Affine, Rect as KurboRect};
 use markup5ever::{LocalName, local_name};
 use parley::{BreakReason, Cluster, ClusterSide};
-use selectors::matching::ElementSelectorFlags;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
 use std::fmt::Write;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -40,7 +39,7 @@ use taffy::{Cache, prelude::Layout};
 use thin_vec::ThinVec;
 
 use super::stylo_data::{ComputedStyleRef, StyloData};
-use super::{Attribute, DocumentData, ElementData, LayoutData};
+use super::{Attribute, DocumentData, ElementData, ElementStateBits, LayoutData, SelectorFlagsCell};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayOuter {
@@ -84,6 +83,268 @@ impl NodeFlags {
     }
 }
 
+/// A nullable full-generation node ID. Slotmap's all-ones null key is never
+/// issued for a live node.
+/// In particular, zero is a valid represented `Some(NodeId::default())`.
+/// Holds a `NodeId` rather than its `u64` so it keeps the id's 4-byte alignment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct OptNodeId(NodeId);
+
+impl std::fmt::Debug for OptNodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.get(), f)
+    }
+}
+
+impl OptNodeId {
+    const NONE: u64 = u64::MAX;
+
+    pub fn from_option(id: Option<NodeId>) -> Self {
+        Self(match id {
+            Some(id) => {
+                assert_ne!(id.as_u64(), Self::NONE, "reserved null-slot node ID");
+                id
+            }
+            None => NodeId::from_u64(Self::NONE),
+        })
+    }
+
+    pub fn get(self) -> Option<NodeId> {
+        (self.0.as_u64() != Self::NONE).then_some(self.0)
+    }
+
+    pub fn set(&mut self, id: Option<NodeId>) {
+        *self = Self::from_option(id);
+    }
+
+    pub fn take(&mut self) -> Option<NodeId> {
+        std::mem::take(self).get()
+    }
+}
+
+impl From<Option<NodeId>> for OptNodeId {
+    fn from(id: Option<NodeId>) -> Self {
+        Self::from_option(id)
+    }
+}
+
+impl Default for OptNodeId {
+    fn default() -> Self {
+        Self::from_option(None)
+    }
+}
+
+pub struct NodeIdCell(Cell<OptNodeId>);
+
+impl std::fmt::Debug for NodeIdCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.get(), f)
+    }
+}
+
+impl Default for NodeIdCell {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl NodeIdCell {
+    pub fn new(id: Option<NodeId>) -> Self {
+        Self(Cell::new(OptNodeId::from_option(id)))
+    }
+
+    pub fn get(&self) -> Option<NodeId> {
+        self.0.get().get()
+    }
+
+    pub fn set(&self, id: Option<NodeId>) {
+        self.0.set(OptNodeId::from_option(id));
+    }
+
+    pub fn replace(&self, id: Option<NodeId>) -> Option<NodeId> {
+        self.0.replace(OptNodeId::from_option(id)).get()
+    }
+
+    pub fn take(&self) -> Option<NodeId> {
+        self.replace(None)
+    }
+}
+
+#[cfg(test)]
+mod compact_node_tests {
+    use super::*;
+
+    #[test]
+    fn laying_out_in_flow_boxes_keeps_rare_storage_cold() {
+        use crate::{Attribute, DocumentConfig, qual_name};
+        use blitz_traits::shell::{ColorScheme, Viewport};
+
+        let mut doc = crate::BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let style = |value: &str| Attribute::new(qual_name!("style"), value.to_string());
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![]);
+        let outer = mutator.create_element(qual_name!("div"), vec![style("display:flex")]);
+        let inner = mutator.create_element(qual_name!("div"), vec![style("height:10px")]);
+        mutator.append_children(outer, &[inner]);
+        mutator.append_children(body, &[outer]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+
+        // The root element holds the root stacking context; nothing else needs rare storage.
+        assert!(doc.nodes[html].stacking_context().is_some());
+        let warm: Vec<_> = [body, outer, inner]
+            .into_iter()
+            .filter(|&id| doc.nodes[id].rare.get().is_some())
+            .collect();
+        assert_eq!(warm, []);
+    }
+
+    #[test]
+    fn nullable_ids_preserve_zero_and_full_generations() {
+        let high_generation = NodeId::from_u64(0xffff_fffe_ffff_fffe);
+        for id in [NodeId::default(), high_generation] {
+            let mut packed = OptNodeId::from_option(Some(id));
+            assert_eq!(packed.get(), Some(id));
+            assert_eq!(packed.take(), Some(id));
+            assert_eq!(packed.get(), None);
+
+            let cell = NodeIdCell::new(Some(id));
+            assert_eq!(cell.replace(None), Some(id));
+            assert_eq!(cell.take(), None);
+            cell.set(Some(id));
+            assert_eq!(cell.get(), Some(id));
+        }
+
+        assert_eq!(OptNodeId::default().get(), None);
+        assert!(
+            std::panic::catch_unwind(|| {
+                OptNodeId::from_option(Some(NodeId::from_u64(u64::MAX)))
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ordinary_node_access_and_empty_resets_keep_rare_storage_cold() {
+        const MAX_COLD_NODE_BYTES: usize = 192;
+        assert!(std::mem::size_of::<Node>() <= MAX_COLD_NODE_BYTES);
+
+        let mut doc = crate::BaseDocument::new(Default::default());
+        let root = doc.root_node_mut();
+        assert!(root.rare.get().is_none());
+        assert_eq!(root.parent.get(), None);
+        assert_eq!(root.assigned_slot(), None);
+        assert!(root.assigned_nodes().is_none());
+        assert_eq!(root.paint_parent_override(), None);
+        assert!(root.rehomed_paint_children().is_none());
+        assert!(root.hoisted_children().is_none());
+        assert_eq!(root.oof_containing_block(), None);
+        assert!(!root.placed_floats());
+        assert_eq!(root.rehomed_reach(), None);
+        assert!(root.stacking_context().is_none());
+        assert!(root.sc_contribution_cache().is_none());
+
+        root.set_assigned_slot(None);
+        root.set_assigned_nodes(None);
+        assert!(root.take_assigned_nodes().is_none());
+        root.set_paint_parent_override(None);
+        root.clear_rehomed_paint_children();
+        root.clear_hoisted_children();
+        assert!(root.take_hoisted_children().is_empty());
+        root.set_hoisted_children(ThinVec::new());
+        root.set_oof_containing_block(None);
+        root.set_placed_floats(false);
+        root.set_rehomed_reach(None);
+        root.set_stacking_context(None);
+        assert!(root.take_stacking_context().is_none());
+        root.set_sc_contribution_cache(ThinVec::new());
+        root.clear_sc_contribution_cache();
+        assert!(root.take_sc_contribution_cache().is_empty());
+        assert!(root.rare.get().is_none());
+    }
+
+    #[test]
+    fn rare_sidecars_keep_id_and_computed_empty_slot_state() {
+        let mut doc = crate::BaseDocument::new(Default::default());
+        let node = doc.root_node_mut();
+        let id = NodeId::default();
+        node.set_assigned_slot(Some(id));
+        node.set_paint_parent_override(Some(id));
+        node.set_oof_containing_block(Some(id));
+        assert_eq!(node.assigned_slot(), Some(id));
+        assert_eq!(node.paint_parent_override(), Some(id));
+        assert_eq!(node.oof_containing_block(), Some(id));
+
+        let mut hoisted = node.hoisted_children_mut();
+        let mut rehomed = node.rehomed_paint_children_mut();
+        hoisted.push(id);
+        rehomed.push(id);
+        assert_eq!(hoisted.iter().copied().collect::<Vec<_>>(), vec![id]);
+        assert_eq!(rehomed.iter().copied().collect::<Vec<_>>(), vec![id]);
+        drop(rehomed);
+        drop(hoisted);
+        assert!(node.rare.get().is_some());
+
+        node.set_assigned_nodes(Some(ThinVec::new()));
+        assert_eq!(node.assigned_nodes().map(|nodes| nodes.len()), Some(0));
+        assert_eq!(node.take_assigned_nodes().map(|nodes| nodes.len()), Some(0));
+        assert!(node.assigned_nodes().is_none());
+    }
+
+    #[test]
+    fn unchanged_scroll_offset_keeps_layout_state_cold() {
+        let mut doc = crate::BaseDocument::new(Default::default());
+        let id = doc.mutate().create_element(
+            markup5ever::QualName::new(
+                None,
+                markup5ever::ns!(html),
+                markup5ever::local_name!("span"),
+            ),
+            Vec::new(),
+        );
+        let node = doc.get_node_mut(id).unwrap();
+        let _ = node.final_layout();
+        let _ = node.cache();
+        node.clear_layout_cache();
+        assert!(node.try_layout_data_mut().is_none());
+        node.set_scroll_offset(crate::Point::ZERO);
+        assert!(node.try_layout_data_mut().is_none());
+        let offset = crate::Point { x: 4.0, y: 9.0 };
+        node.set_scroll_offset(offset);
+        assert_eq!(*node.scroll_offset(), offset);
+        assert!(node.try_layout_data_mut().is_some());
+    }
+}
+
+#[derive(Default)]
+struct NodeRare {
+    /// Flat-tree edge recomputed by `flush_slot_assignments`.
+    assigned_slot: Cell<OptNodeId>,
+    /// `None` is not a slot; `Some(empty)` is computed and renders fallback.
+    assigned_nodes: Option<ThinVec<NodeId>>,
+    paint_parent_override: Cell<OptNodeId>,
+    rehomed_paint_children: RefCell<ThinVec<NodeId>>,
+    hoisted_children: RefCell<ThinVec<NodeId>>,
+    oof_containing_block: NodeIdCell,
+    placed_floats: Cell<bool>,
+    rehomed_reach: RefCell<Option<Box<(f32, f32, f32, f32)>>>,
+    stacking_context: RefCell<Option<Box<StackingContext>>>,
+    sc_contribution_cache: RefCell<ThinVec<HoistedPaintChild>>,
+    /// Anonymous block boxes created for this node during layout construction.
+    ///
+    /// Anonymous blocks live only in the slab (they are not part of the DOM
+    /// `children` list), so we track the ones we own here to be able to
+    /// deallocate them when this node is reconstructed.
+    anonymous_blocks: ThinVec<NodeId>,
+}
+
 pub struct Node {
     // The actual tree we belong to. This is unsafe!!
     tree: *mut crate::NodeTree,
@@ -91,75 +352,19 @@ pub struct Node {
     /// Our Id
     pub id: NodeId,
     /// Our parent's ID
-    pub parent: Option<NodeId>,
+    pub parent: OptNodeId,
     // What are our children?
     pub children: ThinVec<NodeId>,
 
-    /// Slot this node is assigned to in its host's shadow tree (flat
-    /// tree edge). Recomputed by flush_slot_assignments each resolve.
-    pub assigned_slot: Option<NodeId>,
-
-    /// For <slot> elements: the slottables assigned to this slot.
-    /// None = not a slot; Some(empty) = computed, render fallback.
-    pub assigned_nodes: Option<ThinVec<NodeId>>,
     /// Our parent in the layout hierachy: a separate list that includes anonymous collections of inline elements
-    pub layout_parent: Cell<Option<NodeId>>,
+    pub layout_parent: NodeIdCell,
     /// A separate child list that includes anonymous collections of inline elements
     pub layout_children: RefCell<Option<ThinVec<NodeId>>>,
-    /// Out-of-flow (absolutely/fixed positioned) boxes for which this node is the
-    /// containing block. Recorded by Taffy's out-of-flow positioning pass. The
-    /// `Layout.location` of these boxes is relative to this node's border box.
-    pub hoisted_children: RefCell<ThinVec<NodeId>>,
-    /// For an out-of-flow box that was hoisted by Taffy's out-of-flow positioning
-    /// pass, the node whose `hoisted_children` list contains it (its containing
-    /// block). The box's `Layout.location` is relative to this node rather than
-    /// to its `layout_parent`. `None` for in-flow boxes.
-    pub oof_containing_block: Cell<Option<NodeId>>,
-    /// Anonymous block boxes created for this node during layout construction.
-    ///
-    /// Anonymous blocks live only in the slab (they are not part of the DOM
-    /// `children` list), so we track the ones we own here to be able to
-    /// deallocate them when this node is reconstructed.
-    pub anonymous_blocks: ThinVec<NodeId>,
     /// The same as layout_children, but sorted by z-index
     pub paint_children: RefCell<Option<ThinVec<NodeId>>>,
 
-    /// Set on a z-index:auto abspos box whose out-of-flow containing block
-    /// is not its flow (layout) parent: the flow parent it paints under.
-    ///
-    /// Layout positions the box against its containing block (that's what
-    /// the insets resolve against), but CSS paints it in DOM order among the
-    /// stacking context's other z-index:auto positioned boxes. Painting it
-    /// under the containing block would put it above the whole intervening
-    /// subtree instead. So it is re-homed here for paint and hit-test, with
-    /// `rehomed_paint_translate` correcting the origin.
-    pub paint_parent_override: Cell<Option<NodeId>>,
-
-    /// Boxes re-homed to this node for paint (the inverse index of
-    /// paint_parent_override), rebuilt with this node's paint children.
-    pub rehomed_paint_children: RefCell<ThinVec<NodeId>>,
-
-    /// This node's inline pass placed a float into the shared
-    /// block formatting context. Floats are registered as a side effect
-    /// of laying the container out, so serving it from the layout cache
-    /// leaves the bands empty and a later float in the same BFC stacks
-    /// at the top instead of below this one (todomvc's quote columns).
-    pub placed_floats: Cell<bool>,
-
-    /// Union of re-homed paint boxes reachable through this node, in
-    /// this node's own coordinate space (border-box origin), CSS px.
-    /// (x0, y0, x1, y1); None = no re-homed content below here.
-    ///
-    /// Computed by compute_rehomed_reach after layout and the paint-tree
-    /// build each resolve, so it is never stale. Paint-cull and hit-prune
-    /// widen their bounds by this rect instead of trusting taffy's (which
-    /// cannot cover a re-homed box: it is not laid out by its flow parent).
-    pub rehomed_reach: Cell<Option<(f32, f32, f32, f32)>>,
-    pub stacking_context: Option<Box<StackingContext>>,
-    /// The hoisted entries this node's subtree pushed into the enclosing
-    /// stacking context on its last (non-skipped) paint-tree build. Replayed
-    /// when the subtree is skipped as clean. Empty for stacking-context roots.
-    pub sc_contribution_cache: RefCell<ThinVec<HoistedPaintChild>>,
+    /// Sparse shadow, out-of-flow, and paint bookkeeping.
+    rare: OnceCell<Box<NodeRare>>,
 
     // Flags
     pub flags: NodeFlags,
@@ -208,19 +413,220 @@ macro_rules! universal_accessors {
 
 universal_accessors! {
     stylo_element_data / stylo_element_data_mut: StyloData,
-    transform / transform_mut: Option<Box<Affine>>,
     display_constructed_as / display_constructed_as_mut: StyloDisplay,
     // The document node is styled/snapshotted like an element, so it also
     // carries these:
-    element_state / element_state_mut: ElementState,
+    element_state / element_state_mut: ElementStateBits,
     snapshot_handled / snapshot_handled_mut: AtomicBool,
     // `apply_selector_flags` deposits `for_parent()` flags on the parent node,
     // and the parent of the root <html> element is the document -- so the
     // document has to be able to hold selector flags too.
-    selector_flags / selector_flags_mut: Cell<ElementSelectorFlags>,
+    selector_flags / selector_flags_mut: SelectorFlagsCell,
 }
 
 impl Node {
+    fn rare(&self) -> &NodeRare {
+        self.rare.get_or_init(|| Box::new(NodeRare::default()))
+    }
+
+    fn rare_mut(&mut self) -> &mut NodeRare {
+        self.rare.get_or_init(|| Box::new(NodeRare::default()));
+        self.rare.get_mut().expect("rare fields are initialized above")
+    }
+
+    pub fn assigned_slot(&self) -> Option<NodeId> {
+        self.rare
+            .get()
+            .and_then(|rare| rare.assigned_slot.get().get())
+    }
+
+    pub fn set_assigned_slot(&self, id: Option<NodeId>) {
+        if id.is_some() || self.rare.get().is_some() {
+            self.rare().assigned_slot.set(id.into());
+        }
+    }
+
+    pub fn assigned_nodes(&self) -> Option<&ThinVec<NodeId>> {
+        self.rare
+            .get()
+            .and_then(|rare| rare.assigned_nodes.as_ref())
+    }
+
+    pub fn take_assigned_nodes(&mut self) -> Option<ThinVec<NodeId>> {
+        self.rare
+            .get_mut()
+            .and_then(|rare| rare.assigned_nodes.take())
+    }
+
+    pub fn set_assigned_nodes(&mut self, nodes: Option<ThinVec<NodeId>>) {
+        if nodes.is_some() || self.rare.get().is_some() {
+            self.rare_mut().assigned_nodes = nodes;
+        }
+    }
+
+    pub fn assigned_nodes_mut(&mut self) -> &mut ThinVec<NodeId> {
+        self.rare_mut().assigned_nodes.get_or_insert_with(ThinVec::new)
+    }
+
+    /// Anonymous block boxes this node owns (see `NodeRare::anonymous_blocks`).
+    pub fn anonymous_blocks(&self) -> &[NodeId] {
+        self.rare.get().map_or(&[], |rare| &rare.anonymous_blocks)
+    }
+
+    pub fn take_anonymous_blocks(&mut self) -> ThinVec<NodeId> {
+        self.rare
+            .get_mut()
+            .map_or_else(ThinVec::new, |rare| std::mem::take(&mut rare.anonymous_blocks))
+    }
+
+    pub fn set_anonymous_blocks(&mut self, blocks: ThinVec<NodeId>) {
+        if !blocks.is_empty() || self.rare.get().is_some() {
+            self.rare_mut().anonymous_blocks = blocks;
+        }
+    }
+
+    pub fn paint_parent_override(&self) -> Option<NodeId> {
+        self.rare
+            .get()
+            .and_then(|rare| rare.paint_parent_override.get().get())
+    }
+
+    pub fn set_paint_parent_override(&self, id: Option<NodeId>) {
+        if id.is_some() || self.rare.get().is_some() {
+            self.rare().paint_parent_override.set(id.into());
+        }
+    }
+
+    pub fn rehomed_paint_children(&self) -> Option<Ref<'_, ThinVec<NodeId>>> {
+        self.rare
+            .get()
+            .map(|rare| rare.rehomed_paint_children.borrow())
+    }
+
+    pub fn rehomed_paint_children_mut(&self) -> RefMut<'_, ThinVec<NodeId>> {
+        self.rare().rehomed_paint_children.borrow_mut()
+    }
+
+    pub fn clear_rehomed_paint_children(&self) {
+        if let Some(rare) = self.rare.get() {
+            rare.rehomed_paint_children.borrow_mut().clear();
+        }
+    }
+
+    pub fn hoisted_children(&self) -> Option<Ref<'_, ThinVec<NodeId>>> {
+        self.rare.get().map(|rare| rare.hoisted_children.borrow())
+    }
+
+    pub fn hoisted_children_mut(&self) -> RefMut<'_, ThinVec<NodeId>> {
+        self.rare().hoisted_children.borrow_mut()
+    }
+
+    pub fn clear_hoisted_children(&self) {
+        if let Some(rare) = self.rare.get() {
+            rare.hoisted_children.borrow_mut().clear();
+        }
+    }
+
+    pub fn take_hoisted_children(&self) -> ThinVec<NodeId> {
+        self.rare.get().map_or_else(ThinVec::new, |rare| {
+            std::mem::take(&mut *rare.hoisted_children.borrow_mut())
+        })
+    }
+
+    pub fn set_hoisted_children(&self, children: ThinVec<NodeId>) {
+        if !children.is_empty() || self.rare.get().is_some() {
+            *self.rare().hoisted_children.borrow_mut() = children;
+        }
+    }
+
+    pub fn oof_containing_block(&self) -> Option<NodeId> {
+        self.rare
+            .get()
+            .and_then(|rare| rare.oof_containing_block.get())
+    }
+
+    pub fn set_oof_containing_block(&self, id: Option<NodeId>) {
+        if id.is_some() || self.rare.get().is_some() {
+            self.rare().oof_containing_block.set(id);
+        }
+    }
+
+    pub fn placed_floats(&self) -> bool {
+        self.rare.get().is_some_and(|rare| rare.placed_floats.get())
+    }
+
+    pub fn set_placed_floats(&self, value: bool) {
+        if value || self.rare.get().is_some() {
+            self.rare().placed_floats.set(value);
+        }
+    }
+
+    pub fn rehomed_reach(&self) -> Option<(f32, f32, f32, f32)> {
+        self.rare
+            .get()
+            .and_then(|rare| rare.rehomed_reach.borrow().as_deref().copied())
+    }
+
+    pub fn set_rehomed_reach(&self, rect: Option<(f32, f32, f32, f32)>) {
+        if rect.is_some() || self.rare.get().is_some() {
+            let mut stored = self.rare().rehomed_reach.borrow_mut();
+            if let Some(rect) = rect {
+                **stored.get_or_insert_with(|| Box::new(rect)) = rect;
+            } else {
+                *stored = None;
+            }
+        }
+    }
+
+    pub fn take_stacking_context(&self) -> Option<Box<StackingContext>> {
+        self.rare
+            .get()
+            .and_then(|rare| rare.stacking_context.borrow_mut().take())
+    }
+
+    pub fn set_stacking_context(&self, value: Option<Box<StackingContext>>) {
+        if value.is_some() || self.rare.get().is_some() {
+            *self.rare().stacking_context.borrow_mut() = value;
+        }
+    }
+
+    pub fn stacking_context(&self) -> Option<Ref<'_, StackingContext>> {
+        let rare = self.rare.get()?;
+        Ref::filter_map(rare.stacking_context.borrow(), |value| value.as_deref()).ok()
+    }
+
+    pub fn take_sc_contribution_cache(&self) -> ThinVec<HoistedPaintChild> {
+        self.rare.get().map_or_else(ThinVec::new, |rare| {
+            std::mem::take(&mut *rare.sc_contribution_cache.borrow_mut())
+        })
+    }
+
+    pub fn set_sc_contribution_cache(&self, entries: ThinVec<HoistedPaintChild>) {
+        if !entries.is_empty() || self.rare.get().is_some() {
+            *self.rare().sc_contribution_cache.borrow_mut() = entries;
+        }
+    }
+
+    pub fn sc_contribution_cache(&self) -> Option<Ref<'_, ThinVec<HoistedPaintChild>>> {
+        self.rare
+            .get()
+            .map(|rare| rare.sc_contribution_cache.borrow())
+    }
+
+    pub fn clear_sc_contribution_cache(&self) {
+        if let Some(rare) = self.rare.get() {
+            rare.sc_contribution_cache.borrow_mut().clear();
+        }
+    }
+
+    pub fn transform(&self) -> Option<Affine> {
+        match &self.data {
+            NodeData::Element(data) | NodeData::AnonymousBlock(data) => data.transform(),
+            NodeData::Document(data) => data.transform.as_deref().copied(),
+            _ => panic!("`transform` is not available on this node kind"),
+        }
+    }
+
     /// This node's layout output state, or a shared default if layout has
     /// never written to this node.
     ///
@@ -279,7 +685,7 @@ impl Node {
         if let Some(inline_layout) = self
             .data
             .downcast_element_mut()
-            .and_then(|el| el.inline_layout_data.as_mut())
+            .and_then(|el| el.inline_layout_data_mut())
         {
             inline_layout.content_widths = None;
         }
@@ -352,6 +758,15 @@ impl Node {
         &mut self.layout_data_mut().scroll_offset
     }
 
+    pub fn set_scroll_offset(&mut self, offset: crate::Point<f64>) {
+        let previous = self.scroll_offset();
+        if previous.x.to_bits() != offset.x.to_bits()
+            || previous.y.to_bits() != offset.y.to_bits()
+        {
+            *self.scroll_offset_mut() = offset;
+        }
+    }
+
     #[inline]
     pub fn scrollable_overflow(&self) -> &KurboRect {
         &self.layout_data().scrollable_overflow
@@ -416,18 +831,18 @@ impl Node {
     /// document nodes.
     #[inline]
     pub fn guard(&self) -> &SharedRwLock {
-        let guard = match &self.data {
-            NodeData::Element(data) | NodeData::AnonymousBlock(data) => data.guard.as_ref(),
-            NodeData::Document(data) => data.guard.as_ref(),
-            _ => None,
-        };
-        guard.expect("`guard` is not available on this node kind")
+        match &self.data {
+            NodeData::Element(_) | NodeData::AnonymousBlock(_) | NodeData::Document(_) => {
+                &self.tree().guard
+            }
+            _ => panic!("`guard` is not available on this node kind"),
+        }
     }
 
     #[inline]
     pub fn has_snapshot(&self) -> bool {
         match &self.data {
-            NodeData::Element(data) | NodeData::AnonymousBlock(data) => data.has_snapshot,
+            NodeData::Element(data) | NodeData::AnonymousBlock(data) => data.has_snapshot(),
             NodeData::Document(data) => data.has_snapshot,
             _ => false,
         }
@@ -436,7 +851,9 @@ impl Node {
     #[inline]
     pub fn set_has_snapshot(&mut self, value: bool) {
         match &mut self.data {
-            NodeData::Element(data) | NodeData::AnonymousBlock(data) => data.has_snapshot = value,
+            NodeData::Element(data) | NodeData::AnonymousBlock(data) => {
+                data.set_has_snapshot(value)
+            }
             NodeData::Document(data) => data.has_snapshot = value,
             _ => {}
         }
@@ -444,52 +861,27 @@ impl Node {
 
     #[inline]
     pub fn before(&self) -> Option<NodeId> {
-        self.element_data().and_then(|data| data.before)
+        self.element_data().and_then(|data| data.before())
     }
 
     #[inline]
     pub fn after(&self) -> Option<NodeId> {
-        self.element_data().and_then(|data| data.after)
+        self.element_data().and_then(|data| data.after())
     }
 }
 
 impl Node {
-    pub(crate) fn new(
-        tree: *mut crate::NodeTree,
-        id: NodeId,
-        guard: SharedRwLock,
-        mut data: NodeData,
-    ) -> Self {
-        // Store a handle to the document's shared style lock on the node data.
-        // Both element and document nodes are styled by stylo and so need it.
-        match &mut data {
-            NodeData::Element(data) | NodeData::AnonymousBlock(data) => {
-                data.guard = Some(guard);
-            }
-            NodeData::Document(data) => data.guard = Some(guard),
-            _ => {}
-        }
-
+    pub(crate) fn new(tree: *mut crate::NodeTree, id: NodeId, data: NodeData) -> Self {
         Self {
             tree,
 
             id,
-            parent: None,
+            parent: OptNodeId::default(),
             children: ThinVec::new(),
-            assigned_slot: None,
-            assigned_nodes: None,
-            layout_parent: Cell::new(None),
-            oof_containing_block: Cell::new(None),
+            layout_parent: NodeIdCell::new(None),
             layout_children: RefCell::new(None),
-            hoisted_children: RefCell::new(ThinVec::new()),
-            anonymous_blocks: ThinVec::new(),
             paint_children: RefCell::new(None),
-            paint_parent_override: Cell::new(None),
-            rehomed_paint_children: RefCell::new(ThinVec::new()),
-            placed_floats: Cell::new(false),
-            rehomed_reach: Cell::new(None),
-            stacking_context: None,
-            sc_contribution_cache: RefCell::new(ThinVec::new()),
+            rare: OnceCell::new(),
 
             flags: NodeFlags::empty(),
             data,
@@ -515,11 +907,10 @@ impl Node {
             })
         });
 
-        let slot = self.transform_mut();
-        match (slot.as_deref_mut(), transform) {
-            (Some(existing), Some(new)) => *existing = new,
-            (None, Some(new)) => *slot = Some(Box::new(new)),
-            (_, None) => *slot = None,
+        match &mut self.data {
+            NodeData::Element(data) | NodeData::AnonymousBlock(data) => data.set_transform(transform),
+            NodeData::Document(data) => super::element::store_transform(&mut data.transform, transform),
+            _ => panic!("`transform` is not available on this node kind"),
         }
         transform
     }
@@ -537,8 +928,8 @@ impl Node {
             return;
         };
         match index {
-            0 => data.after = value,
-            1 => data.before = value,
+            0 => data.set_after(value),
+            1 => data.set_before(value),
             _ => panic!("Invalid pseudo element index"),
         }
     }
@@ -615,6 +1006,7 @@ impl Node {
         }
         let white_space_collapse = self
             .parent
+            .get()
             .and_then(|parent_id| self.with(parent_id).primary_styles())
             .map(|style| style.clone_white_space_collapse());
         match white_space_collapse {
@@ -627,7 +1019,7 @@ impl Node {
     pub fn is_focussable(&self) -> bool {
         self.data
             .downcast_element()
-            .map(|el| el.is_focussable)
+            .map(|el| el.is_focussable())
             .unwrap_or(false)
     }
 
@@ -683,13 +1075,13 @@ impl Node {
     /// Style, damage and construct walks all follow the flat tree: a slotted
     /// node sits under its slot, and a shadow root's content under the host.
     pub(crate) fn flat_tree_parent(&self) -> Option<NodeId> {
-        if let Some(slot_id) = self.assigned_slot {
+        if let Some(slot_id) = self.assigned_slot() {
             return Some(slot_id);
         }
         if let Some(host) = self.shadow_root_data().map(|data| data.host) {
             return Some(host);
         }
-        self.parent
+        self.parent.get()
     }
 
     /// Returns whether this node or any of its descendants may carry damage.
@@ -993,12 +1385,13 @@ pub enum NodeData {
 
     /// A comment.
     Comment {
-        /// The textual content of the comment
-        contents: String,
+        /// The textual content of the comment. Boxed so `NodeData` fits in
+        /// the text variant's 12 bytes on wasm32, which shrinks every node.
+        contents: Box<String>,
     },
 
     /// The root of a shadow tree attached to a host element.
-    ShadowRoot(ShadowRootData),
+    ShadowRoot(Box<ShadowRootData>),
     // /// A `DOCTYPE` with name, public id, and system id. See
     // /// [document type declaration on wikipedia][https://en.wikipedia.org/wiki/Document_type_declaration]
     // Doctype { name: String, public_id: String, system_id: String },
@@ -1006,6 +1399,10 @@ pub enum NodeData {
     // /// A Processing instruction.
     // ProcessingInstruction { target: String, contents: String },
 }
+
+// One node slot per DOM node: keep the boxed comment variant from widening it.
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(std::mem::size_of::<NodeData>() == 12);
 
 impl NodeData {
     pub fn downcast_element(&self) -> Option<&ElementData> {
@@ -1114,7 +1511,7 @@ impl Node {
             "{} {} {:?} {} {:?}",
             "  ".repeat(level),
             self.id,
-            self.parent,
+            self.parent.get(),
             self.node_debug_str().replace('\n', ""),
             self.children
         );
@@ -1132,7 +1529,7 @@ impl Node {
 
     // Get the index of the current node in the parents child list
     pub fn child_index(&self) -> Option<usize> {
-        self.tree()[self.parent?]
+        self.tree()[self.parent.get()?]
             .children
             .iter()
             .position(|id| *id == self.id)
@@ -1141,7 +1538,7 @@ impl Node {
     // Get the nth node in the parents child list
     pub fn forward(&self, n: usize) -> Option<&Node> {
         let child_idx = self.child_index().unwrap_or(0);
-        self.tree()[self.parent?]
+        self.tree()[self.parent.get()?]
             .children
             .get(child_idx + n)
             .map(|id| self.with(*id))
@@ -1153,7 +1550,7 @@ impl Node {
             return None;
         }
 
-        self.tree()[self.parent?]
+        self.tree()[self.parent.get()?]
             .children
             .get(child_idx - n)
             .map(|id| self.with(*id))
@@ -1178,19 +1575,19 @@ impl Node {
     /// Shadow-root node id when this node is a shadow host.
     /// None for non-elements and hosts without an attached root.
     pub fn attached_shadow_root_id(&self) -> Option<NodeId> {
-        self.element_data().and_then(|el| el.shadow_root)
+        self.element_data().and_then(|el| el.shadow_root())
     }
 
     /// Nearest enclosing shadow root's node id, walking light parents.
     /// None for nodes in the document tree proper.
     pub fn containing_shadow_root_id(&self) -> Option<NodeId> {
-        let mut current = self.parent;
+        let mut current = self.parent.get();
         while let Some(id) = current {
             let node = self.with(id);
             if node.is_shadow_root() {
                 return Some(id);
             }
-            current = node.parent;
+            current = node.parent.get();
         }
         None
     }
@@ -1201,7 +1598,7 @@ impl Node {
         if let Some(shadow_root_id) = self.attached_shadow_root_id() {
             return &self.with(shadow_root_id).children;
         }
-        if let Some(assigned) = &self.assigned_nodes {
+        if let Some(assigned) = self.assigned_nodes() {
             if !assigned.is_empty() {
                 return assigned;
             }
@@ -1325,7 +1722,7 @@ impl Node {
             if el.is_button_input() {
                 flags |= stylo_taffy::StyleFlags::IS_BUTTON_INPUT;
             }
-            if let Some(inline_layout) = el.inline_layout_data.as_deref() {
+            if let Some(inline_layout) = el.inline_layout_data() {
                 flags |= inline_layout.span_cb_flags;
             }
         }
@@ -1469,7 +1866,7 @@ impl Node {
     }
 
     fn directionality_flat_parent(&self) -> Option<NodeId> {
-        let parent_id = self.parent?;
+        let parent_id = self.parent.get()?;
         if let NodeData::ShadowRoot(ref data) = self.with(parent_id).data {
             return Some(data.host);
         }
@@ -1567,10 +1964,9 @@ impl Node {
     }
 
     pub fn flush_style_attribute(&mut self, url_extra_data: &UrlExtraData) {
+        let guard = self.tree().guard.clone();
         if let NodeData::Element(ref mut elem_data) = self.data {
-            if let Some(guard) = elem_data.guard.clone() {
-                elem_data.flush_style_attribute(&guard, url_extra_data);
-            }
+            elem_data.flush_style_attribute(&guard, url_extra_data);
         }
     }
 
@@ -1608,7 +2004,7 @@ impl Node {
     /// convention as the hoisted-child positions).
     pub fn rehomed_paint_translate(&self, paint_parent: NodeId) -> taffy::Point<f32> {
         let mut offset = taffy::Point { x: 0.0, y: 0.0 };
-        let Some(containing_block) = self.oof_containing_block.get() else {
+        let Some(containing_block) = self.oof_containing_block() else {
             return offset;
         };
         let tree = self.tree();
@@ -1641,8 +2037,7 @@ impl Node {
             // not its flow parent, so continue the walk from there.
             let next = match node.taffy_position() {
                 taffy::Position::Absolute | taffy::Position::Fixed => node
-                    .oof_containing_block
-                    .get()
+                    .oof_containing_block()
                     .or(node.layout_parent.get()),
                 _ => node.layout_parent.get(),
             };
@@ -1665,8 +2060,7 @@ impl Node {
             return false;
         }
         let tree = self.tree();
-        self.oof_containing_block
-            .get()
+        self.oof_containing_block()
             .and_then(|cb| tree.get(cb))
             .is_some_and(|cb| {
                 cb.containing_block()
@@ -1692,8 +2086,8 @@ impl Node {
             (t.x + layout.location.x) as f64 * scale,
             (t.y + layout.location.y) as f64 * scale,
         ));
-        if let Some(transform) = self.transform().as_deref() {
-            full *= *transform;
+        if let Some(transform) = self.transform() {
+            full *= transform;
         }
         let r = full.transform_rect_bbox(local);
         (
@@ -1709,7 +2103,7 @@ impl Node {
     // at call time, unlike the resolve-time rehomed_reach cache, so
     // this stays correct on pure-scroll frames that skip resolve.
     pub fn live_rehomed_reach(&self, scale: f64) -> Option<(f32, f32, f32, f32)> {
-        let children = self.rehomed_paint_children.borrow();
+        let children = self.rehomed_paint_children()?;
         if children.is_empty() {
             return None;
         }
@@ -1846,7 +2240,7 @@ impl Node {
         let mut x = x - self.final_layout().location.x + self.scroll_offset().x as f32;
         let mut y = y - self.final_layout().location.y + self.scroll_offset().y as f32;
 
-        if let Some(t) = self.transform().as_deref() {
+        if let Some(t) = self.transform() {
             // Only a singular matrix has no inverse; small nonzero scales still map points.
             if t.determinant() == 0.0 {
                 return None;
@@ -1868,7 +2262,7 @@ impl Node {
             || y < 0.0
             || y > overflow_rect.bottom + self.scroll_offset().y as f32);
 
-        let matches_hoisted_content = match &self.stacking_context {
+        let matches_hoisted_content = match self.stacking_context() {
             Some(sc) => {
                 // Both the point (after the scroll adjustment above) and the
                 // bbox are in this node's unscrolled content coordinates.
@@ -1893,7 +2287,7 @@ impl Node {
         // This node's own re-homed boxes paint unscrolled, while reach
         // propagated up from descendants is in its scrolled content space,
         // so try the point in both: a false match only costs a descent.
-        let matches_rehomed = match self.rehomed_reach.get() {
+        let matches_rehomed = match self.rehomed_reach() {
             Some((x0, y0, x1, y1)) => {
                 let inside = |px: f32, py: f32| px >= x0 && px <= x1 && py >= y0 && py <= y1;
                 inside(x, y)
@@ -1927,7 +2321,7 @@ impl Node {
 
         // Positive z_index hoisted children
         if matches_hoisted_content {
-            if let Some(hoisted) = &self.stacking_context {
+            if let Some(hoisted) = self.stacking_context() {
                 for hoisted_child in hoisted.pos_z_hoisted_children().rev() {
                     let pos = hoisted_child.position(self.tree(), self.id);
                     let x = x - pos.x;
@@ -1971,7 +2365,7 @@ impl Node {
             // A re-homed abspos keeps its containing block's layout
             // origin, so undo the difference before descending. It paints
             // unscrolled, so leave this node's scrolled content space too.
-            if child.paint_parent_override.get() == Some(self.id) {
+            if child.paint_parent_override() == Some(self.id) {
                 let t = child.rehomed_paint_translate(self.id);
                 child_x -= t.x + self.scroll_offset().x as f32;
                 child_y -= t.y + self.scroll_offset().y as f32;
@@ -1983,7 +2377,7 @@ impl Node {
 
         // Negative z_index hoisted children
         if matches_hoisted_content {
-            if let Some(hoisted) = &self.stacking_context {
+            if let Some(hoisted) = self.stacking_context() {
                 for hoisted_child in hoisted.neg_z_hoisted_children().rev() {
                     let pos = hoisted_child.position(self.tree(), self.id);
                     let x = x - pos.x;
@@ -2001,7 +2395,7 @@ impl Node {
         // Inline children
         if self.flags.is_inline_root() {
             let element_data = &self.element_data().unwrap();
-            if let Some(ild) = element_data.inline_layout_data.as_ref() {
+            if let Some(ild) = element_data.inline_layout_data() {
                 let layout = &ild.layout;
                 let scale = layout.scale();
                 let content_box_offset = taffy::Point {
@@ -2089,7 +2483,7 @@ impl Node {
         }
 
         let element_data = self.element_data()?;
-        let inline_layout = element_data.inline_layout_data.as_ref()?;
+        let inline_layout = element_data.inline_layout_data()?;
         let layout = &inline_layout.layout;
         let scale = layout.scale();
         let y = y - inline_layout.block_offset;
@@ -2142,8 +2536,7 @@ impl Node {
     /// `oof_containing_block` for a hoisted out-of-flow box, otherwise the
     /// `layout_parent`.
     pub fn containing_block(&self) -> Option<NodeId> {
-        self.oof_containing_block
-            .get()
+        self.oof_containing_block()
             .or_else(|| self.layout_parent.get())
     }
 
@@ -2206,7 +2599,7 @@ impl Node {
         }
 
         let inline_root = self.inline_root_ancestor()?;
-        let inline_layout = inline_root.element_data()?.inline_layout_data.as_ref()?;
+        let inline_layout = inline_root.element_data()?.inline_layout_data()?;
         let layout = &inline_layout.layout;
         let scale = layout.scale();
 
@@ -2221,7 +2614,7 @@ impl Node {
                 if id == inline_root_id {
                     return false;
                 }
-                match self.with(id).parent {
+                match self.with(id).parent.get() {
                     Some(parent) => id = parent,
                     None => return false,
                 }
@@ -2459,10 +2852,7 @@ mod test {
         let mut document = BaseDocument::new(DocumentConfig::default());
         let node = document.create_node(NodeData::Element(Box::new(ElementData::new(
             qual_name!("button"),
-            vec![Attribute {
-                name: qual_name!("disabled"),
-                value: "".into(),
-            }],
+            vec![Attribute::new(qual_name!("disabled"), "".into())],
         ))));
         let node = document.get_node(node).unwrap();
 
@@ -2481,10 +2871,7 @@ mod test {
         let mut document = BaseDocument::new(DocumentConfig::default());
         let node = document.create_node(NodeData::Element(Box::new(ElementData::new(
             qual_name!("button"),
-            vec![Attribute {
-                name: qual_name!("disabled"),
-                value: "false".into(),
-            }],
+            vec![Attribute::new(qual_name!("disabled"), "false".into())],
         ))));
         let node = document.get_node(node).unwrap();
 
@@ -2503,10 +2890,7 @@ mod test {
         let mut document = BaseDocument::new(DocumentConfig::default());
         let node = document.create_node(NodeData::Element(Box::new(ElementData::new(
             qual_name!("a"),
-            vec![Attribute {
-                name: qual_name!("disabled"),
-                value: "".into(),
-            }],
+            vec![Attribute::new(qual_name!("disabled"), "".into())],
         ))));
         let node = document.get_node(node).unwrap();
 
@@ -2533,5 +2917,16 @@ mod test {
             node.element_state().contains(ElementState::ENABLED),
             "Button should be enabled by default"
         );
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    // Every node, text included, carries a NodeData inline in the slab, so a rare large
+    // variant must stay boxed or it widens every slot.
+    #[test]
+    fn node_data_stays_four_words() {
+        let words = std::mem::size_of::<super::NodeData>() / std::mem::size_of::<usize>();
+        assert!(words <= 4, "NodeData grew to {words} words");
     }
 }

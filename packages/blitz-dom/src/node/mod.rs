@@ -12,15 +12,15 @@ mod stylo_data;
 mod svg;
 mod text;
 
-pub use attributes::{Attribute, Attributes};
+pub use attributes::{AttrName, Attribute, Attributes};
 #[cfg(feature = "custom-widget")]
 pub use custom_widget::{
     ComputedStyles, CustomWidgetData, CustomWidgetStatus, ProxyRenderContext, Widget,
 };
 pub use element::{
-    CanvasData, DocumentData, ElementData, ImageData, ImageResourceData, LayoutData,
-    ListItemLayout, ListItemLayoutPosition, Marker, RasterImageData, SpecialElementData,
-    SpecialElementType, Status, parse_class_list,
+    CanvasData, DocumentData, ElementData, ElementStateBits, ImageData, ImageResourceData,
+    LayoutData, ListItemLayout, ListItemLayoutPosition, Marker, RasterImageData, SelectorFlagsCell,
+    SpecialElementData, SpecialElementType, Status, parse_class_list,
 };
 pub use node::*;
 pub use scrollbar::{ScrollbarColor, ScrollbarRef, ScrollbarWidth};

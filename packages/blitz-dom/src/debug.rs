@@ -38,8 +38,7 @@ impl BaseDocument {
                 .data
                 .downcast_element()
                 .unwrap()
-                .inline_layout_data
-                .as_ref()
+                .inline_layout_data()
                 .unwrap();
 
             println!(
@@ -120,7 +119,7 @@ impl BaseDocument {
             t = layout.margin.top,
             b = layout.margin.bottom,
         );
-        println!("Parent: {:?}", node.parent);
+        println!("Parent: {:?}", node.parent.get());
 
         let children: Vec<_> = node
             .children

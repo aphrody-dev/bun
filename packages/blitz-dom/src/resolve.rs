@@ -86,7 +86,7 @@ impl BaseDocument {
                 && node
                     .data
                     .downcast_element()
-                    .is_some_and(|element| element.inline_layout_data.is_none());
+                    .is_some_and(|element| element.inline_layout_data().is_none());
             if missing_inline_layout {
                 node.insert_damage(ALL_DAMAGE);
             }
@@ -337,8 +337,8 @@ impl BaseDocument {
             let location = node.final_layout().location.map(|v| v as f64 * scale);
 
             let mut transform = Affine::translate((location.x, location.y));
-            if let Some(t) = node.transform().as_deref() {
-                transform *= *t
+            if let Some(t) = node.transform() {
+                transform *= t
             }
 
             let overflow = *node.scrollable_overflow();
@@ -365,8 +365,7 @@ impl BaseDocument {
                 overflow = overflow.union(child_rect_in_self);
             }
         }
-        let hoisted_children =
-            std::mem::take(&mut *self.nodes[node_id].hoisted_children.borrow_mut());
+        let hoisted_children = self.nodes[node_id].take_hoisted_children();
         for &child_id in &hoisted_children {
             if !self.nodes.contains_key(child_id) {
                 continue;
@@ -374,7 +373,7 @@ impl BaseDocument {
             let child_rect_in_self = self.resolve_transforms(child_id);
             overflow = overflow.union(child_rect_in_self);
         }
-        *self.nodes[node_id].hoisted_children.borrow_mut() = hoisted_children;
+        self.nodes[node_id].set_hoisted_children(hoisted_children);
         for pseudo in [self.nodes[node_id].before(), self.nodes[node_id].after()] {
             let Some(pseudo) = pseudo else { continue };
             if self.nodes[pseudo].is_out_of_flow() {
@@ -418,7 +417,7 @@ impl BaseDocument {
         // chains we actually set last time can be holding a stale value.
         for id in std::mem::take(&mut self.rehomed_reach_touched) {
             if let Some(node) = self.nodes.get(id) {
-                node.rehomed_reach.set(None);
+                node.set_rehomed_reach(None);
             }
         }
 
@@ -429,7 +428,9 @@ impl BaseDocument {
         host_ids.dedup();
         host_ids.retain(|&id| {
             self.nodes.contains_key(id)
-                && !self.nodes[id].rehomed_paint_children.borrow().is_empty()
+                && self.nodes[id]
+                    .rehomed_paint_children()
+                    .is_some_and(|nodes| !nodes.is_empty())
         });
 
         let union =
@@ -461,12 +462,15 @@ impl BaseDocument {
         for host_id in host_ids.iter().copied() {
             let mut rect: Option<(f32, f32, f32, f32)> = None;
             let rehomed: Vec<NodeId> = self.nodes[host_id]
-                .rehomed_paint_children
-                .borrow()
-                .iter()
-                .copied()
-                .filter(|id| self.nodes.contains_key(*id))
-                .collect();
+                .rehomed_paint_children()
+                .map(|nodes| {
+                    nodes
+                        .iter()
+                        .copied()
+                        .filter(|id| self.nodes.contains_key(*id))
+                        .collect()
+                })
+                .unwrap_or_default();
             for child_id in rehomed {
                 let child = &self.nodes[child_id];
                 let mut r = child.rehomed_paint_rect(host_id, scale);
@@ -484,12 +488,14 @@ impl BaseDocument {
             // shifting into each ancestor's coordinate space.
             let mut cur = host_id;
             for _ in 0..512 {
-                let node = &self.nodes[cur];
-                node.rehomed_reach
-                    .set(union(node.rehomed_reach.get(), rect));
+                {
+                    let node = &self.nodes[cur];
+                    node.set_rehomed_reach(union(node.rehomed_reach(), rect));
+                }
                 self.rehomed_reach_touched.push(cur);
+                let node = &self.nodes[cur];
                 let mut loc = node.final_layout().location;
-                let parent = match node.paint_parent_override.get() {
+                let parent = match node.paint_parent_override() {
                     Some(paint_parent) => {
                         let t = node.rehomed_paint_translate(paint_parent);
                         loc.x += t.x;
@@ -566,7 +572,7 @@ impl BaseDocument {
                 // previous construction round. They live only in the slab, so
                 // reconstructing without freeing them would leak a slab entry per
                 // anonymous block per reconstruction.
-                let old_anonymous_blocks = std::mem::take(&mut doc.nodes[node_id].anonymous_blocks);
+                let old_anonymous_blocks = doc.nodes[node_id].take_anonymous_blocks();
                 for anon_id in old_anonymous_blocks {
                     doc.deallocate_anonymous_block(anon_id);
                 }
@@ -574,12 +580,12 @@ impl BaseDocument {
                 let mut collected = LayoutChildren::default();
                 collect_layout_children(doc, node_id, &mut collected);
                 let layout_children = collected.children;
-                doc.nodes[node_id].anonymous_blocks = collected.anonymous_blocks;
+                doc.nodes[node_id].set_anonymous_blocks(collected.anonymous_blocks);
                 // Float registration is a product of this node's boxes, so
                 // a rebuild retires the cache bust its last inline pass
                 // left behind: otherwise a block that ever held a float
                 // is locked out of taffy's cache for the document's life.
-                doc.nodes[node_id].placed_floats.set(false);
+                doc.nodes[node_id].set_placed_floats(false);
 
                 // Recurse into newly collected layout children
                 for child_id in layout_children.iter().copied() {
@@ -735,7 +741,7 @@ impl BaseDocument {
                     self.nodes[result.node_id]
                         .element_data_mut()
                         .unwrap()
-                        .inline_layout_data = Some(layout);
+                        .set_inline_layout_data(Some(layout));
                     self.inline_roots.push(result.node_id);
                 }
             }
@@ -868,7 +874,7 @@ impl BaseDocument {
             !self.nodes.iter().any(|(id, n)| n
                 .data
                 .downcast_element()
-                .is_some_and(|el| el.inline_layout_data.is_some())
+                .is_some_and(|el| el.inline_layout_data().is_some())
                 && roots.binary_search(&id).is_err()),
             "an inline root escaped the index; its breaks would never restore"
         );
@@ -882,7 +888,7 @@ impl BaseDocument {
             let Some(inline) = node
                 .data
                 .downcast_element()
-                .and_then(|el| el.inline_layout_data.as_ref())
+                .and_then(|el| el.inline_layout_data())
             else {
                 return false;
             };

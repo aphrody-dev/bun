@@ -36,7 +36,7 @@ fn is_template_inert_context(doc: &BaseDocument, node_id: NodeId) -> bool {
             return false;
         };
         let in_template_context = node.element_data().is_some_and(|element| {
-            element.name.ns == ns!(html)
+            *element.namespace() == ns!(html)
                 && (element.name.local == local_name!("template")
                     || &*element.name.local == TEMPLATE_CONTENTS_FRAGMENT_NAME)
         });
@@ -46,7 +46,7 @@ fn is_template_inert_context(doc: &BaseDocument, node_id: NodeId) -> bool {
         if node.flags.is_in_document() {
             return false;
         }
-        current = node.parent;
+        current = node.parent.get();
     }
     false
 }
@@ -121,7 +121,7 @@ impl DocumentMutator<'_> {
     // Query methods
 
     pub fn node_has_parent(&self, node_id: NodeId) -> bool {
-        self.doc.nodes[node_id].parent.is_some()
+        self.doc.nodes[node_id].parent.get().is_some()
     }
 
     pub fn previous_sibling_id(&self, node_id: NodeId) -> Option<NodeId> {
@@ -133,7 +133,7 @@ impl DocumentMutator<'_> {
     }
 
     pub fn parent_id(&self, node_id: NodeId) -> Option<NodeId> {
-        self.doc.nodes[node_id].parent
+        self.doc.nodes[node_id].parent.get()
     }
 
     pub fn last_child_id(&self, node_id: NodeId) -> Option<NodeId> {
@@ -144,8 +144,9 @@ impl DocumentMutator<'_> {
         self.doc.nodes[node_id].children.clone()
     }
 
-    pub fn element_name(&self, node_id: NodeId) -> Option<&QualName> {
-        self.doc.nodes[node_id].element_data().map(|el| &el.name)
+    /// The element at `node_id`, whose name the parser reads through it.
+    pub fn element_name(&self, node_id: NodeId) -> Option<&ElementData> {
+        self.doc.nodes[node_id].element_data()
     }
 
     pub fn node_at_path(&self, start_node_id: NodeId, path: &[u8]) -> NodeId {
@@ -161,7 +162,7 @@ impl DocumentMutator<'_> {
 
     pub fn create_comment_node(&mut self, contents: &str) -> NodeId {
         self.doc.create_node(NodeData::Comment {
-            contents: contents.to_string(),
+            contents: Box::new(contents.to_string()),
         })
     }
 
@@ -208,7 +209,7 @@ impl DocumentMutator<'_> {
             .get_node_mut(template_id)
             .and_then(|node| node.element_data_mut())
         {
-            element.template_contents = Some(contents_id);
+            element.set_template_contents(Some(contents_id));
         }
         contents_id
     }
@@ -218,7 +219,7 @@ impl DocumentMutator<'_> {
         self.doc
             .get_node(template_id)
             .and_then(|node| node.element_data())
-            .and_then(|element| element.template_contents)
+            .and_then(|element| element.template_contents())
     }
 
     /// Attach (or fetch) a shadow root on `host_id` and mark the host
@@ -263,7 +264,7 @@ impl DocumentMutator<'_> {
             // Mark ancestors dirty so the style traversal visits this subtree.
             // Without this, the traversal may skip nodes with pending damage.
             node.mark_ancestors_dirty();
-            let parent_id = node.parent;
+            let parent_id = node.parent.get();
 
             // Also insert damage on the parent element, since text content changes
             // affect the parent's layout (text may wrap differently, change size, etc.)
@@ -307,14 +308,14 @@ impl DocumentMutator<'_> {
         let existing_names = element_data
             .attrs
             .iter()
-            .map(|e| e.name.clone())
+            .map(|e| e.qual_name())
             .collect::<HashSet<_>>();
 
-        for attr in attrs
-            .into_iter()
-            .filter(|attr| !existing_names.contains(&attr.name))
-        {
-            self.set_attribute(node_id, attr.name, &attr.value);
+        for attr in attrs {
+            let name = attr.qual_name();
+            if !existing_names.contains(&name) {
+                self.set_attribute(node_id, name, &attr.value);
+            }
         }
     }
 
@@ -332,7 +333,7 @@ impl DocumentMutator<'_> {
         if !self.doc.nodes[node_id]
             .data
             .downcast_element()
-            .is_some_and(|el| el.name.ns == ns!(svg))
+            .is_some_and(|el| *el.namespace() == ns!(svg))
         {
             return;
         }
@@ -349,7 +350,7 @@ impl DocumentMutator<'_> {
             {
                 svg_root = Some(id);
             }
-            cur = node.parent;
+            cur = node.parent.get();
         }
         if let Some(id) = svg_root {
             self.doc.nodes[id].insert_damage(CONSTRUCT_BOX);
@@ -368,6 +369,7 @@ impl DocumentMutator<'_> {
 
         let scope_id = self.doc.nodes[node_id]
             .parent
+            .get()
             .filter(|&parent_id| self.doc.nodes[parent_id].is_element())
             .unwrap_or(node_id);
         self.doc.nodes[scope_id].set_restyle_hint(RestyleHint::restyle_subtree());
@@ -587,7 +589,7 @@ impl DocumentMutator<'_> {
             self.doc.slot_assignments_dirty = true;
         }
         if *attr == local_name!("slot") {
-            if let Some(parent_id) = self.doc.nodes[node_id].parent {
+            if let Some(parent_id) = self.doc.nodes[node_id].parent.get() {
                 if self.doc.nodes[parent_id].attached_shadow_root_id().is_some() {
                     self.doc.damage_host_subtree(parent_id);
                 }
@@ -670,7 +672,7 @@ impl DocumentMutator<'_> {
         }
 
         if name.local == local_name!("class") {
-            element.classes.clear();
+            element.classes = Default::default();
         }
 
         // Update text input value
@@ -815,7 +817,7 @@ impl DocumentMutator<'_> {
         self.mutations_occurred |= node_is_in_document;
 
         // Update child_idx values
-        if let Some(parent_id) = node.as_ref().and_then(|node| node.parent) {
+        if let Some(parent_id) = node.as_ref().and_then(|node| node.parent.get()) {
             let parent = &mut self.doc.nodes[parent_id];
             parent.insert_damage(ALL_DAMAGE);
             let parent_is_in_doc = parent.flags.is_in_document();
@@ -885,7 +887,7 @@ impl DocumentMutator<'_> {
         on_drop: &mut dyn FnMut(NodeId),
     ) {
         if let Some(node) = self.doc.get_node(node_id) {
-            if node.parent.is_none() {
+            if node.parent.get().is_none() {
                 self.remove_and_drop_node_with(node_id, on_drop);
             }
         }
@@ -899,7 +901,7 @@ impl DocumentMutator<'_> {
     }
 
     pub fn insert_nodes_before(&mut self, anchor_node_id: NodeId, new_node_ids: &[NodeId]) {
-        let parent_id = self.doc.nodes[anchor_node_id].parent.unwrap();
+        let parent_id = self.doc.nodes[anchor_node_id].parent.get().unwrap();
         self.add_children_to_parent(parent_id, new_node_ids, &|parent, child_ids| {
             let node_child_idx = parent.index_of_child(anchor_node_id).unwrap();
             parent
@@ -924,7 +926,7 @@ impl DocumentMutator<'_> {
         // A reparent is a removal from the old position, so it needs the same
         // pre-unlink invalidation as remove_node.
         for &child_id in child_ids {
-            if self.doc.nodes[child_id].parent.is_some() {
+            if self.doc.nodes[child_id].parent.get().is_some() {
                 self.doc.invalidate_relative_selectors_for_removal(child_id);
             }
         }
@@ -955,7 +957,7 @@ impl DocumentMutator<'_> {
             }
             // Reparenting invalidates any slot assignment; the next
             // resolve's flush_slot_assignments re-establishes it.
-            child.assigned_slot = None;
+            child.set_assigned_slot(None);
             let Some(old_parent_id) = child.parent.take() else {
                 continue;
             };
@@ -1000,7 +1002,7 @@ impl DocumentMutator<'_> {
         for child_id in child_ids.iter().copied() {
             let child = &mut self.doc.nodes[child_id];
             let child_was_in_doc = child.flags.is_in_document();
-            child.parent = Some(parent_id);
+            child.parent.set(Some(parent_id));
 
             if new_parent_is_in_document && !child_was_in_doc {
                 self.process_added_subtree(child_id);
@@ -1092,7 +1094,7 @@ impl DocumentMutator<'_> {
         excluded: &[NodeId],
     ) -> Option<NodeId> {
         let node = self.doc.get_node(anchor_id)?;
-        let parent = self.doc.get_node(node.parent?)?;
+        let parent = self.doc.get_node(node.parent.get()?)?;
         let mut index = parent.index_of_child(anchor_id)?;
         loop {
             index = index.checked_add_signed(offset)?;
@@ -1273,8 +1275,7 @@ impl<'doc> DocumentMutator<'doc> {
             let host_name = self.doc.nodes[host_id]
                 .element_data()
                 .expect("shadow host must be an element")
-                .name
-                .clone();
+                .qual_name();
             let tmp_id = self.create_element(host_name, Vec::new());
             self.doc
                 .html_parser_provider
@@ -1344,6 +1345,7 @@ impl<'doc> DocumentMutator<'doc> {
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             let in_template_contents = doc.nodes[node_id]
                 .parent
+                .get()
                 .is_some_and(|parent_id| is_template_inert_context(doc, parent_id));
             let in_document = !in_template_contents;
             if in_document {
@@ -1441,11 +1443,11 @@ impl<'doc> DocumentMutator<'doc> {
 
             // A removed slot's assignees live outside this subtree, and the flat-tree
             // dirty walks follow assigned_slot: a freed slot would be a dead key.
-            if let Some(assignees) = doc.nodes[node_id].assigned_nodes.take() {
+            if let Some(assignees) = doc.nodes[node_id].take_assigned_nodes() {
                 for assignee in assignees {
                     if let Some(slotted) = doc.nodes.get_mut(assignee) {
-                        if slotted.assigned_slot == Some(node_id) {
-                            slotted.assigned_slot = None;
+                        if slotted.assigned_slot() == Some(node_id) {
+                            slotted.set_assigned_slot(None);
                         }
                     }
                 }
@@ -1454,7 +1456,7 @@ impl<'doc> DocumentMutator<'doc> {
             let node = &mut doc.nodes[node_id];
             // Stale flat-tree edges must not outlive removal: slab ids
             // recycle, so a dangling slot pointer would mislead.
-            node.assigned_slot = None;
+            node.set_assigned_slot(None);
 
             // Clear the text selection if one of its endpoints references this node.
             // This prevents stale selection endpoint references.
@@ -1538,13 +1540,13 @@ impl<'doc> DocumentMutator<'doc> {
         let node = &self.doc.nodes[target_id];
 
         let mut is_in_head = false;
-        let mut parent_id = node.parent;
+            let mut parent_id = node.parent.get();
         while let Some(id) = parent_id
             && !is_in_head
         {
             let parent = &self.doc.nodes[id];
             is_in_head |= parent.data.is_element_with_tag_name(&local_name!("head"));
-            parent_id = parent.parent;
+            parent_id = parent.parent.get();
         }
 
         let rel_attr = node.attr(local_name!("rel"));
@@ -1679,7 +1681,7 @@ impl<'doc> DocumentMutator<'doc> {
     /// re-fire `load_image` when a `<source>`'s srcset changes
     /// post-mount.
     fn find_picture_img_sibling(&self, source_id: NodeId) -> Option<NodeId> {
-        let parent_id = self.doc.nodes[source_id].parent?;
+            let parent_id = self.doc.nodes[source_id].parent.get()?;
         let parent = &self.doc.nodes[parent_id];
         if !parent.data.is_element_with_tag_name(&local_name!("picture")) {
             return None;
@@ -1732,7 +1734,7 @@ impl<'doc> DocumentMutator<'doc> {
         let node = &self.doc.nodes[target_id];
 
         // Step 1: <picture><source> walk.
-        if let Some(parent_id) = node.parent {
+        if let Some(parent_id) = node.parent.get() {
             let parent = &self.doc.nodes[parent_id];
             if parent.data.is_element_with_tag_name(&local_name!("picture")) {
                 for &sibling_id in &parent.children {
@@ -1808,6 +1810,7 @@ impl<'doc> DocumentMutator<'doc> {
         }
         if self.doc.nodes[target_id]
             .parent
+            .get()
             .is_some_and(|parent_id| is_template_inert_context(self.doc, parent_id))
         {
             return;
@@ -1930,9 +1933,9 @@ impl<'doc> DocumentMutator<'doc> {
         if let Some(raw_src) = node.attr(local_name!("src")) {
             if let Ok(custom_paint_source_id) = raw_src.parse::<u64>() {
                 self.recompute_is_animating = true;
-                let canvas_data = SpecialElementData::Canvas(CanvasData {
+                let canvas_data = SpecialElementData::Canvas(Box::new(CanvasData {
                     custom_paint_source_id,
-                });
+                }));
                 node.element_data_mut().unwrap().special_data = canvas_data;
             }
         }
@@ -2139,7 +2142,7 @@ impl<'doc> DocumentMutator<'doc> {
                 return false;
             }
             element.special_data =
-                SpecialElementData::TextInput(TextInputData::new(is_multiline));
+                SpecialElementData::TextInput(Box::new(TextInputData::new(is_multiline)));
         }
         let Some(input_data) = element.text_input_data_mut() else {
             return false;
@@ -2270,10 +2273,9 @@ fn set_input_checked_state(element: &mut ElementData, value: String) {
         // and NodeSpecificData will be created from that later
         // this simulates the checked attribute being set in html,
         // and the element's checked property being set from that
-        SpecialElementData::None => element.attrs.push(Attribute {
-            name: qual_name!("checked", html),
-            value: checked.to_string(),
-        }),
+        SpecialElementData::None => element
+            .attrs
+            .push(Attribute::new(qual_name!("checked", html), checked.to_string())),
         _ => {}
     }
 }
@@ -2676,23 +2678,14 @@ mod test {
                 children.push(mutator.create_element(
                     qual_name!("source"),
                     vec![
-                        Attribute {
-                            name: qual_name!("type"),
-                            value: type_hint.into(),
-                        },
-                        Attribute {
-                            name: qual_name!("srcset"),
-                            value: srcset.into(),
-                        },
+                        Attribute::new(qual_name!("type"), type_hint.into()),
+                        Attribute::new(qual_name!("srcset"), srcset.into()),
                     ],
                 ));
             }
             let img = mutator.create_element(
                 qual_name!("img"),
-                vec![Attribute {
-                    name: qual_name!("src"),
-                    value: img_src.into(),
-                }],
+                vec![Attribute::new(qual_name!("src"), img_src.into())],
             );
             children.push(img);
             mutator.append_children(picture, &children);
@@ -2760,20 +2753,14 @@ mod test {
             let select = mutator.create_element(qual_name!("select"), vec![]);
             let disabled_first = mutator.create_element(
                 qual_name!("option"),
-                vec![Attribute {
-                    name: qual_name!("disabled"),
-                    value: String::new(),
-                }],
+                vec![Attribute::new(qual_name!("disabled"), String::new())],
             );
             let disabled_first_text = mutator.create_text_node("Disabled first");
             mutator.append_children(disabled_first, &[disabled_first_text]);
 
             let disabled_group = mutator.create_element(
                 qual_name!("optgroup"),
-                vec![Attribute {
-                    name: qual_name!("disabled"),
-                    value: String::new(),
-                }],
+                vec![Attribute::new(qual_name!("disabled"), String::new())],
             );
             let disabled_group_option = mutator.create_element(qual_name!("option"), vec![]);
             let disabled_group_text = mutator.create_text_node("Disabled group");
@@ -2786,10 +2773,7 @@ mod test {
             mutator.append_children(first_enabled, &[first_enabled_text]);
             let selected_group = mutator.create_element(
                 qual_name!("option"),
-                vec![Attribute {
-                    name: qual_name!("selected"),
-                    value: String::new(),
-                }],
+                vec![Attribute::new(qual_name!("selected"), String::new())],
             );
             let selected_group_text = mutator.create_text_node("Selected group");
             mutator.append_children(selected_group, &[selected_group_text]);
@@ -2797,10 +2781,7 @@ mod test {
 
             let selected_later = mutator.create_element(
                 qual_name!("option"),
-                vec![Attribute {
-                    name: qual_name!("selected"),
-                    value: String::new(),
-                }],
+                vec![Attribute::new(qual_name!("selected"), String::new())],
             );
             let selected_later_text = mutator.create_text_node("Selected later");
             mutator.append_children(selected_later, &[selected_later_text]);
@@ -2892,10 +2873,7 @@ mod test {
         let mut document = BaseDocument::new(DocumentConfig::default());
         let id = document.create_node(NodeData::Element(Box::new(ElementData::new(
             qual_name!("button"),
-            vec![Attribute {
-                name: qual_name!("disabled"),
-                value: "".into(),
-            }],
+            vec![Attribute::new(qual_name!("disabled"), "".into())],
         ))));
 
         let node = document.get_node(id).unwrap();
@@ -2999,10 +2977,7 @@ mod test {
             let mut mutator = document.mutate();
             let node_id = mutator.create_element(
                 qual_name!("div"),
-                vec![Attribute {
-                    name: qual_name!("id"),
-                    value: "old".into(),
-                }],
+                vec![Attribute::new(qual_name!("id"), "old".into())],
             );
             mutator.append_children(root_id, &[node_id]);
             node_id
@@ -3241,10 +3216,7 @@ mod test {
             let outer = mutator.create_element(qual_name!("div"), vec![]);
             let x = mutator.create_element(
                 qual_name!("div"),
-                vec![Attribute {
-                    name: qual_name!("id"),
-                    value: "x".into(),
-                }],
+                vec![Attribute::new(qual_name!("id"), "x".into())],
             );
             let span = mutator.create_element(qual_name!("span"), vec![]);
             mutator.append_children(outer, &[x, span]);
@@ -3327,8 +3299,8 @@ mod test {
                 .unwrap()
                 .element_data()
                 .unwrap()
-                .style_attribute
-                .clone()
+                .style_attribute()
+                .cloned()
                 .unwrap()
         };
 

@@ -467,8 +467,8 @@ pub struct BaseDocument {
     /// Load state (abort controller and in-flight request id) for each
     /// `<iframe>` element whose sub-document is loaded automatically
     pub(crate) iframe_loads: HashMap<NodeId, crate::iframe::IframeLoad>,
-    /// Set of changed nodes for updating the accessibility tree
-    pub(crate) changed_nodes: HashSet<NodeId>,
+    /// The legacy change readout tests whether any node was ever created.
+    any_node_created: bool,
     /// Nodes that have been given inline_layout_data. A superset, pruned
     /// where it is read: restore_clobbered_inline_breaks only cares about
     /// inline roots, and scanning the slab to find them dominated layout.
@@ -622,10 +622,11 @@ impl BaseDocument {
         // capacity hint (estimated from the source HTML), avoiding
         // the doubling overshoot on large documents. with_capacity(0)
         // is equivalent to Slab::new(), so the default path is unchanged.
+        let guard = SharedRwLock::new();
         let nodes = Box::new(NodeTree::with_capacity(
             config.node_capacity_hint.unwrap_or(0),
+            guard.clone(),
         ));
-        let guard = SharedRwLock::new();
         let nodes_to_id = HashMap::new();
 
         let base_url = config
@@ -707,7 +708,7 @@ impl BaseDocument {
             #[cfg(feature = "custom-widget")]
             pending_resource_deallocations: Vec::new(),
 
-            changed_nodes: HashSet::new(),
+            any_node_created: false,
             inline_roots: Vec::new(),
             inline_roots_settled: 0,
             rehomed_hosts: Vec::new(),
@@ -801,6 +802,26 @@ impl BaseDocument {
 
     pub fn tree(&self) -> &NodeTree {
         &self.nodes
+    }
+
+    /// Release the growth slack the parser left in every node's child list, text and
+    /// attributes. Push growth starts child lists at four entries, while most nodes keep one or
+    /// two children for the life of the document.
+    pub fn shrink_node_storage(&mut self) {
+        for (_, node) in self.nodes.iter_mut() {
+            node.children.shrink_to_fit();
+            match &mut node.data {
+                NodeData::Text(text) => text.content.shrink_to_fit(),
+                NodeData::Element(el) | NodeData::AnonymousBlock(el) => {
+                    el.classes.shrink_to_fit();
+                    el.attrs.shrink_to_fit();
+                    for attr in el.attrs.iter_mut() {
+                        attr.value.shrink_to_fit();
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     pub fn id(&self) -> usize {
@@ -1095,7 +1116,7 @@ impl BaseDocument {
         {
             return false;
         }
-        let Some(root) = node.parent.and_then(|id| self.nodes.get(id)) else {
+        let Some(root) = node.parent.get().and_then(|id| self.nodes.get(id)) else {
             return false;
         };
         if !root
@@ -1147,14 +1168,13 @@ impl BaseDocument {
 
     pub fn create_node(&mut self, node_data: NodeData) -> NodeId {
         let tree_ptr = self.nodes.as_mut() as *mut NodeTree;
-        let guard = self.guard.clone();
 
         let id = self
             .nodes
-            .insert_with_key(|id| Node::new(tree_ptr, id, guard, node_data));
+            .insert_with_key(|id| Node::new(tree_ptr, id, node_data));
 
         // Mark the new node as changed.
-        self.changed_nodes.insert(id);
+        self.any_node_created = true;
         id
     }
 
@@ -1166,11 +1186,11 @@ impl BaseDocument {
         }
 
         let shadow_root_id =
-            self.create_node(NodeData::ShadowRoot(ShadowRootData::new(host_id, mode)));
+            self.create_node(NodeData::ShadowRoot(Box::new(ShadowRootData::new(host_id, mode))));
 
         // parent = host (while staying OUT of host.children) keeps
         // mark_ancestors_dirty working across the shadow boundary.
-        self.nodes[shadow_root_id].parent = Some(host_id);
+        self.nodes[shadow_root_id].parent.set(Some(host_id));
         if self.nodes[host_id].flags.is_in_document() {
             self.nodes[shadow_root_id]
                 .flags
@@ -1180,7 +1200,7 @@ impl BaseDocument {
         self.nodes[host_id]
             .element_data_mut()
             .expect("shadow host must be an element")
-            .shadow_root = Some(shadow_root_id);
+            .set_shadow_root(Some(shadow_root_id));
 
         self.shadow_roots.insert(shadow_root_id);
         self.slot_assignments_dirty = true;
@@ -1232,7 +1252,8 @@ impl BaseDocument {
             let previous: Vec<(NodeId, Option<ThinVec<NodeId>>)> = slots
                 .iter()
                 .map(|&slot_id| {
-                    let old = self.nodes[slot_id].assigned_nodes.replace(ThinVec::new());
+                    let old = self.nodes[slot_id].take_assigned_nodes();
+                    self.nodes[slot_id].set_assigned_nodes(Some(ThinVec::new()));
                     (slot_id, old)
                 })
                 .collect();
@@ -1259,13 +1280,9 @@ impl BaseDocument {
                     .as_ref()
                     .and_then(|name| by_name.get(name))
                     .copied();
-                self.nodes[child_id].assigned_slot = assigned;
+                self.nodes[child_id].set_assigned_slot(assigned);
                 if let Some(slot_id) = assigned {
-                    self.nodes[slot_id]
-                        .assigned_nodes
-                        .as_mut()
-                        .expect("reset above")
-                        .push(child_id);
+                    self.nodes[slot_id].assigned_nodes_mut().push(child_id);
                 }
             }
 
@@ -1273,7 +1290,9 @@ impl BaseDocument {
             // the host's children, so its cached layout children go stale otherwise.
             for (slot_id, old) in previous {
                 let old = old.as_deref().unwrap_or(&[]);
-                let new = self.nodes[slot_id].assigned_nodes.as_deref().unwrap_or(&[]);
+                let new = self.nodes[slot_id]
+                    .assigned_nodes()
+                    .map_or(&[][..], |nodes| &nodes[..]);
                 if old != new {
                     self.nodes[slot_id].insert_damage(CONSTRUCT_BOX);
                 }
@@ -1341,13 +1360,13 @@ impl BaseDocument {
     /// reference is removed. Tolerates already-removed ancestors (subtree
     /// teardown proceeds root-first) by giving up and returning `None`.
     fn nearest_surviving_element_ancestor(&self, node_id: NodeId) -> Option<NodeId> {
-        let mut current = self.get_node(node_id)?.parent;
+        let mut current = self.get_node(node_id)?.parent.get();
         while let Some(id) = current {
             let node = self.get_node(id)?;
             if node.is_element() && node.flags.is_in_document() {
                 return Some(id);
             }
-            current = node.parent;
+            current = node.parent.get();
         }
         None
     }
@@ -1444,7 +1463,7 @@ impl BaseDocument {
 
             // Anonymous blocks live only in the slab, so deallocate the ones this
             // node owns rather than leaking them.
-            for &anon_id in &node.anonymous_blocks {
+            for &anon_id in node.anonymous_blocks() {
                 self.deallocate_anonymous_block(anon_id);
             }
 
@@ -1471,7 +1490,7 @@ impl BaseDocument {
         }
 
         // Free any anonymous blocks that this block owns before removing it.
-        let nested = std::mem::take(&mut self.nodes[anon_id].anonymous_blocks);
+        let nested = self.nodes[anon_id].take_anonymous_blocks();
         for nested_id in nested {
             self.deallocate_anonymous_block(nested_id);
         }
@@ -1481,7 +1500,7 @@ impl BaseDocument {
 
     /// Whether the document has been mutated
     pub fn has_changes(&self) -> bool {
-        self.changed_nodes.is_empty()
+        !self.any_node_created
     }
 
     pub fn create_text_node(&mut self, text: &str) -> NodeId {
@@ -1500,9 +1519,9 @@ impl BaseDocument {
             NodeData::Element(elem) | NodeData::AnonymousBlock(elem) => {
                 // Per spec, cloning never copies shadow roots, and a raw
                 // copy would alias the original's tree by node id.
-                elem.shadow_root = None;
+                elem.set_shadow_root(None);
 
-                if let Some(arc) = elem.style_attribute.as_mut() {
+                if let Some(arc) = elem.style_attribute_mut() {
                     let read_guard = self.guard().read();
                     let block = arc.read_with(&read_guard);
                     *arc = ServoArc::new(self.guard().wrap(block.clone()));
@@ -1522,7 +1541,7 @@ impl BaseDocument {
             .map(|child_id| self.deep_clone_node(child_id))
             .collect();
         for &child_id in &new_children {
-            self.nodes[child_id].parent = Some(new_node_id);
+            self.nodes[child_id].parent.set(Some(new_node_id));
         }
         self.nodes[new_node_id].children = new_children;
 
@@ -1536,7 +1555,7 @@ impl BaseDocument {
                 for &child in &node.children {
                     remove_pe_ignoring_parent(doc, child);
                 }
-                for &anon_id in &node.anonymous_blocks {
+                for &anon_id in node.anonymous_blocks() {
                     doc.deallocate_anonymous_block(anon_id);
                 }
             }
@@ -1546,7 +1565,7 @@ impl BaseDocument {
         let node = remove_pe_ignoring_parent(self, node_id);
 
         // Update child_idx values
-        if let Some(parent_id) = node.as_ref().and_then(|node| node.parent) {
+        if let Some(parent_id) = node.as_ref().and_then(|node| node.parent.get()) {
             let parent = &mut self.nodes[parent_id];
             parent.children.retain(|id| *id != node_id);
         }
@@ -2419,7 +2438,8 @@ impl BaseDocument {
         if let SpecialElementData::Image(data) = &mut el.special_data {
             changed |= kitesurf_materialize_image_data(data, hint, ceiling);
         }
-        for layer in el.background_images.iter_mut().chain(el.mask_images.iter_mut()) {
+        let (background_images, mask_images) = el.image_layers_mut();
+        for layer in background_images.iter_mut().chain(mask_images.iter_mut()) {
             if let Some(res) = layer {
                 changed |= kitesurf_materialize_image_data(&mut res.image, hint, ceiling);
             }
@@ -2465,7 +2485,7 @@ impl BaseDocument {
             RasterImageData::new(width, height, data),
         )));
         if size_changed {
-            node.cache_mut().clear();
+            node.clear_layout_cache();
             node.insert_damage(ALL_DAMAGE);
             1
         } else {
@@ -2563,7 +2583,7 @@ impl BaseDocument {
             return;
         }
         el.special_data = SpecialElementData::None;
-        node.cache_mut().clear();
+        node.clear_layout_cache();
         node.insert_damage(ALL_DAMAGE);
     }
 
@@ -2601,9 +2621,10 @@ impl BaseDocument {
                 }
                 ImageType::Background(idx) | ImageType::Mask(idx) => {
                     let layer_image = node.element_data_mut().and_then(|el| {
+                        let (background_images, mask_images) = el.image_layers_mut();
                         let images = match image_type {
-                            ImageType::Background(_) => &mut el.background_images,
-                            ImageType::Mask(_) => &mut el.mask_images,
+                            ImageType::Background(_) => background_images,
+                            ImageType::Mask(_) => mask_images,
                             ImageType::Image => unreachable!(),
                         };
                         images.get_mut(idx)
@@ -2680,7 +2701,7 @@ impl BaseDocument {
                         let ident = AttrIdentifier {
                             local_name: GenericAtomIdent(attr.name.local.clone()),
                             name: GenericAtomIdent(attr.name.local.clone()),
-                            namespace: GenericAtomIdent(attr.name.ns.clone()),
+                            namespace: GenericAtomIdent(attr.namespace().clone()),
                             prefix: None,
                         };
 
@@ -2729,7 +2750,7 @@ impl BaseDocument {
             }
         } else {
             let mut snapshot = ServoElementSnapshot {
-                state: Some(*self.nodes[node_id].element_state()),
+                state: Some(self.nodes[node_id].element_state().get()),
                 attrs,
                 changed_attrs,
                 class_changed: needs_attrs,
@@ -2802,7 +2823,7 @@ impl BaseDocument {
             if node.is_element() {
                 return Some(node_id);
             }
-            node_id = node.parent?;
+            node_id = node.parent.get()?;
         }
     }
 
@@ -2820,7 +2841,7 @@ impl BaseDocument {
             element_ids.push(node_id);
             current = self
                 .get_node(node_id)
-                .and_then(|node| node.parent)
+                .and_then(|node| node.parent.get())
                 .filter(|parent_id| {
                     self.get_node(*parent_id)
                         .is_some_and(|node| node.is_element())
@@ -2847,7 +2868,7 @@ impl BaseDocument {
         // exactly once.
         let mut node = self.get_node(node_id)?;
         loop {
-            let parent = match node.parent {
+            let parent = match node.parent.get() {
                 Some(parent_id) => self.get_node(parent_id)?,
                 None => return Some(node.id),
             };
@@ -3234,10 +3255,7 @@ impl BaseDocument {
     /// Used grid track sizes for a grid container laid out in the
     /// last resolve_layout pass; None for non-grid / stale ids.
     pub fn grid_track_info(&self, node_id: NodeId) -> Option<&taffy::DetailedGridInfo<Atom>> {
-        match &self.get_node(node_id)?.element_data()?.detailed_layout_info {
-            taffy::DetailedLayoutInfo::Grid(info) => Some(info),
-            _ => None,
-        }
+        self.get_node(node_id)?.element_data()?.grid_info()
     }
 
     pub fn viewport_mut(&mut self) -> ViewportMut<'_> {
@@ -3811,7 +3829,7 @@ impl BaseDocument {
         let inline_root = hit_node.inline_root_ancestor()?;
         let byte_offset = inline_root.text_offset_at_point(hit.x, hit.y)?;
         let el = inline_root.element_data()?;
-        let il = el.inline_layout_data.as_ref()?;
+        let il = el.inline_layout_data()?;
         let (node_id, range) = il
             .node_ranges
             .iter()
@@ -3865,7 +3883,7 @@ impl BaseDocument {
             return (None, None);
         }
 
-        let Some(parent_id) = node.parent else {
+        let Some(parent_id) = node.parent.get() else {
             return (None, None);
         };
 
@@ -3994,13 +4012,13 @@ impl BaseDocument {
             NodeData::Text(t) => &t.content,
             _ => return None,
         };
-        let mut cur = text_node.layout_parent.get().or(text_node.parent);
+        let mut cur = text_node.layout_parent.get().or(text_node.parent.get());
         let mut hops = 0;
         while let Some(id) = cur {
             let n = self.get_node(id)?;
             if n.flags.is_inline_root() {
                 let el = n.element_data()?;
-                let il = el.inline_layout_data.as_ref()?;
+                let il = el.inline_layout_data()?;
                 let range = il
                     .node_ranges
                     .iter()
@@ -4023,7 +4041,7 @@ impl BaseDocument {
                 let end = range.end;
                 return Some((id, (range.start + byte).min(end)));
             }
-            cur = n.layout_parent.get().or(n.parent);
+            cur = n.layout_parent.get().or(n.parent.get());
             hops += 1;
             if hops > 512 {
                 return None;
@@ -4093,7 +4111,7 @@ impl BaseDocument {
         for (node_id, start, end) in &ranges {
             let node = self.get_node(*node_id)?;
             let element_data = node.element_data()?;
-            let inline_layout = element_data.inline_layout_data.as_ref()?;
+            let inline_layout = element_data.inline_layout_data()?;
 
             if *end > inline_layout.text.len() {
                 continue;
@@ -4194,7 +4212,7 @@ impl BaseDocument {
             let Some(element_data) = node.element_data() else {
                 continue;
             };
-            let Some(inline_layout) = element_data.inline_layout_data.as_ref() else {
+            let Some(inline_layout) = element_data.inline_layout_data() else {
                 continue;
             };
 
@@ -4451,10 +4469,7 @@ mod hover_state_tests {
             ..Default::default()
         });
         let root_id = doc.root_node().id;
-        let style = |value: &str| Attribute {
-            name: qual_name!("style"),
-            value: value.to_string(),
-        };
+        let style = |value: &str| Attribute::new(qual_name!("style"), value.to_string());
 
         let mut mutator = doc.mutate();
         let html = mutator.create_element(qual_name!("html"), vec![]);
@@ -4542,10 +4557,7 @@ mod hover_invalidation_tests {
         );
         doc.add_user_agent_stylesheet(sheet);
         let root_id = doc.root_node().id;
-        let style = |value: &str| Attribute {
-            name: qual_name!("style"),
-            value: value.to_string(),
-        };
+        let style = |value: &str| Attribute::new(qual_name!("style"), value.to_string());
 
         let mut mutator = doc.mutate();
         let html = mutator.create_element(qual_name!("html"), vec![]);
@@ -4630,10 +4642,7 @@ mod hover_invalidation_tests {
         );
         doc.add_user_agent_stylesheet(sheet);
         let root_id = doc.root_node().id;
-        let attr = |name: QualName, value: &str| Attribute {
-            name,
-            value: value.to_string(),
-        };
+        let attr = |name: QualName, value: &str| Attribute::new(name, value.to_string());
 
         let mut mutator = doc.mutate();
         let html = mutator.create_element(qual_name!("html"), vec![]);
@@ -4700,10 +4709,7 @@ mod hover_invalidation_tests {
         );
         doc.add_user_agent_stylesheet(sheet);
         let root_id = doc.root_node().id;
-        let attr = |name: QualName, value: &str| Attribute {
-            name,
-            value: value.to_string(),
-        };
+        let attr = |name: QualName, value: &str| Attribute::new(name, value.to_string());
 
         let mut mutator = doc.mutate();
         let html = mutator.create_element(qual_name!("html"), vec![]);
@@ -4781,10 +4787,7 @@ mod hover_invalidation_tests {
         );
         doc.add_user_agent_stylesheet(sheet);
         let root_id = doc.root_node().id;
-        let style = |value: &str| Attribute {
-            name: qual_name!("style"),
-            value: value.to_string(),
-        };
+        let style = |value: &str| Attribute::new(qual_name!("style"), value.to_string());
 
         let mut mutator = doc.mutate();
         let html = mutator.create_element(qual_name!("html"), vec![]);
@@ -4838,10 +4841,7 @@ mod hover_invalidation_tests {
         );
         doc.add_user_agent_stylesheet(sheet);
         let root_id = doc.root_node().id;
-        let style = |value: &str| Attribute {
-            name: qual_name!("style"),
-            value: value.to_string(),
-        };
+        let style = |value: &str| Attribute::new(qual_name!("style"), value.to_string());
 
         let mut mutator = doc.mutate();
         let html = mutator.create_element(qual_name!("html"), vec![]);
@@ -4857,7 +4857,7 @@ mod hover_invalidation_tests {
 
         let background_image_url = |doc: &BaseDocument, id: NodeId| -> Option<String> {
             let elem = doc.nodes[id].data.downcast_element().unwrap();
-            elem.background_images
+            elem.background_images()
                 .first()
                 .and_then(|img| img.as_ref())
                 .map(|img| img.url.as_str().to_string())

@@ -414,12 +414,7 @@ impl BaseDocument {
             "grid-template-columns" | "grid-template-rows"
                 if display.inside() == DisplayInside::Grid =>
             {
-                if let Some(info) =
-                    node.element_data()
-                        .and_then(|data| match &data.detailed_layout_info {
-                            taffy::DetailedLayoutInfo::Grid(info) => Some(info),
-                            _ => None,
-                        })
+                if let Some(info) = node.element_data().and_then(|data| data.grid_info())
                 {
                     return if property_name == "grid-template-columns" {
                         info.grid_template_columns(zoom)
@@ -439,12 +434,7 @@ impl BaseDocument {
                     pos_styles.grid_template_columns,
                     GridTemplateComponent::None
                 );
-                let info = node
-                    .element_data()
-                    .and_then(|data| match &data.detailed_layout_info {
-                        taffy::DetailedLayoutInfo::Grid(info) => Some(info),
-                        _ => None,
-                    });
+                let info = node.element_data().and_then(|data| data.grid_info());
                 if let Some(info) = info
                     && (rows_are_none || columns_are_none)
                     && matches!(pos_styles.grid_template_areas, GridTemplateAreas::None)
@@ -708,14 +698,14 @@ impl BaseDocument {
     /// that generates a box (skipping `display: contents` ancestors) is a flex
     /// or grid container.
     fn is_flex_or_grid_item(&self, node_id: NodeId) -> bool {
-        let mut parent_id = self.get_node(node_id).and_then(|node| node.parent);
+        let mut parent_id = self.get_node(node_id).and_then(|node| node.parent.get());
         while let Some(parent) = parent_id.and_then(|id| self.get_node(id)) {
             let Some(parent_styles) = parent.primary_styles() else {
                 return false;
             };
             let display = parent_styles.clone_display();
             if display.is_contents() {
-                parent_id = parent.parent;
+                parent_id = parent.parent.get();
                 continue;
             }
             return matches!(display.inside(), DisplayInside::Flex | DisplayInside::Grid);

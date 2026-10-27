@@ -289,7 +289,7 @@ impl BaseDocument {
         // A CSS reversed() scope extends to the origin's following
         // siblings; the HTML-implied list scope is subtree-only.
         if !subtree_only {
-            if let Some(parent) = self.nodes[origin].parent {
+            if let Some(parent) = self.nodes[origin].parent.get() {
                 let sibs = self.nodes[parent].flat_children();
                 if let Some(pos) = sibs.iter().position(|&s| s == origin) {
                     let rest: Vec<NodeId> = sibs[pos + 1..].to_vec();
@@ -518,7 +518,7 @@ impl BaseDocument {
                     .copied(),
             );
         for id in ordinals {
-            dirty.extend(self.nodes.get(id).and_then(|node| node.parent));
+            dirty.extend(self.nodes.get(id).and_then(|node| node.parent.get()));
         }
 
         dirty.retain(|&id| self.nodes.get(id).is_some());

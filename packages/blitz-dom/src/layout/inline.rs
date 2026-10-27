@@ -222,10 +222,13 @@ impl LayoutPassState<'_> {
     fn inline_span_cb_flags(&self, root_id: NodeId, box_id: NodeId) -> StyleFlags {
         let root = &self.nodes[root_id];
         // The spans of an anonymous inline root are descendants of its parent
-        let root_parent = root.is_anonymous().then_some(root.parent).flatten();
+        let root_parent = root
+            .is_anonymous()
+            .then_some(root.parent.get())
+            .flatten();
 
         let mut flags = StyleFlags::empty();
-        let mut current = self.nodes[box_id].parent;
+        let mut current = self.nodes[box_id].parent.get();
         while let Some(id) = current {
             if id == root_id || Some(id) == root_parent {
                 return flags;
@@ -245,7 +248,7 @@ impl LayoutPassState<'_> {
                     }
                 }
             }
-            current = ancestor.parent;
+            current = ancestor.parent.get();
         }
         StyleFlags::empty()
     }
@@ -372,7 +375,7 @@ impl LayoutPassState<'_> {
                 .data
                 .downcast_element_mut()
                 .unwrap()
-                .inline_layout_data = Some(inline_layout);
+                .set_inline_layout_data(Some(inline_layout));
             self.inline_roots.push(node_id);
             return LayoutOutput::from_outer_size(
                 Size::ZERO.maybe_max(container_pb.sum_axes().map(Some)),
@@ -672,7 +675,7 @@ impl LayoutPassState<'_> {
                 .data
                 .downcast_element_mut()
                 .unwrap()
-                .inline_layout_data = Some(inline_layout);
+                .set_inline_layout_data(Some(inline_layout));
             self.inline_roots.push(node_id);
 
             let measured_size = inputs.known_dimensions.unwrap_or(taffy::Size {
@@ -851,7 +854,7 @@ impl LayoutPassState<'_> {
                             clear,
                             false,
                         );
-                        self.nodes[node_id].placed_floats.set(true);
+                        self.nodes[node_id].set_placed_floats(true);
 
                         let min_y = state.line_y() / scale as f64; //.max(pos.y as f64);
                         let next_slot =
@@ -1300,7 +1303,7 @@ impl LayoutPassState<'_> {
             .data
             .downcast_element_mut()
             .unwrap()
-            .inline_layout_data = Some(inline_layout);
+            .set_inline_layout_data(Some(inline_layout));
         self.inline_roots.push(node_id);
 
         let oof_position_inset = taffy::Rect {
@@ -1363,7 +1366,7 @@ impl crate::BaseDocument {
         let Some(inline_layout) = self.nodes[node_id]
             .data
             .downcast_element_mut()
-            .and_then(|el| el.inline_layout_data.as_mut())
+            .and_then(|el| el.inline_layout_data_mut())
         else {
             return;
         };

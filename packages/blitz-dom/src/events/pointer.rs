@@ -197,7 +197,7 @@ fn touch_action_pan_axes(doc: &BaseDocument, node_id: NodeId) -> (bool, bool) {
                 break;
             }
         }
-        current = node.parent;
+        current = node.parent.get();
     }
 
     (allow_x, allow_y)
@@ -229,7 +229,7 @@ pub(crate) fn handle_pointermove<F: FnMut(DomEvent)>(
                             if user_select == UserSelect::None {
                                 // Do nothing. Continue with rest of function
                             } else if user_select == UserSelect::Auto {
-                                if let Some(parent) = node.parent {
+                                if let Some(parent) = node.parent.get() {
                                     let node = &doc.nodes[parent];
                                     if let Some(style) = node.primary_styles() {
                                         let user_select = style.clone_user_select();
@@ -628,7 +628,7 @@ pub(crate) fn handle_click(
             };
 
             let Some(el) = maybe_element else {
-                maybe_node_id = doc.nodes[node_id].parent;
+                maybe_node_id = doc.nodes[node_id].parent.get();
                 continue;
             };
 
@@ -696,7 +696,7 @@ pub(crate) fn handle_click(
                 // Activating the first <summary> of a <details> element toggles
                 // the details' `open` attribute (expand/collapse).
                 local_name!("summary") => {
-                    if let Some(parent_id) = doc.nodes[node_id].parent {
+                    if let Some(parent_id) = doc.nodes[node_id].parent.get() {
                         let parent = &doc.nodes[parent_id];
                         let is_first_summary = parent
                             .data
@@ -804,7 +804,7 @@ pub(crate) fn handle_click(
             }
 
             // No match. Recurse up to parent.
-            maybe_node_id = doc.nodes[node_id].parent;
+            maybe_node_id = doc.nodes[node_id].parent.get();
         }
 
         // Didn't match anything

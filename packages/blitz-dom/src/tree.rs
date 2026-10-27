@@ -45,9 +45,11 @@ pub struct NodeTree {
     /// paint moves `viewport_scroll` to translate the scene. `None` means the
     /// fixed boxes follow `viewport_scroll` as usual.
     fixed_anchor: Option<crate::Point<f64>>,
-    /// Each slot index's current id (raw `NodeId`), 0 for a free
-    /// slot. Backs `id_from_opaque`.
-    slot_ids: Vec<u64>,
+    /// Each slot index's current version (the high half of its raw `NodeId`),
+    /// 0 for a free slot. Backs `id_from_opaque`.
+    slot_versions: Vec<u32>,
+    /// The owning document's shared style lock, reached by nodes through their tree pointer.
+    pub(crate) guard: style::shared_lock::SharedRwLock,
 }
 
 /// The slot index of an id: the low half of the slotmap FFI encoding, which
@@ -58,13 +60,14 @@ fn slot_index(raw: u64) -> usize {
 }
 
 impl NodeTree {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(guard: style::shared_lock::SharedRwLock) -> Self {
         Self {
             map: SlotMap::with_key(),
             geometry_generation: AtomicU64::new(1),
             viewport_scroll: crate::Point::ZERO,
             fixed_anchor: None,
-            slot_ids: Vec::new(),
+            slot_versions: Vec::new(),
+            guard,
         }
     }
 
@@ -76,11 +79,13 @@ impl NodeTree {
     /// Stylo's animation sweep took that miss for "not in the document" and
     /// cleared the node's transitions on every resolve, so they never
     /// advanced: a span that lands in the slot a previous innerHTML's
-    /// fragment root freed stayed at its start opacity. `slot_ids` maps each slot index to its current id,
-    /// so the lookup works whatever the pointer width.
+    /// fragment root freed stayed at its start opacity. `slot_versions` maps each
+    /// slot index to its current version, so the lookup works whatever the pointer width.
     pub fn id_from_opaque(&self, opaque: usize) -> Option<NodeId> {
         let raw = opaque as u64;
-        let id = NodeId::from_u64(*self.slot_ids.get(slot_index(raw))?);
+        let index = slot_index(raw);
+        let version = *self.slot_versions.get(index).filter(|&&v| v != 0)?;
+        let id = NodeId::from_u64(u64::from(version) << 32 | index as u64);
         // A 64-bit opaque still has its version: reject a stale one.
         let stale = raw >> 32 != 0 && raw != id.as_u64();
         (!stale && self.contains_key(id)).then_some(id)
@@ -124,8 +129,8 @@ impl NodeTree {
         self.geometry_generation.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
-        let mut tree = Self::new();
+    pub(crate) fn with_capacity(capacity: usize, guard: style::shared_lock::SharedRwLock) -> Self {
+        let mut tree = Self::new(guard);
         tree.map = SlotMap::with_capacity_and_key(capacity);
         tree
     }
@@ -158,17 +163,17 @@ impl NodeTree {
     pub(crate) fn insert_with_key(&mut self, f: impl FnOnce(NodeId) -> Node) -> NodeId {
         let id = to_id(self.map.insert_with_key(|key| f(to_id(key))));
         let index = slot_index(id.as_u64());
-        if self.slot_ids.len() <= index {
-            self.slot_ids.resize(index + 1, 0);
+        if self.slot_versions.len() <= index {
+            self.slot_versions.resize(index + 1, 0);
         }
-        self.slot_ids[index] = id.as_u64();
+        self.slot_versions[index] = (id.as_u64() >> 32) as u32;
         id
     }
 
     /// Remove the node with the given id, returning it if it was still live.
     pub(crate) fn remove(&mut self, id: NodeId) -> Option<Node> {
         let node = self.map.remove(to_key(id))?;
-        self.slot_ids[slot_index(id.as_u64())] = 0;
+        self.slot_versions[slot_index(id.as_u64())] = 0;
         Some(node)
     }
 
@@ -198,5 +203,30 @@ impl IndexMut<NodeId> for NodeTree {
     #[inline]
     fn index_mut(&mut self, id: NodeId) -> &mut Node {
         &mut self.map[to_key(id)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use markup5ever::{QualName, local_name, ns};
+
+    fn span(doc: &mut crate::BaseDocument) -> blitz_traits::node_id::NodeId {
+        let name = QualName::new(None, ns!(html), local_name!("span"));
+        doc.mutate().create_element(name, Vec::new())
+    }
+
+    #[test]
+    fn opaque_ids_follow_slot_reuse_and_reject_free_slots() {
+        let mut doc = crate::BaseDocument::new(Default::default());
+        let first = span(&mut doc);
+        let index = (first.as_u64() & 0xffff_ffff) as usize;
+        assert_eq!(doc.nodes.id_from_opaque(index), Some(first));
+        doc.mutate().remove_and_drop_node(first);
+        assert_eq!(doc.nodes.id_from_opaque(index), None);
+        let second = span(&mut doc);
+        assert_eq!(second.as_u64() & 0xffff_ffff, index as u64);
+        assert_ne!(second, first);
+        assert_eq!(doc.nodes.id_from_opaque(index), Some(second));
+        assert_eq!(doc.nodes.id_from_opaque(first.as_u64() as usize), None);
     }
 }

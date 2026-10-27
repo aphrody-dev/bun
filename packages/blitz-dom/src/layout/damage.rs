@@ -101,7 +101,7 @@ impl BaseDocument {
         }
         // Assigned nodes are the host's DOM children, so without this walk their
         // damage never reaches the slot's box parent and its layout stays cached.
-        if let Some(assigned) = self.nodes[node_id].assigned_nodes.clone() {
+        if let Some(assigned) = self.nodes[node_id].assigned_nodes().cloned() {
             for slotted in assigned.iter() {
                 damage_from_children |= self.propagate_damage_flags(*slotted);
             }
@@ -241,7 +241,7 @@ impl BaseDocument {
     /// Refresh owned anonymous boxes without revisiting their DOM children.
     fn refresh_anonymous_block_styles(&mut self, node_id: NodeId) -> RestyleDamage {
         // Skip owners with no anonymous boxes to refresh.
-        if self.nodes[node_id].anonymous_blocks.is_empty() {
+        if self.nodes[node_id].anonymous_blocks().is_empty() {
             return RestyleDamage::empty();
         }
 
@@ -254,7 +254,7 @@ impl BaseDocument {
             })
         };
         let has_anonymous_table = self.nodes[node_id]
-            .anonymous_blocks
+            .anonymous_blocks()
             .iter()
             .any(|&id| is_anonymous_table(self, id));
 
@@ -281,7 +281,7 @@ impl BaseDocument {
         };
 
         // Take the ownership list so we can mutate nodes without copying it.
-        let anonymous_blocks = std::mem::take(&mut self.nodes[node_id].anonymous_blocks);
+        let anonymous_blocks = self.nodes[node_id].take_anonymous_blocks();
         let mut damage_for_parent = RestyleDamage::empty();
         for &anonymous_id in &anonymous_blocks {
             let style = match &table_style {
@@ -337,7 +337,7 @@ impl BaseDocument {
         }
 
         // Restore the ownership list and return the combined damage.
-        self.nodes[node_id].anonymous_blocks = anonymous_blocks;
+        self.nodes[node_id].set_anonymous_blocks(anonymous_blocks);
         damage_for_parent
     }
 
@@ -383,7 +383,7 @@ impl BaseDocument {
         {
             return;
         }
-        let anonymous_blocks = std::mem::take(&mut node.anonymous_blocks);
+        let anonymous_blocks = node.take_anonymous_blocks();
         let children = std::mem::take(&mut node.children);
         let (before, after) = (node.before(), node.after());
 
@@ -406,7 +406,7 @@ impl BaseDocument {
         }
 
         let node = &mut self.nodes[node_id];
-        node.anonymous_blocks = anonymous_blocks;
+        node.set_anonymous_blocks(anonymous_blocks);
         node.children = children;
         node.clear_damage_mut();
         node.unset_damaged_descendants();
@@ -604,7 +604,7 @@ impl BaseDocument {
                 continue;
             };
 
-            if element.inline_layout_data.is_some() {
+            if element.inline_layout_data().is_some() {
                 // A pseudo-element is anonymous too, but its parent's
                 // re-collect reuses it instead of rebuilding it like a wrapper
                 // block, so it must carry the damage itself. Without this, a
@@ -623,7 +623,7 @@ impl BaseDocument {
         }
 
         for node_id in anon_nodes {
-            if let Some(parent_id) = *(self.nodes[node_id].layout_parent.get_mut()) {
+            if let Some(parent_id) = self.nodes[node_id].layout_parent.get() {
                 self.nodes[parent_id].insert_damage(ALL_DAMAGE);
             }
         }
@@ -668,14 +668,19 @@ impl BaseDocument {
             return;
         };
 
-        let (style_images, elem_images) = match kind {
-            ImageLayerKind::Background => (
-                &style.get_background().background_image.0,
-                &mut elem.background_images,
-            ),
-            ImageLayerKind::Mask => (&style.get_svg().mask_image.0, &mut elem.mask_images),
+        let (style_images, mask) = match kind {
+            ImageLayerKind::Background => (&style.get_background().background_image.0, false),
+            ImageLayerKind::Mask => (&style.get_svg().mask_image.0, true),
         };
 
+        // The initial value is one `none` layer, so a slot per layer would allocate on almost
+        // every element. Painters read slots with `get`, so empty storage means "no image".
+        if !style_images.iter().any(|image| matches!(image, StyloImage::Url(_))) {
+            elem.clear_image_layers(mask);
+            return;
+        }
+
+        let elem_images = elem.image_layers_storage_mut(mask);
         let len = style_images.len();
         elem_images.resize(len, None);
 

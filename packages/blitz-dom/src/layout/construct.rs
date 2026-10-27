@@ -485,7 +485,7 @@ impl LayoutChildren {
         {
             doc.nodes[node_id].flags.insert(NodeFlags::IS_IN_DOCUMENT);
         }
-        doc.nodes[node_id].parent = Some(container_node_id);
+        doc.nodes[node_id].parent.set(Some(container_node_id));
         doc.nodes[node_id]
             .layout_parent
             .set(Some(container_node_id));
@@ -579,7 +579,7 @@ impl LayoutChildren {
         {
             doc.nodes[node_id].flags.insert(NodeFlags::IS_IN_DOCUMENT);
         }
-        doc.nodes[node_id].parent = Some(container_node_id);
+        doc.nodes[node_id].parent.set(Some(container_node_id));
         doc.nodes[node_id]
             .layout_parent
             .set(Some(container_node_id));
@@ -673,11 +673,10 @@ fn push_hoisted_children_and_pseudos(
         .attached_shadow_root_id()
         .unwrap_or(container_node_id);
     let use_assigned = doc.nodes[flat_src]
-        .assigned_nodes
-        .as_ref()
+        .assigned_nodes()
         .is_some_and(|a| !a.is_empty());
     let children = if use_assigned {
-        doc.nodes[flat_src].assigned_nodes.take().unwrap()
+        doc.nodes[flat_src].take_assigned_nodes().unwrap()
     } else {
         std::mem::take(&mut doc.nodes[flat_src].children)
     };
@@ -689,7 +688,7 @@ fn push_hoisted_children_and_pseudos(
         push_hoisted_child(doc, child_id, out, wrap);
     }
     if use_assigned {
-        doc.nodes[flat_src].assigned_nodes = Some(children);
+        doc.nodes[flat_src].set_assigned_nodes(Some(children));
     } else {
         doc.nodes[flat_src].children = children;
     }
@@ -920,7 +919,7 @@ fn collect_layout_children_with_wrap(
                         .and_then(parse_finite)
                         .unwrap_or((min + max) / 2.0)
                         .clamp(min, max);
-                    el.special_data = SpecialElementData::RangeInput(value);
+                    el.special_data = SpecialElementData::RangeInput(Box::new(value));
                 }
                 return;
             }
@@ -1158,7 +1157,7 @@ fn collect_layout_children_with_wrap(
             if classification.all_inline {
                 let existing_layout = doc.nodes[container_node_id]
                     .element_data_mut()
-                    .and_then(|el| el.inline_layout_data.take());
+                    .and_then(|el| el.take_inline_layout_data());
                 let layout = existing_layout.unwrap_or_else(|| Box::new(TextLayout::new()));
 
                 // Queue node for inline layout construction. Deferring construction of inline layouts to a
@@ -1295,7 +1294,7 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
             let new_node_id = doc.create_node(NodeData::AnonymousBlock(Box::new(
                 ElementData::new(DUMMY_NAME, Vec::new()),
             )));
-            doc.nodes[new_node_id].parent = Some(node_id);
+            doc.nodes[new_node_id].parent.set(Some(node_id));
             doc.nodes[new_node_id].layout_parent.set(Some(node_id));
             if doc.nodes[node_id].flags.contains(NodeFlags::IS_IN_DOCUMENT) {
                 doc.nodes[new_node_id]
@@ -1305,7 +1304,7 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
 
             if let Some(text) = pe_content_text_resolved(doc, node_id, idx, pe_style) {
                 let text_node_id = doc.create_text_node(&text);
-                doc.nodes[text_node_id].parent = Some(new_node_id);
+                doc.nodes[text_node_id].parent.set(Some(new_node_id));
                 doc.nodes[new_node_id].children.push(text_node_id);
                 if doc.nodes[node_id].flags.is_in_document() {
                     doc.nodes[text_node_id]
@@ -1360,7 +1359,7 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
                 (None, Some(new_text)) => {
                     let in_document = doc.nodes[node_id].flags.is_in_document();
                     let text_node_id = doc.create_text_node(&new_text);
-                    doc.nodes[text_node_id].parent = Some(pe_node_id);
+                    doc.nodes[text_node_id].parent.set(Some(pe_node_id));
                     doc.nodes[pe_node_id].children.push(text_node_id);
                     if in_document {
                         doc.nodes[text_node_id]
@@ -1603,7 +1602,7 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
         text_input_data.is_showing_placeholder = is_placeholder;
         text_input_data.placeholder_color = placeholder_color;
         text_input_data.placeholder_font_style = placeholder_font_style;
-        element.special_data = SpecialElementData::TextInput(text_input_data);
+        element.special_data = SpecialElementData::TextInput(Box::new(text_input_data));
     } else if let SpecialElementData::TextInput(data) = &mut element.special_data {
         // Update the editor's text on subsequent layouts so an
         // empty input switches between placeholder and real
@@ -1826,6 +1825,7 @@ pub(crate) fn build_inline_layout_into(
     let root_node_style = root_node.primary_styles().or_else(|| {
         root_node
             .parent
+            .get()
             .and_then(|parent_id| nodes[parent_id].primary_styles())
     });
 
@@ -1865,7 +1865,7 @@ pub(crate) fn build_inline_layout_into(
         position: ListItemLayoutPosition::Inside,
     }) = root_node
         .element_data()
-        .and_then(|el| el.list_item_data.as_deref())
+        .and_then(|el| el.list_item_data())
     {
         match marker {
             // Bullet glyphs live in the bundled bullet font. The position-outside
@@ -1921,8 +1921,11 @@ pub(crate) fn build_inline_layout_into(
         );
     }
 
+    // Both live as long as the paragraph; drop their push-growth slack.
     text_layout.text = builder.build_into(&mut text_layout.layout);
+    text_layout.text.shrink_to_fit();
     text_layout.node_ranges = core::mem::take(node_ranges);
+    text_layout.node_ranges.shrink_to_fit();
     return;
 
     fn build_inline_layout_recursive(

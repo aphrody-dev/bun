@@ -263,7 +263,7 @@ impl BaseDocument {
             ScrollTarget::Node(node_id) => Some(
                 self.nodes
                     .get(node_id)
-                    .and_then(|node| node.parent)
+                    .and_then(|node| node.parent.get())
                     .map_or(ScrollTarget::Viewport, ScrollTarget::Node),
             ),
         }
@@ -327,7 +327,7 @@ impl BaseDocument {
                 };
 
                 let initial = *node.scroll_offset();
-                *node.scroll_offset_mut() = offset;
+                node.set_scroll_offset(offset);
                 if offset == initial {
                     return false;
                 }

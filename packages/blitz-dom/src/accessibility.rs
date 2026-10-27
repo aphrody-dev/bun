@@ -16,6 +16,7 @@ impl BaseDocument {
             if node.is_hidden_from_accessibility_tree()
                 || node
                     .parent
+                    .get()
                     .map(|p| hidden_nodes.contains(&p))
                     .unwrap_or(false)
             {
@@ -24,6 +25,7 @@ impl BaseDocument {
             }
             let parent = node
                 .parent
+                .get()
                 .and_then(|parent_id| nodes.get_mut(&parent_id))
                 .map(|(_, parent)| parent)
                 .unwrap_or(&mut window);
@@ -112,7 +114,7 @@ impl BaseDocument {
         let id = NodeId(node.id.as_u64());
 
         let mut builder = AccessKitNode::default();
-        if node.parent.is_none() {
+        if node.parent.get().is_none() {
             builder.set_role(Role::Window)
         } else if let Some(element_data) = node.element_data() {
             let name = element_data.name.local.to_string();

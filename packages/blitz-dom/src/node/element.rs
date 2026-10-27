@@ -1,8 +1,7 @@
-use blitz_traits::node_id::NodeId;
 use cssparser::Parser;
 use kurbo::{Affine, Rect as KurboRect};
 use linebender_resource_handle::Blob;
-use markup5ever::{LocalName, QualName, local_name};
+use markup5ever::{ExpandedName, LocalName, Namespace, Prefix, QualName, local_name, ns};
 use selectors::matching::{ElementSelectorFlags, QuirksMode};
 use std::cell::Cell;
 use std::str::FromStr;
@@ -28,7 +27,8 @@ use url::Url;
 use super::stylo_data::StyloData;
 #[cfg(feature = "svg")]
 use super::svg::SvgImageData;
-use super::{Attribute, Attributes};
+use super::{Attribute, Attributes, OptNodeId};
+use blitz_traits::node_id::NodeId;
 use crate::Document;
 use crate::layout::table::TableContext;
 use crate::node::{TextBrush, TextInputData, TextLayout};
@@ -43,24 +43,21 @@ macro_rules! local_names {
 }
 
 pub struct ElementData {
-    /// The elements tag name, namespace and prefix
-    pub name: QualName,
+    /// The element's local name; see [`Self::namespace`] and [`Self::prefix`] for the rest.
+    pub name: ElementName,
+    /// The name's namespace kind and whether the element is focussable or has a snapshot.
+    bits: ElementBits,
 
     /// The elements id attribute parsed as an atom (if it has one)
     pub id: Option<Atom>,
 
     /// The element's class attribute pre-split and interned. Selector
     /// matching hits this per candidate, so it must not re-parse per call.
-    pub classes: Vec<Atom>,
+    /// Thin, as most elements have no class.
+    pub classes: ThinVec<Atom>,
 
     /// The element's attributes
     pub attrs: Attributes,
-
-    /// Whether the element is focussable
-    pub is_focussable: bool,
-
-    /// The element's parsed style attribute (used by stylo)
-    pub style_attribute: Option<ServoArc<Locked<PropertyDeclarationBlock>>>,
 
     /// Heterogeneous data that depends on the element's type.
     /// For example:
@@ -69,23 +66,8 @@ pub struct ElementData {
     ///   - The text editor for input/textarea elements
     pub special_data: SpecialElementData,
 
-    pub background_images: ThinVec<Option<ImageResourceData>>,
-
-    pub mask_images: ThinVec<Option<ImageResourceData>>,
-
-    /// Parley text layout (elements with inline inner display mode only)
-    pub inline_layout_data: Option<Box<TextLayout>>,
-
-    /// Data associated with display: list-item. Note that this display mode
-    /// does not exclude inline_layout_data
-    pub list_item_data: Option<Box<ListItemLayout>>,
-
-    /// The element's template contents (\<template\> elements only)
-    pub template_contents: Option<NodeId>,
-
-    /// Node id of this element's attached shadow root, when it is a
-    /// shadow host. The shadow tree hangs off that node, not children.
-    pub shadow_root: Option<NodeId>,
+    /// Links, the style attribute and image layers, which few elements have.
+    rare: Option<Box<ElementRare>>,
     // /// Whether the node is a [HTML integration point] (https://html.spec.whatwg.org/multipage/#html-integration-point)
     // pub mathml_annotation_xml_integration_point: bool,
 
@@ -95,12 +77,8 @@ pub struct ElementData {
     // ---------------------------------------------------------------------
     /// Style data from stylo, plus a lock guard that allows access to it.
     pub stylo_element_data: StyloData,
-    pub selector_flags: Cell<ElementSelectorFlags>,
-    /// A clone of the document's shared style lock. Set when the owning
-    /// [`Node`](super::Node) is constructed.
-    pub guard: Option<SharedRwLock>,
-    pub element_state: ElementState,
-    pub has_snapshot: bool,
+    pub selector_flags: SelectorFlagsCell,
+    pub element_state: ElementStateBits,
     pub snapshot_handled: AtomicBool,
     /// Whether any descendant of this node needs restyling.
     /// Used by Stylo's incremental style traversal to skip unchanged subtrees.
@@ -109,20 +87,10 @@ pub struct ElementData {
     /// Used by the damage propagation pass to skip unchanged subtrees.
     pub damaged_descendants: AtomicBool,
 
-    // Pseudo element nodes
-    pub before: Option<NodeId>,
-    pub after: Option<NodeId>,
-
-    /// Detailed layout information from the most recent layout (currently
-    /// grid track sizing information for grid containers only). Used by
-    /// devtools grid inspection and out-of-flow grid-area positioning.
-    pub detailed_layout_info: taffy::DetailedLayoutInfo<Atom>,
-
     // Taffy layout data:
     pub display_constructed_as: StyloDisplay,
     /// Layout output state (`None` until layout first writes to this node).
     pub layout_data: Option<Box<LayoutData>>,
-    pub transform: Option<Box<Affine>>,
 }
 
 /// Taffy layout output state (cache, layouts, scroll offset and overflow).
@@ -143,6 +111,9 @@ pub struct LayoutData {
     /// recorded by the layout pass for CSSOM geometry lookups.
     #[cfg(feature = "writing-mode")]
     pub writing_mode: stylo_taffy::WritingMode,
+    /// Parley text layout (elements with inline inner display mode only). Inline roots are
+    /// laid out by taffy too, so it shares their box; see [`ElementData::inline_layout_data`].
+    inline_layout: Option<Box<TextLayout>>,
 }
 
 impl LayoutData {
@@ -156,6 +127,7 @@ impl LayoutData {
             scrollable_overflow: KurboRect::ZERO,
             #[cfg(feature = "writing-mode")]
             writing_mode: stylo_taffy::WritingMode::empty(),
+            inline_layout: None,
         }
     }
 }
@@ -170,7 +142,404 @@ impl Default for LayoutData {
 /// [`LayoutData`] has never been allocated.
 pub(crate) static DEFAULT_LAYOUT_DATA: LayoutData = LayoutData::new();
 
+type ImageLayers = ThinVec<Option<ImageResourceData>>;
+
+/// Store a resolved transform, reusing the existing allocation when there is one.
+pub(crate) fn store_transform(slot: &mut Option<Box<Affine>>, transform: Option<Affine>) {
+    match (slot.as_deref_mut(), transform) {
+        (Some(existing), Some(new)) => *existing = new,
+        (None, Some(new)) => *slot = Some(Box::new(new)),
+        (_, None) => *slot = None,
+    }
+}
+
+/// The local part of an element's name.
+///
+/// The namespace and prefix are kept apart, as a byte for the common namespaces, so an element
+/// stores one atom of its name rather than three.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ElementName {
+    pub local: LocalName,
+}
+
+/// The namespace of an element's name. `Other` covers any other namespace or a prefix, which
+/// are kept in [`ElementRare::name_ext`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum NameNs {
+    Html,
+    Svg,
+    MathMl,
+    Empty,
+    Other,
+}
+
+/// An element's [`NameNs`] and its plain boolean flags, packed into one byte.
+#[derive(Clone, Copy)]
+struct ElementBits(u8);
+
+impl ElementBits {
+    const NS: u8 = 0b111;
+    const FOCUSSABLE: u8 = 1 << 3;
+    const HAS_SNAPSHOT: u8 = 1 << 4;
+
+    const fn new(ns: NameNs) -> Self {
+        Self(ns as u8)
+    }
+
+    #[inline]
+    fn name_ns(self) -> NameNs {
+        match self.0 & Self::NS {
+            0 => NameNs::Html,
+            1 => NameNs::Svg,
+            2 => NameNs::MathMl,
+            3 => NameNs::Empty,
+            _ => NameNs::Other,
+        }
+    }
+
+    #[inline]
+    fn get(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+
+    #[inline]
+    fn set(&mut self, bit: u8, value: bool) {
+        if value {
+            self.0 |= bit;
+        } else {
+            self.0 &= !bit;
+        }
+    }
+}
+
+const _: () = assert!(ElementSelectorFlags::all().bits() <= u16::MAX as usize);
+
+/// [`ElementState`] stored in 32 bits. Blitz sets only states in bits 0 to 31 (focus ring is
+/// bit 30); storing a higher one panics rather than dropping it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ElementStateBits(u32);
+
+impl ElementStateBits {
+    #[inline]
+    pub fn get(self) -> ElementState {
+        ElementState::from_bits_retain(u64::from(self.0))
+    }
+
+    #[inline]
+    fn store(&mut self, state: ElementState) {
+        self.0 = u32::try_from(state.bits()).expect("element states above bit 31 are not stored");
+    }
+
+    #[inline]
+    pub fn contains(self, other: ElementState) -> bool {
+        self.get().contains(other)
+    }
+
+    #[inline]
+    pub fn intersects(self, other: ElementState) -> bool {
+        self.get().intersects(other)
+    }
+
+    #[inline]
+    pub fn insert(&mut self, other: ElementState) {
+        self.store(self.get() | other);
+    }
+
+    #[inline]
+    pub fn remove(&mut self, other: ElementState) {
+        self.store(self.get() - other);
+    }
+
+    #[inline]
+    pub fn set(&mut self, other: ElementState, value: bool) {
+        let mut state = self.get();
+        state.set(other, value);
+        self.store(state);
+    }
+}
+
+/// A cell of [`ElementSelectorFlags`] stored in 16 bits, which hold every defined flag.
+#[derive(Debug, Default)]
+pub struct SelectorFlagsCell(Cell<u16>);
+
+impl SelectorFlagsCell {
+    #[inline]
+    pub fn get(&self) -> ElementSelectorFlags {
+        ElementSelectorFlags::from_bits_retain(usize::from(self.0.get()))
+    }
+
+    #[inline]
+    pub fn set(&self, flags: ElementSelectorFlags) {
+        self.0.set(flags.bits() as u16);
+    }
+}
+
+static NS_HTML: Namespace = ns!(html);
+static NS_SVG: Namespace = ns!(svg);
+static NS_MATHML: Namespace = ns!(mathml);
+static NS_EMPTY: Namespace = ns!();
+
+/// Element state kept out of line so a common element stays in a smaller allocation.
+#[derive(Clone, Default)]
+struct ElementRare {
+    /// The prefix and namespace of an element whose name is [`NameNs::Other`].
+    name_ext: Option<Box<(Option<Prefix>, Namespace)>>,
+    /// The element's template contents (\<template\> elements only)
+    template_contents: OptNodeId,
+    /// This element's attached shadow root, when it is a shadow host. The
+    /// shadow tree hangs off that node, not children.
+    shadow_root: OptNodeId,
+    /// Generated `::before` and `::after` pseudo element nodes.
+    before: OptNodeId,
+    after: OptNodeId,
+    /// The element's parsed style attribute (used by stylo)
+    style_attribute: Option<ServoArc<Locked<PropertyDeclarationBlock>>>,
+    /// One slot per `background-image` / `mask-image` layer; empty when no layer is a URL.
+    background_images: ImageLayers,
+    mask_images: ImageLayers,
+    /// Detailed layout information from the most recent layout (currently grid track sizing
+    /// for grid containers only). Absent means `DetailedLayoutInfo::None`.
+    detailed_layout_info: Option<taffy::DetailedLayoutInfo<Atom>>,
+    /// Data associated with display: list-item. Note that this display mode
+    /// does not exclude inline_layout_data
+    list_item_data: Option<Box<ListItemLayout>>,
+    /// The resolved 2D transform in device pixels, when the element has one.
+    transform: Option<Box<Affine>>,
+}
+
+impl ElementRare {
+    fn is_empty(&self) -> bool {
+        self.name_ext.is_none()
+            && self.template_contents.get().is_none()
+            && self.shadow_root.get().is_none()
+            && self.before.get().is_none()
+            && self.after.get().is_none()
+            && self.style_attribute.is_none()
+            && self.background_images.is_empty()
+            && self.mask_images.is_empty()
+            && self.detailed_layout_info.is_none()
+            && self.list_item_data.is_none()
+            && self.transform.is_none()
+    }
+}
+
 impl ElementData {
+    /// Whether the element is focussable.
+    #[inline]
+    pub fn is_focussable(&self) -> bool {
+        self.bits.get(ElementBits::FOCUSSABLE)
+    }
+
+    #[inline]
+    pub fn has_snapshot(&self) -> bool {
+        self.bits.get(ElementBits::HAS_SNAPSHOT)
+    }
+
+    #[inline]
+    pub fn set_has_snapshot(&mut self, value: bool) {
+        self.bits.set(ElementBits::HAS_SNAPSHOT, value);
+    }
+
+    /// The namespace of the element's name.
+    #[inline]
+    pub fn namespace(&self) -> &Namespace {
+        match self.bits.name_ns() {
+            NameNs::Html => &NS_HTML,
+            NameNs::Svg => &NS_SVG,
+            NameNs::MathMl => &NS_MATHML,
+            NameNs::Empty => &NS_EMPTY,
+            NameNs::Other => &self.name_ext().1,
+        }
+    }
+
+    /// The prefix of the element's name, if any.
+    #[inline]
+    pub fn prefix(&self) -> Option<&Prefix> {
+        match self.bits.name_ns() {
+            NameNs::Other => self.name_ext().0.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The element's name as namespace and local name.
+    #[inline]
+    pub fn expanded_name(&self) -> ExpandedName<'_> {
+        ExpandedName {
+            ns: self.namespace(),
+            local: &self.name.local,
+        }
+    }
+
+    /// The element's full name, including its prefix.
+    pub fn qual_name(&self) -> QualName {
+        QualName::new(
+            self.prefix().cloned(),
+            self.namespace().clone(),
+            self.name.local.clone(),
+        )
+    }
+
+    fn name_ext(&self) -> &(Option<Prefix>, Namespace) {
+        self.rare
+            .as_ref()
+            .and_then(|rare| rare.name_ext.as_deref())
+            .expect("an `Other` element name keeps its namespace in the rare box")
+    }
+
+    /// The element's template contents (\<template\> elements only).
+    #[inline]
+    pub fn template_contents(&self) -> Option<NodeId> {
+        self.rare.as_ref()?.template_contents.get()
+    }
+
+    pub fn set_template_contents(&mut self, id: Option<NodeId>) {
+        self.update_rare(|rare| rare.template_contents.set(id));
+    }
+
+    /// Node id of this element's attached shadow root, when it is a shadow host.
+    #[inline]
+    pub fn shadow_root(&self) -> Option<NodeId> {
+        self.rare.as_ref()?.shadow_root.get()
+    }
+
+    pub fn set_shadow_root(&mut self, id: Option<NodeId>) {
+        self.update_rare(|rare| rare.shadow_root.set(id));
+    }
+
+    /// The generated `::before` pseudo element node, if any.
+    #[inline]
+    pub fn before(&self) -> Option<NodeId> {
+        self.rare.as_ref()?.before.get()
+    }
+
+    pub fn set_before(&mut self, id: Option<NodeId>) {
+        self.update_rare(|rare| rare.before.set(id));
+    }
+
+    /// The generated `::after` pseudo element node, if any.
+    #[inline]
+    pub fn after(&self) -> Option<NodeId> {
+        self.rare.as_ref()?.after.get()
+    }
+
+    pub fn set_after(&mut self, id: Option<NodeId>) {
+        self.update_rare(|rare| rare.after.set(id));
+    }
+
+    /// The element's parsed style attribute (used by stylo).
+    #[inline]
+    pub fn style_attribute(&self) -> Option<&ServoArc<Locked<PropertyDeclarationBlock>>> {
+        self.rare.as_ref()?.style_attribute.as_ref()
+    }
+
+    pub fn style_attribute_mut(&mut self) -> Option<&mut ServoArc<Locked<PropertyDeclarationBlock>>> {
+        self.rare.as_mut()?.style_attribute.as_mut()
+    }
+
+    pub fn set_style_attribute(&mut self, block: Option<ServoArc<Locked<PropertyDeclarationBlock>>>) {
+        self.update_rare(|rare| rare.style_attribute = block);
+    }
+
+    /// One slot per `background-image` layer; empty when no layer is a URL.
+    #[inline]
+    pub fn background_images(&self) -> &[Option<ImageResourceData>] {
+        self.rare.as_ref().map_or(&[], |rare| &rare.background_images)
+    }
+
+    /// One slot per `mask-image` layer; empty when no layer is a URL.
+    #[inline]
+    pub fn mask_images(&self) -> &[Option<ImageResourceData>] {
+        self.rare.as_ref().map_or(&[], |rare| &rare.mask_images)
+    }
+
+    /// The background and mask layer slots, for updating loaded images in place.
+    pub fn image_layers_mut(
+        &mut self,
+    ) -> (&mut [Option<ImageResourceData>], &mut [Option<ImageResourceData>]) {
+        match self.rare.as_deref_mut() {
+            Some(rare) => (&mut rare.background_images, &mut rare.mask_images),
+            None => (&mut [], &mut []),
+        }
+    }
+
+    /// The background (`mask` false) or mask layer slots, allocating the rare box. Callers
+    /// leave them non-empty; `clear_image_layers` empties them.
+    pub(crate) fn image_layers_storage_mut(&mut self, mask: bool) -> &mut ImageLayers {
+        let rare = self.rare.get_or_insert_default();
+        if mask { &mut rare.mask_images } else { &mut rare.background_images }
+    }
+
+    pub(crate) fn clear_image_layers(&mut self, mask: bool) {
+        self.update_rare(|rare| {
+            *(if mask { &mut rare.mask_images } else { &mut rare.background_images }) =
+                ThinVec::new();
+        });
+    }
+
+    /// Detailed layout information from the most recent layout (currently grid track sizing
+    /// for grid containers only). Used by devtools grid inspection and out-of-flow grid-area
+    /// positioning.
+    #[inline]
+    pub fn detailed_layout_info(&self) -> &taffy::DetailedLayoutInfo<Atom> {
+        self.rare
+            .as_ref()
+            .and_then(|rare| rare.detailed_layout_info.as_ref())
+            .unwrap_or(&taffy::DetailedLayoutInfo::None)
+    }
+
+    /// Used grid track sizes from the most recent layout of a grid container.
+    pub fn grid_info(&self) -> Option<&taffy::DetailedGridInfo<Atom>> {
+        match self.detailed_layout_info() {
+            taffy::DetailedLayoutInfo::Grid(info) => Some(info),
+            _ => None,
+        }
+    }
+
+    pub fn set_grid_info(&mut self, info: taffy::DetailedGridInfo<Atom>) {
+        let info = taffy::DetailedLayoutInfo::Grid(Box::new(info));
+        self.update_rare(|rare| rare.detailed_layout_info = Some(info));
+    }
+
+    /// Data associated with display: list-item, if the element is a list item.
+    #[inline]
+    pub fn list_item_data(&self) -> Option<&ListItemLayout> {
+        self.rare.as_ref()?.list_item_data.as_deref()
+    }
+
+    pub fn set_list_item_data(&mut self, data: Option<Box<ListItemLayout>>) {
+        self.update_rare(|rare| rare.list_item_data = data);
+    }
+
+    /// The resolved 2D transform in device pixels, when the element has one.
+    #[inline]
+    pub fn transform(&self) -> Option<Affine> {
+        self.rare.as_ref()?.transform.as_deref().copied()
+    }
+
+    pub fn set_transform(&mut self, transform: Option<Affine>) {
+        self.update_rare(|rare| store_transform(&mut rare.transform, transform));
+    }
+
+    // Updates an absent box on a stack default, so clearing a field never allocates.
+    fn update_rare(&mut self, update: impl FnOnce(&mut ElementRare)) {
+        match self.rare.as_deref_mut() {
+            Some(rare) => {
+                update(rare);
+                if rare.is_empty() {
+                    self.rare = None;
+                }
+            }
+            None => {
+                let mut rare = ElementRare::default();
+                update(&mut rare);
+                if !rare.is_empty() {
+                    self.rare = Some(Box::new(rare));
+                }
+            }
+        }
+    }
+
     /// This element's layout output state, or a shared default if layout has
     /// never written to this element.
     #[inline]
@@ -183,6 +552,31 @@ impl ElementData {
     #[inline]
     pub fn layout_data_mut(&mut self) -> &mut LayoutData {
         self.layout_data.get_or_insert_default()
+    }
+
+    /// Parley text layout (elements with inline inner display mode only).
+    #[inline]
+    pub fn inline_layout_data(&self) -> Option<&TextLayout> {
+        self.layout_data.as_deref()?.inline_layout.as_deref()
+    }
+
+    #[inline]
+    pub fn inline_layout_data_mut(&mut self) -> Option<&mut TextLayout> {
+        self.layout_data.as_deref_mut()?.inline_layout.as_deref_mut()
+    }
+
+    /// Sets the text layout; clearing it never allocates the layout box.
+    pub fn set_inline_layout_data(&mut self, layout: Option<Box<TextLayout>>) {
+        match layout {
+            Some(layout) => self.layout_data_mut().inline_layout = Some(layout),
+            None => {
+                self.take_inline_layout_data();
+            }
+        }
+    }
+
+    pub fn take_inline_layout_data(&mut self) -> Option<Box<TextLayout>> {
+        self.layout_data.as_deref_mut()?.inline_layout.take()
     }
 }
 
@@ -212,13 +606,10 @@ pub struct DocumentData {
     /// Selector flags deposited here by `apply_selector_flags` when a
     /// `for_parent()` flag is applied while matching the root `<html>` element,
     /// whose parent node is the document.
-    pub selector_flags: Cell<ElementSelectorFlags>,
-    /// A clone of the document's shared style lock. Set when the owning
-    /// [`Node`](super::Node) is constructed.
-    pub guard: Option<SharedRwLock>,
+    pub selector_flags: SelectorFlagsCell,
     pub dirty_descendants: AtomicBool,
     pub damaged_descendants: AtomicBool,
-    pub element_state: ElementState,
+    pub element_state: ElementStateBits,
     pub has_snapshot: bool,
     pub snapshot_handled: AtomicBool,
     pub display_constructed_as: StyloDisplay,
@@ -233,7 +624,6 @@ impl std::fmt::Debug for DocumentData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DocumentData")
             .field("stylo_element_data", &self.stylo_element_data)
-            .field("guard", &self.guard)
             .field("dirty_descendants", &self.dirty_descendants)
             .field("damaged_descendants", &self.damaged_descendants)
             .field("element_state", &self.element_state)
@@ -250,11 +640,10 @@ impl DocumentData {
     pub fn new() -> Self {
         Self {
             stylo_element_data: Default::default(),
-            selector_flags: Cell::new(ElementSelectorFlags::empty()),
-            guard: None,
+            selector_flags: SelectorFlagsCell::default(),
             dirty_descendants: AtomicBool::new(true),
             damaged_descendants: AtomicBool::new(true),
-            element_state: ElementState::empty(),
+            element_state: ElementStateBits::default(),
             has_snapshot: false,
             snapshot_handled: AtomicBool::new(false),
             display_constructed_as: StyloDisplay::Block,
@@ -274,27 +663,24 @@ impl Clone for DocumentData {
     fn clone(&self) -> Self {
         // Runtime style/layout state is reset (the document node is not
         // meaningfully cloneable), matching `ElementData`'s clone semantics.
-        Self {
-            guard: self.guard.clone(),
-            ..Self::new()
-        }
+        Self::new()
     }
 }
 
 impl std::fmt::Debug for ElementData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ElementData")
-            .field("name", &self.name)
+            .field("name", &self.qual_name())
             .field("id", &self.id)
             .field("attrs", &self.attrs)
-            .field("is_focussable", &self.is_focussable)
-            .field("style_attribute", &self.style_attribute)
+            .field("is_focussable", &self.is_focussable())
+            .field("style_attribute", &self.style_attribute())
             .field("special_data", &self.special_data)
-            .field("background_images", &self.background_images)
-            .field("mask_images", &self.mask_images)
-            .field("inline_layout_data", &self.inline_layout_data)
-            .field("list_item_data", &self.list_item_data)
-            .field("template_contents", &self.template_contents)
+            .field("background_images", &self.background_images())
+            .field("mask_images", &self.mask_images())
+            .field("inline_layout_data", &self.inline_layout_data())
+            .field("list_item_data", &self.list_item_data())
+            .field("template_contents", &self.template_contents())
             .field("element_state", &self.element_state)
             .field("display_constructed_as", &self.display_constructed_as)
             .finish_non_exhaustive()
@@ -310,34 +696,37 @@ impl Clone for ElementData {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
+            bits: {
+                let mut bits = self.bits;
+                bits.set(ElementBits::HAS_SNAPSHOT, false);
+                bits
+            },
             id: self.id.clone(),
             attrs: self.attrs.clone(),
             classes: self.classes.clone(),
-            is_focussable: self.is_focussable,
-            style_attribute: self.style_attribute.clone(),
             special_data: self.special_data.clone(),
-            background_images: self.background_images.clone(),
-            mask_images: self.mask_images.clone(),
-            inline_layout_data: self.inline_layout_data.clone(),
-            list_item_data: self.list_item_data.clone(),
-            template_contents: self.template_contents,
-            shadow_root: None,
+            // Shadow roots and pseudo element nodes are never cloned.
+            rare: self.rare.as_deref().and_then(|rare| {
+                let clone = ElementRare {
+                    name_ext: rare.name_ext.clone(),
+                    template_contents: rare.template_contents,
+                    style_attribute: rare.style_attribute.clone(),
+                    background_images: rare.background_images.clone(),
+                    mask_images: rare.mask_images.clone(),
+                    ..ElementRare::default()
+                };
+                (!clone.is_empty()).then(|| Box::new(clone))
+            }),
 
             // Runtime state: reset to defaults.
             stylo_element_data: Default::default(),
-            selector_flags: Cell::new(ElementSelectorFlags::empty()),
-            guard: self.guard.clone(),
+            selector_flags: SelectorFlagsCell::default(),
             element_state: self.element_state,
-            has_snapshot: false,
             snapshot_handled: AtomicBool::new(false),
             dirty_descendants: AtomicBool::new(true),
             damaged_descendants: AtomicBool::new(true),
-            before: None,
-            after: None,
-            detailed_layout_info: taffy::DetailedLayoutInfo::None,
             display_constructed_as: StyloDisplay::Block,
             layout_data: None,
-            transform: None,
         }
     }
 }
@@ -360,8 +749,10 @@ pub enum SpecialElementType {
 /// Heterogeneous data that depends on the element's type.
 #[derive(Default)]
 pub enum SpecialElementData {
+    // Rare payloads wider than a pointer are boxed, keeping the enum (and every
+    // element) at a tag plus one 32-bit pointer.
     /// A sub-document such an \<iframe\> or \<web-view\> element
-    SubDocument(Box<dyn Document>),
+    SubDocument(Box<Box<dyn Document>>),
     /// A custom widget
     #[cfg(feature = "custom-widget")]
     CustomWidget(CustomWidgetData),
@@ -370,11 +761,11 @@ pub enum SpecialElementData {
     /// An \<img\> element's image data
     Image(Box<ImageData>),
     /// A \<canvas\> element's custom paint source
-    Canvas(CanvasData),
+    Canvas(Box<CanvasData>),
     /// Pre-computed table layout data
     TableRoot(Arc<TableContext>),
     /// Parley text editor (text inputs)
-    TextInput(TextInputData),
+    TextInput(Box<TextInputData>),
     /// Checkbox checked state
     CheckboxInput(bool),
     /// Live IDL value of an `<input type=range>` slider.
@@ -382,7 +773,7 @@ pub enum SpecialElementData {
     /// to place the thumb; JS updates it via the setInputText wasm
     /// entry (same IDL-vs-attribute decoupling as TextInput's
     /// value_override).
-    RangeInput(f64),
+    RangeInput(Box<f64>),
     /// Selected files
     #[cfg(feature = "file-input")]
     FileInput(FileData),
@@ -403,7 +794,7 @@ impl Clone for SpecialElementData {
             Self::TableRoot(data) => Self::TableRoot(data.clone()),
             Self::TextInput(data) => Self::TextInput(data.clone()),
             Self::CheckboxInput(data) => Self::CheckboxInput(*data),
-            Self::RangeInput(data) => Self::RangeInput(*data),
+            Self::RangeInput(data) => Self::RangeInput(data.clone()),
             #[cfg(feature = "file-input")]
             Self::FileInput(data) => Self::FileInput(data.clone()),
             Self::None => Self::None,
@@ -419,7 +810,7 @@ impl SpecialElementData {
 
 /// Split a `class` attribute into interned atoms. The single place that
 /// decides tokenisation, so the cached list can't drift from the attribute.
-pub fn parse_class_list(value: &str) -> Vec<Atom> {
+pub fn parse_class_list(value: &str) -> ThinVec<Atom> {
     value.split_ascii_whitespace().map(Atom::from).collect()
 }
 
@@ -437,36 +828,36 @@ impl ElementData {
             .map(|attr| parse_class_list(attr.value.as_ref()))
             .unwrap_or_default();
 
+        let QualName { prefix, ns, local } = name;
+        let name_ns = match prefix {
+            Some(_) => NameNs::Other,
+            None if ns == ns!(html) => NameNs::Html,
+            None if ns == ns!(svg) => NameNs::Svg,
+            None if ns == ns!(mathml) => NameNs::MathMl,
+            None if ns == ns!() => NameNs::Empty,
+            None => NameNs::Other,
+        };
         let mut data = ElementData {
-            name,
+            name: ElementName { local },
+            bits: ElementBits::new(name_ns),
             id: id_attr_atom,
             classes: class_atoms,
             attrs: Attributes::new(attrs),
-            is_focussable: false,
-            style_attribute: Default::default(),
-            inline_layout_data: None,
-            list_item_data: None,
             special_data: SpecialElementData::None,
-            template_contents: None,
-            shadow_root: None,
-            background_images: ThinVec::new(),
-            mask_images: ThinVec::new(),
+            rare: None,
 
             stylo_element_data: Default::default(),
-            selector_flags: Cell::new(ElementSelectorFlags::empty()),
-            guard: None,
-            element_state: ElementState::empty(),
-            has_snapshot: false,
+            selector_flags: SelectorFlagsCell::default(),
+            element_state: ElementStateBits::default(),
             snapshot_handled: AtomicBool::new(false),
             dirty_descendants: AtomicBool::new(true),
             damaged_descendants: AtomicBool::new(true),
-            before: None,
-            after: None,
-            detailed_layout_info: taffy::DetailedLayoutInfo::None,
             display_constructed_as: StyloDisplay::Block,
             layout_data: None,
-            transform: None,
         };
+        if name_ns == NameNs::Other {
+            data.update_rare(|rare| rare.name_ext = Some(Box::new((prefix, ns))));
+        }
         data.flush_is_focussable();
         data.flush_link_state();
 
@@ -575,14 +966,14 @@ impl ElementData {
 
     pub fn sub_doc_data(&self) -> Option<&dyn Document> {
         match &self.special_data {
-            SpecialElementData::SubDocument(data) => Some(data.as_ref()),
+            SpecialElementData::SubDocument(data) => Some(data.as_ref().as_ref()),
             _ => None,
         }
     }
 
     pub fn sub_doc_data_mut(&mut self) -> Option<&mut dyn Document> {
         match &mut self.special_data {
-            SpecialElementData::SubDocument(data) => Some(data.as_mut()),
+            SpecialElementData::SubDocument(data) => Some(data.as_mut().as_mut()),
             _ => None,
         }
     }
@@ -646,7 +1037,7 @@ impl ElementData {
     /// special data has been initialized (layout construct pass).
     pub fn range_input_value(&self) -> Option<f64> {
         match self.special_data {
-            SpecialElementData::RangeInput(value) => Some(value),
+            SpecialElementData::RangeInput(ref value) => Some(**value),
             _ => None,
         }
     }
@@ -689,7 +1080,7 @@ impl ElementData {
         let tabindex: Option<i32> = self.attr_parsed(local_name!("tabindex"));
         let contains_sub_document: bool = self.sub_doc_data().is_some();
 
-        self.is_focussable = contains_sub_document
+        let is_focussable = contains_sub_document
             || (!disabled
                 && match tabindex {
                     Some(index) => index >= 0,
@@ -715,11 +1106,12 @@ impl ElementData {
                             DEFAULT_FOCUSSABLE_ELEMENTS.contains(&self.name.local)
                         }
                     }
-                })
+                });
+        self.bits.set(ElementBits::FOCUSSABLE, is_focussable);
     }
 
     pub fn flush_style_attribute(&mut self, guard: &SharedRwLock, url_extra_data: &UrlExtraData) {
-        self.style_attribute = self.attr(local_name!("style")).map(|style_str| {
+        let block = self.attr(local_name!("style")).map(|style_str| {
             ServoArc::new(guard.wrap(parse_style_attribute(
                 style_str,
                 url_extra_data,
@@ -728,6 +1120,7 @@ impl ElementData {
                 CssRuleType::Style,
             )))
         });
+        self.set_style_attribute(block);
     }
 
     pub fn set_style_property(
@@ -781,7 +1174,7 @@ impl ElementData {
         &mut self,
         guard: &SharedRwLock,
     ) -> &ServoArc<Locked<PropertyDeclarationBlock>> {
-        let cloned = match &self.style_attribute {
+        let cloned = match self.style_attribute() {
             None => Some(PropertyDeclarationBlock::new()),
             Some(arc) => {
                 let read = guard.read();
@@ -793,9 +1186,9 @@ impl ElementData {
             }
         };
         if let Some(block) = cloned {
-            self.style_attribute = Some(ServoArc::new(guard.wrap(block)));
+            self.set_style_attribute(Some(ServoArc::new(guard.wrap(block))));
         }
-        self.style_attribute.as_ref().unwrap()
+        self.style_attribute().expect("style attribute was just set")
     }
 
     pub fn remove_style_property(
@@ -821,7 +1214,7 @@ impl ElementData {
             return false;
         };
 
-        if self.style_attribute.is_none() {
+        if self.style_attribute().is_none() {
             return false;
         }
         let style = self.mutable_style_attribute(guard);
@@ -836,7 +1229,7 @@ impl ElementData {
     }
 
     pub fn set_sub_document(&mut self, sub_document: Box<dyn Document>) {
-        self.special_data = SpecialElementData::SubDocument(sub_document);
+        self.special_data = SpecialElementData::SubDocument(Box::new(sub_document));
     }
 
     pub fn remove_sub_document(&mut self) {
@@ -860,7 +1253,7 @@ impl ElementData {
     }
 
     pub fn take_inline_layout(&mut self) -> Option<Box<TextLayout>> {
-        std::mem::take(&mut self.inline_layout_data)
+        self.take_inline_layout_data()
     }
 
     pub(crate) fn is_button_input(&self) -> bool {
@@ -1182,5 +1575,134 @@ mod tests {
         let bubbled = data.scroll_by(-50.0, 1000.0, 100.0);
         assert_eq!(data.scroll_offset, 0.0);
         assert_eq!(bubbled, -50.0);
+    }
+}
+
+#[cfg(test)]
+mod rare_tests {
+    use super::ElementData;
+    use blitz_traits::node_id::NodeId;
+    use markup5ever::{QualName, local_name, ns};
+
+    #[test]
+    fn rare_links_round_trip_and_clone_drops_the_shadow_root() {
+        let name = QualName::new(None, ns!(html), local_name!("template"));
+        let mut el = ElementData::new(name, Vec::new());
+        let contents = NodeId::from_u64(1 << 32 | 5);
+        let shadow = NodeId::from_u64(3 << 32 | 9);
+        el.set_template_contents(None);
+        assert!(el.rare.is_none());
+        el.set_template_contents(Some(contents));
+        el.set_shadow_root(Some(shadow));
+        assert_eq!((el.template_contents(), el.shadow_root()), (Some(contents), Some(shadow)));
+        let clone = el.clone();
+        assert_eq!((clone.template_contents(), clone.shadow_root()), (Some(contents), None));
+        el.set_template_contents(None);
+        el.set_shadow_root(None);
+        assert!(el.rare.is_none());
+    }
+
+    #[test]
+    fn element_names_round_trip() {
+        let names = [
+            QualName::new(None, ns!(html), local_name!("div")),
+            QualName::new(None, ns!(svg), local_name!("svg")),
+            QualName::new(None, ns!(mathml), local_name!("math")),
+            QualName::new(None, ns!(), local_name!("div")),
+            QualName::new(None, "urn:x".into(), "item".into()),
+            QualName::new(Some("x".into()), ns!(svg), local_name!("rect")),
+        ];
+        for name in names {
+            let el = ElementData::new(name.clone(), Vec::new());
+            assert_eq!(el.qual_name(), name);
+            assert_eq!(el.clone().qual_name(), name);
+            assert_eq!(el.expanded_name(), name.expanded());
+            // Only an uncommon namespace or a prefix needs the rare box.
+            let common = name.prefix.is_none() && !name.ns.starts_with("urn:");
+            assert_eq!(el.rare.is_none(), common, "{name:?}");
+            let mut el = el;
+            el.set_before(Some(NodeId::from_u64(2 << 32 | 7)));
+            el.set_before(None);
+            assert_eq!(el.qual_name(), name, "clearing a rare field keeps the name");
+        }
+    }
+
+    #[test]
+    fn packed_flags_and_states_round_trip() {
+        use selectors::matching::ElementSelectorFlags;
+        use style_dom::ElementState;
+
+        let href = || {
+            vec![super::Attribute::new(
+                QualName::new(None, ns!(), local_name!("href")),
+                "#".into(),
+            )]
+        };
+        let html = QualName::new(None, ns!(html), local_name!("a"));
+        let html_el = ElementData::new(html.clone(), href());
+        assert!(html_el.is_focussable());
+        assert_eq!(html_el.qual_name(), html);
+
+        let name = QualName::new(Some("x".into()), ns!(svg), local_name!("a"));
+        let mut el = ElementData::new(name.clone(), href());
+        assert!(el.is_focussable());
+        el.set_has_snapshot(true);
+        assert!(el.has_snapshot() && el.is_focussable());
+        assert_eq!(el.qual_name(), name);
+        let clone = el.clone();
+        assert!(!clone.has_snapshot() && clone.is_focussable());
+        assert_eq!(clone.qual_name(), name);
+
+        let state = ElementState::FOCUS | ElementState::FOCUSRING | ElementState::UNVISITED;
+        el.element_state.insert(state);
+        el.element_state.set(ElementState::HOVER, true);
+        el.element_state.remove(ElementState::FOCUS);
+        assert_eq!(
+            el.element_state.get(),
+            ElementState::FOCUSRING | ElementState::UNVISITED | ElementState::HOVER
+        );
+        let flags = ElementSelectorFlags::all();
+        el.selector_flags.set(flags);
+        assert_eq!(el.selector_flags.get().bits(), flags.bits());
+    }
+
+    #[test]
+    #[should_panic(expected = "element states above bit 31")]
+    fn storing_a_high_element_state_panics() {
+        let name = QualName::new(None, ns!(html), local_name!("div"));
+        let mut el = ElementData::new(name, Vec::new());
+        el.element_state.insert(style_dom::ElementState::PICTURE_IN_PICTURE);
+    }
+
+    #[test]
+    fn pseudo_links_round_trip_and_are_not_cloned() {
+        let name = QualName::new(None, ns!(html), local_name!("div"));
+        let mut el = ElementData::new(name, Vec::new());
+        let before = NodeId::from_u64(2 << 32 | 7);
+        let after = NodeId::from_u64(4 << 32 | 8);
+        el.set_before(Some(before));
+        el.set_after(Some(after));
+        assert_eq!((el.before(), el.after()), (Some(before), Some(after)));
+        let clone = el.clone();
+        assert_eq!((clone.before(), clone.after()), (None, None));
+        assert!(clone.rare.is_none());
+        el.set_before(None);
+        assert_eq!((el.before(), el.after()), (None, Some(after)));
+        el.set_after(None);
+        assert!(el.rare.is_none());
+    }
+
+    #[test]
+    fn image_layers_live_in_the_rare_box_until_cleared() {
+        let name = QualName::new(None, ns!(html), local_name!("div"));
+        let mut el = ElementData::new(name, Vec::new());
+        el.clear_image_layers(false);
+        assert!(el.rare.is_none());
+        el.image_layers_storage_mut(true).resize(2, None);
+        assert_eq!((el.background_images().len(), el.mask_images().len()), (0, 2));
+        assert_eq!(el.clone().mask_images().len(), 2);
+        el.clear_image_layers(true);
+        assert!(el.rare.is_none());
+        assert!(el.grid_info().is_none());
     }
 }

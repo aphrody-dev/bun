@@ -153,7 +153,7 @@ impl StackingContext {
             let position = child.position(tree, sc_root_id);
             let location = node.final_layout().location;
             let mut overflow = *node.scrollable_overflow();
-            if let Some(transform) = node.transform().as_deref() {
+            if let Some(transform) = node.transform() {
                 overflow = transform.transform_rect_bbox(overflow);
             }
             let left = position.x + location.x;
@@ -242,7 +242,7 @@ impl BaseDocument {
             // parent (z-indexed flex/grid items), which does not damage the
             // node itself, so the role the caller resolved must match the one
             // this node was last built with.
-            let role_unchanged = node.stacking_context.is_some() == stacking_context.is_none();
+            let role_unchanged = node.stacking_context().is_some() == stacking_context.is_none();
             let clean = role_unchanged
                 && !node
                     .damage()
@@ -251,7 +251,9 @@ impl BaseDocument {
                 && !node.is_anonymous();
             if clean {
                 if let Some(stacking_context) = stacking_context {
-                    stacking_context.extend(node.sc_contribution_cache.borrow().iter().cloned());
+                    if let Some(cache) = node.sc_contribution_cache() {
+                        stacking_context.extend(cache.iter().cloned());
+                    }
                 }
                 return;
             }
@@ -271,17 +273,16 @@ impl BaseDocument {
             let node = &mut self.nodes[node_id];
             let mut entries = match stacking_context {
                 None => node
-                    .stacking_context
-                    .take()
+                    .take_stacking_context()
                     .map(|sc| sc.children)
                     .unwrap_or_default(),
-                Some(_) => std::mem::take(&mut *node.sc_contribution_cache.borrow_mut()),
+                Some(_) => node.take_sc_contribution_cache(),
             };
             entries.clear();
             entries
         };
 
-        self.nodes[node_id].rehomed_paint_children.borrow_mut().clear();
+        self.nodes[node_id].clear_rehomed_paint_children();
         let children = self.nodes[node_id].layout_children.borrow_mut().take();
         if let Some(mut children) = children {
             // Anonymous blocks and pseudo-elements can be removed from the
@@ -300,8 +301,7 @@ impl BaseDocument {
             // its layout parent neither visits nor lists it.
             let owned_here = |doc: &Self, child_id: NodeId| -> bool {
                 doc.nodes[child_id]
-                    .oof_containing_block
-                    .get()
+                    .oof_containing_block()
                     .is_none_or(|cb| cb == node_id)
             };
             // Boxes hoisted to this node from further down the tree, keyed by
@@ -312,9 +312,11 @@ impl BaseDocument {
             // Z-index:auto abspos boxes are re-homed to their flow
             // parent instead (see `Node::paint_parent_override`), which visits
             // them itself.
-            let mut hoisted_past_parent: Vec<(usize, NodeId)> = self.nodes[node_id]
-                .hoisted_children
-                .borrow()
+            let hoisted_children = self.nodes[node_id]
+                .hoisted_children()
+                .map(|children| children.to_vec())
+                .unwrap_or_default();
+            let mut hoisted_past_parent: Vec<(usize, NodeId)> = hoisted_children
                 .iter()
                 .copied()
                 .filter(|&id| {
@@ -347,10 +349,9 @@ impl BaseDocument {
                     // block still paints here, in tree order among this node's
                     // children (CSS 2.1 Appendix E step 8); see
                     // `Node::paint_parent_override`.
-                    self.nodes[child_id].paint_parent_override.set(Some(node_id));
+                    self.nodes[child_id].set_paint_parent_override(Some(node_id));
                     self.nodes[node_id]
-                        .rehomed_paint_children
-                        .borrow_mut()
+                        .rehomed_paint_children_mut()
                         .push(child_id);
                     self.rehomed_hosts.push(node_id);
                     let is_sc_root = self.nodes[child_id].is_stacking_context_root(false);
@@ -363,7 +364,7 @@ impl BaseDocument {
                     );
                     paint_children.push(child_id);
                 } else if owned_here(self, child_id) {
-                    self.nodes[child_id].paint_parent_override.set(None);
+                    self.nodes[child_id].set_paint_parent_override(None);
                     let is_sc_root = self.nodes[child_id].is_stacking_context_root(is_flex_or_grid);
                     self.build_paint_tree_impl(
                         child_id,
@@ -405,12 +406,12 @@ impl BaseDocument {
 
         let node = &mut self.nodes[node_id];
         if let Some(stacking_context) = stacking_context {
-            node.stacking_context = None;
+            node.set_stacking_context(None);
             stacking_context.extend(entries.iter().cloned());
-            *node.sc_contribution_cache.borrow_mut() = entries;
+            node.set_sc_contribution_cache(entries);
         } else {
-            node.sc_contribution_cache.borrow_mut().clear();
-            node.stacking_context = Some(Box::new(StackingContext::from_children(entries)));
+            node.clear_sc_contribution_cache();
+            node.set_stacking_context(Some(Box::new(StackingContext::from_children(entries))));
         }
     }
 
@@ -431,7 +432,7 @@ impl BaseDocument {
         let Some(node) = self.nodes.get(node_id) else {
             return false;
         };
-        let Some(cb) = node.oof_containing_block.get() else {
+        let Some(cb) = node.oof_containing_block() else {
             return false;
         };
         let Some(flow_parent) = node.layout_parent.get() else {
@@ -455,6 +456,7 @@ impl BaseDocument {
         let next = |id: NodeId| {
             let node = self.nodes.get(id)?;
             node.parent
+                .get()
                 .or_else(|| node.shadow_root_data().map(|data| data.host))
         };
         let mut cur = next(flow_parent);
@@ -482,19 +484,17 @@ impl BaseDocument {
     /// down to each flow parent whose decision flipped, so the walk below
     /// rebuilds it.
     fn damage_stale_rehome_hosts(&mut self, node_id: NodeId) {
-        let hoisted: ThinVec<NodeId> = self.nodes[node_id]
-            .hoisted_children
-            .borrow()
-            .iter()
-            .copied()
-            .collect();
+        let hoisted = self.nodes[node_id]
+            .hoisted_children()
+            .map(|children| children.to_vec())
+            .unwrap_or_default();
         for id in hoisted {
             let Some(child) = self.nodes.get(id) else { continue };
             let Some(flow_parent) = child.layout_parent.get() else { continue };
             if flow_parent == node_id {
                 continue;
             }
-            let rehomed = child.paint_parent_override.get() == Some(flow_parent);
+            let rehomed = child.paint_parent_override() == Some(flow_parent);
             if self.paints_rehomed(id) == rehomed {
                 continue;
             }
@@ -533,7 +533,7 @@ impl BaseDocument {
         paint_children: &mut ThinVec<NodeId>,
         entries: &mut ThinVec<HoistedPaintChild>,
     ) {
-        self.nodes[child_id].paint_parent_override.set(None);
+        self.nodes[child_id].set_paint_parent_override(None);
         self.build_paint_tree_impl(
             child_id,
             match self.nodes[child_id].is_stacking_context_root(false) {

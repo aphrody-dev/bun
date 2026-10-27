@@ -13,15 +13,14 @@ macro_rules! iter_flat_children {
             .attached_shadow_root_id()
             .unwrap_or($node_id);
         let use_assigned = $nodes[src]
-            .assigned_nodes
-            .as_ref()
+            .assigned_nodes()
             .is_some_and(|a| !a.is_empty());
         if use_assigned {
-            let assigned = $nodes[src].assigned_nodes.take().unwrap();
+            let assigned = $nodes[src].take_assigned_nodes().unwrap();
             for child_id in assigned.iter().copied() {
                 $cb(child_id)
             }
-            $nodes[src].assigned_nodes = Some(assigned);
+            $nodes[src].set_assigned_nodes(Some(assigned));
         } else {
             let children = core::mem::take(&mut $nodes[src].children);
             for child_id in children.iter().copied() {
@@ -101,7 +100,7 @@ impl Iterator for AncestorTraverser<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let current_node = self.doc.get_node(self.current)?;
-        self.current = current_node.parent?;
+        self.current = current_node.parent.get()?;
         Some(self.current)
     }
 }
@@ -217,15 +216,14 @@ impl BaseDocument {
             .attached_shadow_root_id()
             .unwrap_or(node_id);
         let use_assigned = self.nodes[src]
-            .assigned_nodes
-            .as_ref()
+            .assigned_nodes()
             .is_some_and(|a| !a.is_empty());
         if use_assigned {
-            let assigned = self.nodes[src].assigned_nodes.take().unwrap();
+            let assigned = self.nodes[src].take_assigned_nodes().unwrap();
             for child_id in assigned.iter().cloned() {
                 cb(child_id, self);
             }
-            self.nodes[src].assigned_nodes = Some(assigned);
+            self.nodes[src].set_assigned_nodes(Some(assigned));
         } else {
             let children = std::mem::take(&mut self.nodes[src].children);
             for child_id in children.iter().cloned() {
@@ -359,7 +357,7 @@ impl BaseDocument {
                 break;
             }
             ancestors.push(id);
-            maybe_id = node.parent;
+            maybe_id = node.parent.get();
         }
         ancestors.reverse();
         ancestors
@@ -445,7 +443,7 @@ impl BaseDocument {
         let mut current = Some(node_id);
         while let Some(id) = current {
             ancestors.push(id);
-            current = self.nodes[id].parent;
+            current = self.nodes[id].parent.get();
         }
         ancestors.reverse();
         ancestors
@@ -560,7 +558,7 @@ impl BaseDocument {
     fn resolve_for_traversal(&self, node_id: NodeId) -> (NodeId, Option<NodeId>) {
         let node = &self.nodes[node_id];
         if node.is_anonymous() {
-            (node.parent.unwrap_or(node_id), Some(node_id))
+            (node.parent.get().unwrap_or(node_id), Some(node_id))
         } else {
             (node_id, None)
         }
@@ -667,7 +665,7 @@ impl BaseDocument {
     /// Check if `ancestor_id` is an ancestor of `descendant_id`
     fn is_ancestor_of(&self, ancestor_id: NodeId, descendant_id: NodeId) -> bool {
         let mut current = descendant_id;
-        while let Some(parent) = self.nodes[current].parent {
+        while let Some(parent) = self.nodes[current].parent.get() {
             if parent == ancestor_id {
                 return true;
             }

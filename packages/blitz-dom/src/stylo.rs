@@ -529,7 +529,7 @@ impl<'a> TNode for BlitzNode<'a> {
     type ConcreteShadowRoot = BlitzNode<'a>;
 
     fn parent_node(&self) -> Option<Self> {
-        self.parent.map(|id| self.with(id))
+        self.parent.get().map(|id| self.with(id))
     }
 
     fn first_child(&self) -> Option<Self> {
@@ -551,7 +551,7 @@ impl<'a> TNode for BlitzNode<'a> {
     fn owner_doc(&self) -> Self::ConcreteDocument {
         // Walk up the (layout-)parent chain to the root Document node.
         let mut node = *self;
-        while let Some(parent_id) = node.parent {
+        while let Some(parent_id) = node.parent.get() {
             node = node.with(parent_id);
         }
         node
@@ -564,7 +564,7 @@ impl<'a> TNode for BlitzNode<'a> {
     // Flat-tree parent: assigned nodes hang off their slot, shadow
     // top-levels off the host (the shadow-root node is transparent).
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        if let Some(slot_id) = self.assigned_slot {
+        if let Some(slot_id) = Node::assigned_slot(self) {
             return Some(self.with(slot_id));
         }
         let parent = self.parent_node()?;
@@ -628,15 +628,14 @@ impl selectors::Element for BlitzNode<'_> {
 
     fn parent_node_is_shadow_root(&self) -> bool {
         self.parent
+            .get()
             .is_some_and(|id| self.with(id).is_shadow_root())
     }
 
     // ::slotted() matching walks this edge (selectors crate default
     // is None, which disables slotted rules entirely).
     fn assigned_slot(&self) -> Option<Self> {
-        // Field access (no parens) reads Node's stored assignment,
-        // dodging the method-name collision with this override.
-        self.assigned_slot.map(|id| self.with(id))
+        Node::assigned_slot(self).map(|id| self.with(id))
     }
 
     fn containing_shadow_host(&self) -> Option<Self> {
@@ -687,7 +686,7 @@ impl selectors::Element for BlitzNode<'_> {
     }
 
     fn has_namespace(&self, ns: &Namespace) -> bool {
-        self.element_data().expect("Not an element").name.ns == *ns
+        self.element_data().expect("Not an element").namespace() == ns
     }
 
     fn is_same_type(&self, other: &Self) -> bool {
@@ -707,7 +706,7 @@ impl selectors::Element for BlitzNode<'_> {
             attr.name.local == local_name.0
                 && match ns {
                     NamespaceConstraint::Any => true,
-                    NamespaceConstraint::Specific(ns) => attr.name.ns == ns.0,
+                    NamespaceConstraint::Specific(ns) => *attr.namespace() == ns.0,
                 }
                 && operation.eval_str(&attr.value)
         })
@@ -1017,13 +1016,12 @@ impl<'a> TElement for BlitzNode<'a> {
     fn style_attribute(&self) -> Option<ArcBorrow<'_, Locked<PropertyDeclarationBlock>>> {
         self.element_data()
             .expect("Not an element")
-            .style_attribute
-            .as_ref()
+            .style_attribute()
             .map(|f| f.borrow_arc())
     }
 
     fn state(&self) -> ElementState {
-        *self.element_state()
+        self.element_state().get()
     }
 
     fn has_part_attr(&self) -> bool {
@@ -1197,7 +1195,7 @@ impl<'a> TElement for BlitzNode<'a> {
         // TODO: case-insensitive matching for HTML-ns attrs
         self.attrs()?
             .iter()
-            .find(|a| a.name.local == attr.0 && a.name.ns == ns.0)
+            .find(|a| a.name.local == attr.0 && *a.namespace() == ns.0)
             .map(|a| a.value.clone())
     }
 
@@ -1372,7 +1370,7 @@ impl<'a> TElement for BlitzNode<'a> {
             });
 
         // https://html.spec.whatwg.org/multipage/#the-lang-and-xml:lang-attributes
-        let accepts_lang = elem.name.ns == ns!(html) || elem.name.ns == ns!(svg);
+        let accepts_lang = *elem.namespace() == ns!(html) || *elem.namespace() == ns!(svg);
         let mut lang = None;
 
         for attr in elem.attrs() {
@@ -1380,9 +1378,9 @@ impl<'a> TElement for BlitzNode<'a> {
             let value = attr.value.as_str();
 
             if *name == local_name!("lang") {
-                if attr.name.ns == ns!(xml) {
+                if *attr.namespace() == ns!(xml) {
                     lang = Some(value);
-                } else if attr.name.ns == ns!() && accepts_lang {
+                } else if *attr.namespace() == ns!() && accepts_lang {
                     lang = lang.or(Some(value));
                 }
             }
@@ -1568,7 +1566,8 @@ impl<'a> TElement for BlitzNode<'a> {
             // Keeps attr-styled svg text correct now that the serializer
             // stamps computed font-size onto text elements: the attr feeds
             // the cascade at pres-hint level, so the computed value has it.
-            if *name == local_name!("font-size") && *elem.name.ns == *"http://www.w3.org/2000/svg"
+            if *name == local_name!("font-size")
+                && **elem.namespace() == *"http://www.w3.org/2000/svg"
             {
                 if let Some(size) = parse_svg_size_attr(value) {
                     use style::values::specified::FontSize;
@@ -1601,7 +1600,7 @@ impl<'a> TElement for BlitzNode<'a> {
     }
 
     fn namespace(&self) -> &Namespace {
-        &self.element_data().expect("Not an element").name.ns
+        self.element_data().expect("Not an element").namespace()
     }
 
     fn query_container_size(
@@ -1938,8 +1937,8 @@ fn needs_style_image_flush(node: &Node, style: &ComputedValues) -> bool {
     node.data.downcast_element().is_some_and(|el| {
         out_of_sync(
             &style.get_background().background_image.0,
-            &el.background_images,
-        ) || out_of_sync(&style.get_svg().mask_image.0, &el.mask_images)
+            el.background_images(),
+        ) || out_of_sync(&style.get_svg().mask_image.0, el.mask_images())
     })
 }
 

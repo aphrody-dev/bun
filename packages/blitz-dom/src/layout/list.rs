@@ -36,14 +36,14 @@ pub(super) fn collect_list_item_children(
             .unwrap_or((*index + 1) as i32);
         if let Some(layout) = node_list_item_child(doc, child, value) {
             let node = &mut doc.nodes[child];
-            node.element_data_mut().unwrap().list_item_data = Some(Box::new(layout));
+            node.element_data_mut().unwrap().set_list_item_data(Some(Box::new(layout)));
             *index += 1;
             collect_list_item_children(doc, index, reversed, child);
         } else {
             // Unset marker in case it was previously set
             let node = &mut doc.nodes[child];
             if let Some(element_data) = node.element_data_mut() {
-                element_data.list_item_data = None;
+                element_data.set_list_item_data(None);
             }
         }
     }

@@ -758,36 +758,38 @@ impl LayoutContainingBlock for LayoutPassState<'_> {
 
     fn clear_hoisted_children(&mut self, node_id: NodeId) {
         let containing_block = dom_node_id(node_id);
-        let mut hoisted = self.node_from_id(node_id).hoisted_children.borrow_mut();
+        // Taking rather than clearing in place leaves boxes without hoisted children
+        // without rare storage; layout clears every box it visits.
+        let hoisted = self.node_from_id(node_id).take_hoisted_children();
         for &hoisted_id in hoisted.iter() {
             // A box which has since been claimed by another containing block
             // must keep pointing at that one.
             if let Some(node) = self.nodes.get(hoisted_id) {
-                if node.oof_containing_block.get() == Some(containing_block) {
-                    node.oof_containing_block.set(None);
+                if node.oof_containing_block() == Some(containing_block) {
+                    node.set_oof_containing_block(None);
                 }
             }
         }
-        hoisted.clear();
     }
 
     fn add_hoisted_children(&mut self, node_id: NodeId, hoisted: &[NodeId]) {
+        if hoisted.is_empty() {
+            return;
+        }
         let containing_block = dom_node_id(node_id);
         let node = self.node_from_id(node_id);
-        node.hoisted_children
-            .borrow_mut()
+        node.hoisted_children_mut()
             .extend(hoisted.iter().copied().map(dom_node_id));
         for &hoisted_id in hoisted {
             self.node_from_id(hoisted_id)
-                .oof_containing_block
-                .set(Some(containing_block));
+                .set_oof_containing_block(Some(containing_block));
         }
     }
 
     fn get_detailed_layout_info(&self, node_id: NodeId) -> &DetailedLayoutInfo<Atom> {
         self.node_from_id(node_id)
             .element_data()
-            .map(|element| &element.detailed_layout_info)
+            .map(|element| element.detailed_layout_info())
             .unwrap_or(&DetailedLayoutInfo::None)
     }
 }
@@ -802,7 +804,7 @@ impl taffy::CacheTree for LayoutPassState<'_> {
         let node = self.node_from_id_mut(node_id);
         // A cached container never re-registers its floats into
         // the BFC, so later floats see empty bands. Re-run these.
-        if node.placed_floats.get() {
+        if node.placed_floats() {
             return None;
         }
         node.try_layout_data_mut()?.cache.get(inputs)
@@ -981,7 +983,7 @@ impl taffy::LayoutGridContainer for LayoutPassState<'_> {
     ) {
         let node = self.node_from_id_mut(node_id);
         if let Some(element) = node.element_data_mut() {
-            element.detailed_layout_info = DetailedLayoutInfo::Grid(Box::new(detailed_grid_info));
+            element.set_grid_info(detailed_grid_info);
         }
     }
 }
@@ -1004,11 +1006,17 @@ impl RoundTree for LayoutPassState<'_> {
     }
 
     fn hoisted_child_count(&self, node_id: NodeId) -> usize {
-        self.node_from_id(node_id).hoisted_children.borrow().len()
+        self.node_from_id(node_id)
+            .hoisted_children()
+            .map_or(0, |children| children.len())
     }
 
     fn get_hoisted_child_id(&self, node_id: NodeId, index: usize) -> NodeId {
-        taffy_node_id(self.node_from_id(node_id).hoisted_children.borrow()[index])
+        let children = self
+            .node_from_id(node_id)
+            .hoisted_children()
+            .expect("Taffy requested a hoisted child from an empty list");
+        taffy_node_id(children[index])
     }
 
     fn round_grid(&self) -> (f32, f32) {

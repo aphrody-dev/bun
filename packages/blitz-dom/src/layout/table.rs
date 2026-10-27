@@ -508,6 +508,9 @@ pub(crate) fn build_table_context(
         };
     }
 
+    // Doubling growth leaves slack that otherwise lives until paint.
+    cells.shrink_to_fit();
+    rows.shrink_to_fit();
     let layout_children = cells
         .iter()
         .map(|cell| cell.node_id)
