@@ -20,7 +20,7 @@ use crate::text::DrawTextContext;
 use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
 use anyrender::{PaintScene, Scene, ScenePart};
 use blitz_dom::node::{
-    ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
+    ListItemLayout, Marker, NodeData, RasterImageData, TextInputData,
     TextNodeData,
 };
 use blitz_dom::{BaseDocument, ElementData, Node, NodeId, local_name};
@@ -1183,11 +1183,11 @@ impl ElementCx<'_, '_> {
     }
 
     fn draw_marker(&self, scene: &mut impl PaintScene, pos: Point) {
-        if let Some(ListItemLayout {
-            marker,
-            position: ListItemLayoutPosition::Outside(layout),
-        }) = self.list_item
+        if let Some(list_item) = self.list_item
+            && let Some(layout) =
+                list_item.outside_marker_layout(self.context.dom.tree(), self.node.id)
         {
+            let marker = &list_item.marker;
             // Right align and pad the bullet when rendering outside
             let x_padding = match marker {
                 Marker::Char(_) => 8.0,
