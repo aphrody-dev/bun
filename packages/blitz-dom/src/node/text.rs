@@ -512,15 +512,25 @@ impl TextLayout {
     }
 }
 
+/// Lends the contexts that rebuild text outside a layout pass, which has only the tree.
+pub(crate) fn with_rebuild_contexts<R>(
+    nodes: &crate::NodeTree,
+    f: impl FnOnce(&mut LayoutContext<TextBrush>, &mut FontContext) -> R,
+) -> R {
+    REBUILD_LAYOUT_CTX.with(|layout_ctx| {
+        let mut font_ctx = nodes.inline_rebuild.font_ctx.lock().unwrap();
+        f(&mut layout_ctx.borrow_mut(), &mut font_ctx)
+    })
+}
+
 fn rebuild_evicted_layout(nodes: &crate::NodeTree, evicted: &EvictedLayout) -> Box<Built> {
     REBUILD_COUNT.with(|count| count.set(count.get() + 1));
     let mut scratch = TextLayout::unfilled();
-    REBUILD_LAYOUT_CTX.with(|layout_ctx| {
-        let mut font_ctx = nodes.inline_rebuild.font_ctx.lock().unwrap();
+    with_rebuild_contexts(nodes, |layout_ctx, font_ctx| {
         crate::layout::construct::build_inline_layout_into(
             nodes,
-            &mut layout_ctx.borrow_mut(),
-            &mut font_ctx,
+            layout_ctx,
+            font_ctx,
             &mut scratch,
             evicted.scale,
             evicted.node_id,

@@ -31,7 +31,7 @@ use super::{Attribute, Attributes, OptNodeId};
 use blitz_traits::node_id::NodeId;
 use crate::Document;
 use crate::layout::table::TableContext;
-use crate::node::{TextBrush, TextInputData, TextLayout};
+use crate::node::{TextInputData, TextLayout};
 
 #[cfg(feature = "custom-widget")]
 use super::custom_widget::CustomWidgetData;
@@ -1452,7 +1452,10 @@ pub enum Marker {
 #[derive(Clone)]
 pub enum ListItemLayoutPosition {
     Inside,
-    Outside(Box<parley::Layout<TextBrush>>),
+    /// A separate box shaped at `scale` when painted, by
+    /// [`ListItemLayout::outside_marker_layout`]: a page holds many list items, and a
+    /// kept layout costs about a kilobyte each.
+    Outside { scale: f32 },
 }
 
 impl std::fmt::Debug for ListItemLayout {
