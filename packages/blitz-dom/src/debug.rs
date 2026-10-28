@@ -40,20 +40,17 @@ impl BaseDocument {
                 .unwrap()
                 .inline_layout_data()
                 .unwrap();
+            let layout = inline_layout.layout(&self.nodes);
 
-            println!(
-                "Size: {}x{}",
-                inline_layout.layout.width(),
-                inline_layout.layout.height()
-            );
-            println!("Text content: {:?}", inline_layout.text);
+            println!("Size: {}x{}", layout.width(), layout.height());
+            println!("Text content: {:?}", inline_layout.text(&self.nodes));
             println!("Inline Boxes:");
-            for ibox in inline_layout.layout.inline_boxes() {
+            for ibox in layout.inline_boxes() {
                 print!("(id: {}) ", ibox.id);
             }
             println!();
             println!("Lines:");
-            for (i, line) in inline_layout.layout.lines().enumerate() {
+            for (i, line) in layout.lines().enumerate() {
                 let metrics = line.metrics();
                 let x = metrics.inline_min_coord;
                 let y = metrics.block_min_coord;

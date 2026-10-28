@@ -50,6 +50,9 @@ pub struct NodeTree {
     slot_versions: Vec<u32>,
     /// The owning document's shared style lock, reached by nodes through their tree pointer.
     pub(crate) guard: style::shared_lock::SharedRwLock,
+    /// What every evicted inline root rebuilds with, kept once here rather
+    /// than in each root's eviction state.
+    pub(crate) inline_rebuild: crate::node::InlineRebuild,
 }
 
 /// The slot index of an id: the low half of the slotmap FFI encoding, which
@@ -60,7 +63,10 @@ fn slot_index(raw: u64) -> usize {
 }
 
 impl NodeTree {
-    pub(crate) fn new(guard: style::shared_lock::SharedRwLock) -> Self {
+    pub(crate) fn new(
+        guard: style::shared_lock::SharedRwLock,
+        inline_rebuild: crate::node::InlineRebuild,
+    ) -> Self {
         Self {
             map: SlotMap::with_key(),
             geometry_generation: AtomicU64::new(1),
@@ -68,6 +74,7 @@ impl NodeTree {
             fixed_anchor: None,
             slot_versions: Vec::new(),
             guard,
+            inline_rebuild,
         }
     }
 
@@ -129,8 +136,12 @@ impl NodeTree {
         self.geometry_generation.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn with_capacity(capacity: usize, guard: style::shared_lock::SharedRwLock) -> Self {
-        let mut tree = Self::new(guard);
+    pub(crate) fn with_capacity(
+        capacity: usize,
+        guard: style::shared_lock::SharedRwLock,
+        inline_rebuild: crate::node::InlineRebuild,
+    ) -> Self {
+        let mut tree = Self::new(guard, inline_rebuild);
         tree.map = SlotMap::with_capacity_and_key(capacity);
         tree
     }

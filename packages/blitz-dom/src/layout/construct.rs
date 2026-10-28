@@ -1158,7 +1158,7 @@ fn collect_layout_children_with_wrap(
                 let existing_layout = doc.nodes[container_node_id]
                     .element_data_mut()
                     .and_then(|el| el.take_inline_layout_data());
-                let layout = existing_layout.unwrap_or_else(|| Box::new(TextLayout::new()));
+                let layout = existing_layout.unwrap_or_else(|| Box::new(TextLayout::unfilled()));
 
                 // Queue node for inline layout construction. Deferring construction of inline layouts to a
                 // dedicated phase allows us to multithread the expensive text shaping step.
@@ -1937,11 +1937,8 @@ pub(crate) fn build_inline_layout_into(
         );
     }
 
-    // Both live as long as the paragraph; drop their push-growth slack.
-    text_layout.text = builder.build_into(&mut text_layout.layout);
-    text_layout.text.shrink_to_fit();
-    text_layout.node_ranges = core::mem::take(node_ranges);
-    text_layout.node_ranges.shrink_to_fit();
+    let text = builder.build_into(text_layout.layout_for_build());
+    text_layout.set_content(text, core::mem::take(node_ranges));
     return;
 
     fn build_inline_layout_recursive(

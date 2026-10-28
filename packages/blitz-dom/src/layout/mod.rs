@@ -26,6 +26,7 @@ use taffy::{
 pub(crate) mod construct;
 pub(crate) mod counters;
 pub(crate) mod damage;
+pub(crate) mod evict;
 pub(crate) mod inline;
 pub(crate) mod list;
 pub(crate) mod paint_tree;

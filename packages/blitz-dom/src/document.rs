@@ -476,6 +476,33 @@ pub struct BaseDocument {
     /// Length of `inline_roots` when it was last left sorted+deduped, so a
     /// frame that pushed nothing new can skip re-sorting 80k+ entries.
     pub(crate) inline_roots_settled: usize,
+    /// Inline roots farther than this many viewport heights from the viewport
+    /// drop their shaped text after each resolve; `None` keeps every layout.
+    pub(crate) inline_layout_eviction_viewports: Option<f32>,
+    /// Document rows whose inline roots keep their shaped text regardless of
+    /// the viewport, such as the pages a print is about to paint.
+    pub(crate) inline_keep_extent: Option<(f64, f64)>,
+    /// The last eviction scan, which a resolve that moved nothing need not repeat.
+    pub(crate) last_inline_eviction_scan: Option<crate::layout::evict::InlineEvictionScan>,
+    /// Counts resolves that moved boxes, so the scan can tell a paint that
+    /// follows one from a paint of unchanged geometry.
+    pub(crate) inline_eviction_layout_epoch: u64,
+    /// Total vertical distance inner scrollers have scrolled, in CSS px.
+    pub(crate) inline_eviction_inner_scroll: f64,
+    /// Inline roots that may hold shaped text: a superset the eviction scan
+    /// visits instead of every root, and prunes as it goes.
+    pub(crate) inline_resident: Vec<NodeId>,
+    /// Roots rebuilt since the last scan. Rebuilds happen behind shared
+    /// references (paint, geometry reads), hence the lock.
+    pub(crate) inline_rebuilt: Arc<Mutex<Vec<NodeId>>>,
+    /// Whether the next scan must visit every root, as when eviction is enabled
+    /// after layouts were built without tracking.
+    pub(crate) inline_resident_unknown: bool,
+    /// Roots the running layout pass laid out last, with their sequence number.
+    pub(crate) inline_pass_window: std::collections::VecDeque<(NodeId, u32)>,
+    pub(crate) inline_pass_seq: u32,
+    /// Roots this pass kept shaped for being near the viewport.
+    pub(crate) inline_pass_kept: usize,
     /// Nodes holding rehomed paint children, and the ancestor chains whose
     /// rehomed_reach we set last resolve. Both replace a full-tree scan in
     /// compute_rehomed_reach; the host list is a self-pruning superset.
@@ -623,9 +650,14 @@ impl BaseDocument {
         // the doubling overshoot on large documents. with_capacity(0)
         // is equivalent to Slab::new(), so the default path is unchanged.
         let guard = SharedRwLock::new();
+        let inline_rebuilt = Arc::<Mutex<Vec<NodeId>>>::default();
         let nodes = Box::new(NodeTree::with_capacity(
             config.node_capacity_hint.unwrap_or(0),
             guard.clone(),
+            crate::node::InlineRebuild {
+                font_ctx: font_ctx.clone(),
+                rebuilt: inline_rebuilt.clone(),
+            },
         ));
         let nodes_to_id = HashMap::new();
 
@@ -711,6 +743,17 @@ impl BaseDocument {
             any_node_created: false,
             inline_roots: Vec::new(),
             inline_roots_settled: 0,
+            inline_layout_eviction_viewports: Some(2.0),
+            inline_keep_extent: None,
+            last_inline_eviction_scan: None,
+            inline_eviction_layout_epoch: 0,
+            inline_eviction_inner_scroll: 0.0,
+            inline_resident: Vec::new(),
+            inline_rebuilt,
+            inline_resident_unknown: false,
+            inline_pass_window: std::collections::VecDeque::new(),
+            inline_pass_seq: 0,
+            inline_pass_kept: 0,
             rehomed_hosts: Vec::new(),
             any_construct_damage: false,
             layout_changed: true,
@@ -3831,7 +3874,7 @@ impl BaseDocument {
         let el = inline_root.element_data()?;
         let il = el.inline_layout_data()?;
         let (node_id, range) = il
-            .node_ranges
+            .node_ranges(&self.nodes)
             .iter()
             .find(|(_, r)| byte_offset >= r.start && byte_offset <= r.end)
             .map(|(nid, r)| (*nid, r.clone()))?;
@@ -3840,9 +3883,10 @@ impl BaseDocument {
             NodeData::Text(t) => &t.content,
             _ => return None,
         };
-        let slice_start = range.start.min(il.text.len());
-        let slice_end = byte_offset.min(il.text.len());
-        let slice = il.text.get(slice_start..slice_end)?;
+        let il_text = il.text(&self.nodes);
+        let slice_start = range.start.min(il_text.len());
+        let slice_end = byte_offset.min(il_text.len());
+        let slice = il_text.get(slice_start..slice_end)?;
         let node_u16_len = content.encode_utf16().count();
         let u16 = slice.encode_utf16().count().min(node_u16_len);
         Some((node_id, u16))
@@ -4020,7 +4064,7 @@ impl BaseDocument {
                 let el = n.element_data()?;
                 let il = el.inline_layout_data()?;
                 let range = il
-                    .node_ranges
+                    .node_ranges(&self.nodes)
                     .iter()
                     .find(|(nid, _)| *nid == text_id)?
                     .1
@@ -4113,14 +4157,15 @@ impl BaseDocument {
             let element_data = node.element_data()?;
             let inline_layout = element_data.inline_layout_data()?;
 
-            if *end > inline_layout.text.len() {
+            let text = inline_layout.text(&self.nodes);
+            if *end > text.len() {
                 continue;
             }
 
             if !result.is_empty() {
                 result.push(' ');
             }
-            result.push_str(&inline_layout.text[*start..*end]);
+            result.push_str(&text[*start..*end]);
         }
 
         if result.is_empty() {
@@ -4216,7 +4261,7 @@ impl BaseDocument {
                 continue;
             };
 
-            let text_len = inline_layout.text.len();
+            let text_len = inline_layout.text(&self.nodes).len();
 
             if node_id == first_node && node_id == last_node {
                 let start = first_offset.min(last_offset);

@@ -551,6 +551,19 @@ fn extract_box_decorations(
     }
 }
 
+/// Whether an inline span's parley decorations differ between the styles. Padding and border
+/// are baked into line breaking when the layout is built; background presence is handled apart.
+pub(crate) fn inline_box_decorations_differ(
+    old: &stylo::ComputedValues,
+    new: &stylo::ComputedValues,
+) -> bool {
+    let without_background = |style| parley::BoxDecorations {
+        background_brush: None,
+        ..extract_box_decorations(NodeId::default(), style)
+    };
+    without_background(old) != without_background(new)
+}
+
 pub(crate) fn has_inline_background(style: &stylo::ComputedValues) -> bool {
     use ::style::values::specified::box_::{DisplayInside, DisplayOutside};
 

@@ -2396,7 +2396,7 @@ impl Node {
         if self.flags.is_inline_root() {
             let element_data = &self.element_data().unwrap();
             if let Some(ild) = element_data.inline_layout_data() {
-                let layout = &ild.layout;
+                let layout = ild.layout(self.tree());
                 let scale = layout.scale();
                 let content_box_offset = taffy::Point {
                     x: self.final_layout().padding.left + self.final_layout().border.left,
@@ -2484,7 +2484,7 @@ impl Node {
 
         let element_data = self.element_data()?;
         let inline_layout = element_data.inline_layout_data()?;
-        let layout = &inline_layout.layout;
+        let layout = inline_layout.layout(self.tree());
         let scale = layout.scale();
         let y = y - inline_layout.block_offset;
 
@@ -2600,7 +2600,7 @@ impl Node {
 
         let inline_root = self.inline_root_ancestor()?;
         let inline_layout = inline_root.element_data()?.inline_layout_data()?;
-        let layout = &inline_layout.layout;
+        let layout = inline_layout.layout(self.tree());
         let scale = layout.scale();
 
         // Walk up the DOM parent chain from `id` to check whether it is (or is

@@ -334,6 +334,7 @@ impl BaseDocument {
 
                 let layout = *node.final_layout();
                 self.nodes.bump_geometry_generation();
+                self.note_inner_scroll(offset.y - initial.y);
                 let event = BlitzScrollEvent {
                     scroll_top: offset.y,
                     scroll_left: offset.x,

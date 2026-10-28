@@ -7,6 +7,8 @@ use std::collections::HashSet;
 use debug_timer::debug_timer;
 use kurbo::{Affine, Rect};
 use parley::LayoutContext;
+
+use crate::node::EvictedLayout;
 use selectors::Element as _;
 use style::dom::TDocument;
 
@@ -324,6 +326,13 @@ impl BaseDocument {
         // restyle is picked up on the next resolve pass; a redraw is requested
         // if the hovered node actually changes.
         self.refresh_hover();
+
+        // After paint-tree and hover work, the last readers of this pass.
+        if self.layout_changed {
+            self.inline_eviction_layout_epoch += 1;
+        }
+        self.evict_offscreen_inline_layouts();
+        timer.record_time("evict");
 
         let mut subdoc_is_animating = false;
         for &node_id in &self.sub_document_nodes {
@@ -746,6 +755,28 @@ impl BaseDocument {
         // Deduplicate deferred tasks by node_id to avoid redundant work
         deferred_construction_nodes.sort_unstable_by_key(|task| task.node_id);
         deferred_construction_nodes.dedup_by_key(|task| task.node_id);
+
+        // With eviction on, each root is built inside its own layout call and
+        // may be evicted right after, so the pass never holds all shaped text.
+        if self.inline_layout_eviction_viewports.is_some() {
+            for task in deferred_construction_nodes {
+                let ConstructionTaskData::InlineLayout(mut layout) = task.data;
+                layout.content_widths = None;
+                layout.last_break_width = f32::NAN;
+                layout.set_unbuilt(EvictedLayout {
+                    node_id: task.node_id,
+                    scale: self.viewport.scale(),
+                    breaking: None,
+                });
+                self.nodes[task.node_id].clear_layout_cache();
+                self.nodes[task.node_id]
+                    .element_data_mut()
+                    .unwrap()
+                    .set_inline_layout_data(Some(layout));
+                self.inline_roots.push(task.node_id);
+            }
+            return;
+        }
 
         #[cfg(feature = "parallel-construct")]
         let iter = deferred_construction_nodes.into_par_iter();

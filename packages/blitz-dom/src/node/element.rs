@@ -1489,6 +1489,26 @@ mod tests {
     use super::TextInputData;
     use parley::{FontContext, LayoutContext};
 
+    #[test]
+    fn cloning_an_element_discards_derived_text_layouts() {
+        use crate::node::{
+            ElementData, ListItemLayout, ListItemLayoutPosition, Marker, TextLayout,
+        };
+
+        let mut element = ElementData::new(crate::qual_name!("li", html), Vec::new());
+        element.set_inline_layout_data(Some(Box::default()));
+        element.set_list_item_data(Some(Box::new(ListItemLayout {
+            marker: Marker::Char('•'),
+            position: ListItemLayoutPosition::Inside,
+        })));
+
+        let cloned = element.clone();
+        assert!(cloned.inline_layout_data().is_none());
+        assert!(cloned.list_item_data().is_none());
+        assert!(element.inline_layout_data().is_some());
+        assert!(element.list_item_data().is_some());
+    }
+
     /// Build a [`TextInputData`] with the given text laid out at scale 1.0.
     fn make_input(is_multiline: bool, text: &str) -> TextInputData {
         let mut font_ctx = FontContext::new();
