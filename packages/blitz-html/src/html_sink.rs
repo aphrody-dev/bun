@@ -63,6 +63,33 @@ impl HtmlParserProvider for HtmlProvider {
     }
 }
 
+/// An [`HtmlProvider`] for a document whose scripts run: its fragments parse with scripting
+/// enabled, so `<noscript>` content stays raw text. Sub-documents (iframes) parse without it.
+#[derive(Copy, Clone, Default, Debug)]
+pub struct ScriptingHtmlProvider;
+
+impl HtmlParserProvider for ScriptingHtmlProvider {
+    fn parse_inner_html<'m2, 'doc2>(
+        &self,
+        mutr: &'m2 mut DocumentMutator<'doc2>,
+        element_id: NodeId,
+        html: &str,
+    ) {
+        DocumentHtmlParser::parse_inner_html_into_mutator_with_scripting(
+            mutr, element_id, html, true,
+        );
+    }
+
+    fn parse_document(
+        &self,
+        html: &str,
+        mut config: blitz_dom::DocumentConfig,
+    ) -> Box<dyn blitz_dom::Document> {
+        config.html_parser_provider = Some(std::sync::Arc::new(HtmlProvider));
+        Box::new(crate::HtmlDocument::from_html(html, config))
+    }
+}
+
 pub struct DocumentHtmlParser<'m, 'doc> {
     document_mutator: RefCell<&'m mut DocumentMutator<'doc>>,
 
@@ -353,6 +380,16 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
     }
 
     pub fn parse_into_mutator<'a, 'd>(mutr: &'a mut DocumentMutator<'d>, html: &str) {
+        Self::parse_into_mutator_with_scripting(mutr, html, false);
+    }
+
+    /// Like [`parse_into_mutator`](Self::parse_into_mutator), with the tree builder's scripting
+    /// flag set to `scripting`: when it is on, `<noscript>` content is parsed as raw text.
+    pub fn parse_into_mutator_with_scripting<'a, 'd>(
+        mutr: &'a mut DocumentMutator<'d>,
+        html: &str,
+        scripting: bool,
+    ) {
         if is_xhtml_document(html) {
             Self::parse_xml_into_mutator(mutr, html);
         } else {
@@ -363,7 +400,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
                 tokenizer: TokenizerOpts::default(),
                 tree_builder: TreeBuilderOpts {
                     exact_errors: false,
-                    scripting_enabled: false, // Enables parsing of <noscript> tags
+                    scripting_enabled: scripting,
                     iframe_srcdoc: false,
                     drop_doctype: true,
                     quirks_mode: QuirksMode::NoQuirks,
@@ -397,19 +434,32 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
         element_id: NodeId,
         html: &str,
     ) {
+        Self::parse_inner_html_into_mutator_with_scripting(mutr, element_id, html, false);
+    }
+
+    /// Like [`parse_inner_html_into_mutator`](Self::parse_inner_html_into_mutator), with the
+    /// tree builder's scripting flag set to `scripting`.
+    pub fn parse_inner_html_into_mutator_with_scripting<'a, 'd>(
+        mutr: &'a mut DocumentMutator<'d>,
+        element_id: NodeId,
+        html: &str,
+        scripting: bool,
+    ) {
         let sink = DocumentHtmlParser::new(mutr);
 
         let opts = ParseOpts {
             tokenizer: TokenizerOpts::default(),
             tree_builder: TreeBuilderOpts {
                 exact_errors: false,
-                scripting_enabled: false, // Enables parsing of <noscript> tags
+                scripting_enabled: scripting,
                 iframe_srcdoc: false,
                 drop_doctype: true,
                 quirks_mode: QuirksMode::NoQuirks,
             },
         };
-        html5ever::driver::parse_fragment_for_element(sink, opts, element_id, false, None)
+        // The tokenizer reads a noscript context element's content as raw text only when this is
+        // set; the tree builder's flag alone would still build its markup as live elements.
+        html5ever::driver::parse_fragment_for_element(sink, opts, element_id, scripting, None)
             .from_utf8()
             .read_from(&mut html.as_bytes())
             .unwrap();

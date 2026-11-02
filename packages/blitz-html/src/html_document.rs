@@ -46,6 +46,14 @@ impl HtmlDocument {
         Self::parse_with(html, config, DocumentHtmlParser::parse_into_mutator)
     }
 
+    /// Like [`from_html`](Self::from_html), with the HTML parser's scripting flag set to
+    /// `scripting`. Pair it with [`ScriptingHtmlProvider`](crate::ScriptingHtmlProvider).
+    pub fn from_html_with_scripting(html: &str, config: DocumentConfig, scripting: bool) -> Self {
+        Self::parse_with(html, config, |mutr, html| {
+            DocumentHtmlParser::parse_into_mutator_with_scripting(mutr, html, scripting)
+        })
+    }
+
     /// Parse XML (XHTML) into an [`HtmlDocument`]
     pub fn from_xml(xml: &str, config: DocumentConfig) -> Self {
         Self::parse_with(xml, config, DocumentHtmlParser::parse_xml_into_mutator)
