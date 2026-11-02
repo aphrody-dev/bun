@@ -301,6 +301,8 @@ pub struct BaseDocument {
     // Config
     /// Base url for resolving linked resources (stylesheets, images, fonts, etc)
     pub(crate) url: DocumentUrl,
+    /// querySelector-family selectors already parsed against `url`.
+    pub(crate) selector_cache: crate::query_selector::SelectorCache,
     /// Sticky: some element was ever styled as a query container, so a style-only resolve can
     /// no longer skip layout. Saves `resolve_style` a scan of every node on each read.
     pub(crate) size_container_seen: bool,
@@ -717,6 +719,7 @@ impl BaseDocument {
             counters_seen: false,
             counters_built_once: false,
             url: base_url,
+            selector_cache: Default::default(),
             size_container_seen: false,
             inline_contexts_stale: false,
             stale_font_families: Vec::new(),

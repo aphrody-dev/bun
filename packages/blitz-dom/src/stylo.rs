@@ -650,30 +650,28 @@ impl selectors::Element for BlitzNode<'_> {
         matches!(self.data, NodeData::AnonymousBlock(_))
     }
 
-    // These methods are implemented naively since we only threaded real nodes and not fake nodes
-    // we should try and use `find` instead of this foward/backward stuff since its ugly and slow
+    // Locate self in the parent's child list once, then scan from there: stepping with
+    // forward(n)/backward(n) repeated that lookup for every skipped text node.
     fn prev_sibling_element(&self) -> Option<Self> {
-        let mut n = 1;
-        while let Some(node) = self.backward(n) {
-            if node.is_element() {
-                return Some(node);
-            }
-            n += 1;
-        }
-
-        None
+        let parent = self.with(self.parent.get()?);
+        let index = self.child_index().unwrap_or(0);
+        parent.children[..index]
+            .iter()
+            .rev()
+            .map(|id| self.with(*id))
+            .find(|node| node.is_element())
     }
 
     fn next_sibling_element(&self) -> Option<Self> {
-        let mut n = 1;
-        while let Some(node) = self.forward(n) {
-            if node.is_element() {
-                return Some(node);
-            }
-            n += 1;
-        }
-
-        None
+        let parent = self.with(self.parent.get()?);
+        let index = self.child_index().unwrap_or(0);
+        parent
+            .children
+            .get(index + 1..)
+            .unwrap_or_default()
+            .iter()
+            .map(|id| self.with(*id))
+            .find(|node| node.is_element())
     }
 
     fn first_element_child(&self) -> Option<Self> {

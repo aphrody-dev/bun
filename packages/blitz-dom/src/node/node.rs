@@ -379,6 +379,15 @@ pub(crate) struct LayoutChildLists {
     paint: RefCell<Option<ThinVec<NodeId>>>,
 }
 
+/// Parents tracked at once by `child_index`; a tree walk keeps one slot per open ancestor.
+const CHILD_INDEX_HINTS: usize = 64;
+
+thread_local! {
+    /// Last child index found under each parent slot. Storing it in `Node` would grow every node.
+    static CHILD_INDEX_HINT: [Cell<usize>; CHILD_INDEX_HINTS] =
+        const { [const { Cell::new(0) }; CHILD_INDEX_HINTS] };
+}
+
 pub struct Node {
     // The actual tree we belong to. This is unsafe!!
     tree: *mut crate::NodeTree,
@@ -1597,10 +1606,18 @@ impl Node {
 
     // Get the index of the current node in the parents child list
     pub fn child_index(&self) -> Option<usize> {
-        self.tree()[self.parent.get()?]
-            .children
-            .iter()
-            .position(|id| *id == self.id)
+        let parent_id = self.parent.get()?;
+        let siblings = &self.tree()[parent_id].children;
+        let slot = parent_id.as_u64() as usize % CHILD_INDEX_HINTS;
+        let hint = CHILD_INDEX_HINT.with(|hints| hints[slot].get());
+        // Walks visit siblings in order, so the last index seen under this parent (or its
+        // neighbour) is usually ours. Any hint is checked against the list before use.
+        let found = [hint.wrapping_add(1), hint, hint.wrapping_sub(1)]
+            .into_iter()
+            .find(|&index| siblings.get(index) == Some(&self.id))
+            .or_else(|| siblings.iter().position(|id| *id == self.id))?;
+        CHILD_INDEX_HINT.with(|hints| hints[slot].set(found));
+        Some(found)
     }
 
     // Get the nth node in the parents child list

@@ -1,5 +1,7 @@
 use blitz_traits::node_id::NodeId;
 use selectors::SelectorList;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use smallvec::SmallVec;
 use style::dom::{TDocument, TNode};
 use style::dom_apis::{
@@ -8,7 +10,50 @@ use style::dom_apis::{
 use style::selector_parser::{SelectorImpl, SelectorParser};
 use style_traits::ParseError;
 
+use crate::url::DocumentUrl;
 use crate::{Atom, BaseDocument, Node};
+
+/// Distinct selectors kept per document; a full cache starts over, so a page generating
+/// endless unique selectors costs one reparse each and stays bounded.
+const SELECTOR_CACHE_ENTRIES: usize = 128;
+/// Longer selectors are rare and not worth retaining.
+const SELECTOR_CACHE_MAX_LEN: usize = 256;
+
+/// Parsed querySelector selectors by source text. Scripts query the same few selectors in
+/// loops, and parsing dominated short queries. Errors are not cached, so they reparse.
+#[derive(Default)]
+pub(crate) struct SelectorCache {
+    entries: std::cell::RefCell<Option<(DocumentUrl, ParsedSelectors)>>,
+}
+
+type ParsedSelectors = HashMap<Box<str>, SelectorList<SelectorImpl>>;
+
+impl SelectorCache {
+    fn get(&self, url: &DocumentUrl, input: &str) -> Option<SelectorList<SelectorImpl>> {
+        let entries = self.entries.borrow();
+        let (cached_url, lists) = entries.as_ref()?;
+        if !cached_url.same_url(url) {
+            return None;
+        }
+        lists.get(input).cloned()
+    }
+
+    fn insert(&self, url: &DocumentUrl, input: &str, list: &SelectorList<SelectorImpl>) {
+        if input.len() > SELECTOR_CACHE_MAX_LEN {
+            return;
+        }
+        let mut entries = self.entries.borrow_mut();
+        let stale = entries.as_ref().is_none_or(|(cached_url, lists)| {
+            !cached_url.same_url(url) || lists.len() >= SELECTOR_CACHE_ENTRIES
+        });
+        if stale {
+            *entries = Some((url.clone(), HashMap::new()));
+        }
+        if let Some((_, lists)) = entries.as_mut() {
+            lists.insert(input.into(), list.clone());
+        }
+    }
+}
 
 impl BaseDocument {
     /// Find the node with the specified id attribute (if one exists).
@@ -247,8 +292,13 @@ impl BaseDocument {
         &self,
         input: &str,
     ) -> Result<SelectorList<SelectorImpl>, ParseError> {
+        if let Some(list) = self.selector_cache.get(&self.url, input) {
+            return Ok(list);
+        }
         let url_extra_data = self.url.url_extra_data();
-        SelectorParser::parse_author_origin_no_namespace(input, &url_extra_data)
+        let list = SelectorParser::parse_author_origin_no_namespace(input, &url_extra_data)?;
+        self.selector_cache.insert(&self.url, input, &list);
+        Ok(list)
     }
 
     // Namespace-aware variant for CSSOM selectorText writes: a rule in a
