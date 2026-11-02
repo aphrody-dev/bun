@@ -129,6 +129,45 @@ impl BaseDocument {
         }
     }
 
+    /// Restyle the tree without box construction or layout, leaving damage for the next `resolve`.
+    /// False means the caller must still run `resolve`: no DOM, render-blocking resources are
+    /// pending, or a query container exists, since `@container` rules read laid-out sizes.
+    pub fn resolve_style(&mut self, current_time_for_animations: f64) -> bool {
+        if TDocument::as_node(&self.root_node())
+            .first_element_child()
+            .is_none()
+        {
+            return false;
+        }
+        self.process_pending_style_elements();
+        self.handle_messages();
+        if self.has_pending_critical_resources() {
+            return false;
+        }
+        self.flush_pending_device_changes();
+        self.flush_slot_assignments();
+        self.resolve_stylist(current_time_for_animations);
+        // Start web-font fetches from styles alone, as browsers do, so a caller can wait for the
+        // faces before the first layout instead of shaping every paragraph twice.
+        self.flush_needed_font_faces();
+        !self.size_container_seen
+    }
+
+    /// Reshape the inline contexts that web-font faces registered since the last resolve can
+    /// change. Deferred to here because the damage is only read in a resolve, and a page
+    /// receiving N faces would otherwise walk every node N times.
+    fn apply_pending_font_damage(&mut self) {
+        if !std::mem::take(&mut self.inline_contexts_stale) {
+            return;
+        }
+        let families = std::mem::take(&mut self.stale_font_families);
+        if std::mem::take(&mut self.stale_font_family_unknown) {
+            self.invalidate_inline_contexts();
+        } else {
+            self.invalidate_inline_contexts_using(&families);
+        }
+    }
+
     /// Restyle the tree and then relayout it
     pub fn resolve(&mut self, current_time_for_animations: f64) {
         if TDocument::as_node(&self.root_node())
@@ -174,6 +213,7 @@ impl BaseDocument {
         // Apply any device changes (viewport resize, zoom, color-scheme, etc)
         // accumulated since the last resolve as a single device rebuild.
         self.flush_pending_device_changes();
+        self.apply_pending_font_damage();
         // Slot assignment shapes the flat tree that styling and box
         // construction both consume; recompute before either runs.
         self.flush_slot_assignments();
@@ -202,6 +242,7 @@ impl BaseDocument {
         // Snapshot the sizes it styles against, so the pass after layout can
         // spot the containers whose answer is now stale.
         let container_sizes_before = container_sizes(self);
+        self.size_container_seen |= !container_sizes_before.is_empty();
 
         // CSS counters: list-item values + counter()/attr() pseudo content.
         // Needs computed styles; box construction consumes the side tables.

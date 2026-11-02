@@ -5,7 +5,7 @@ use blitz_traits::node_id::NodeId;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::StyleThreading;
 use crate::layout::damage::{CONSTRUCT_BOX, compute_layout_damage};
@@ -189,6 +189,7 @@ impl crate::document::BaseDocument {
             style::driver::traverse_dom(&traverser, token, rayon_pool);
             nodes_needing_style_image_flush =
                 std::mem::take(traverser.nodes_needing_style_image_flush.get_mut().unwrap());
+            self.size_container_seen |= *traverser.saw_size_container.get_mut();
         }
         self.pending_style_image_nodes
             .extend(nodes_needing_style_image_flush);
@@ -1719,6 +1720,8 @@ pub struct RecalcStyle<'a> {
     /// dedicated storage on the node (see `flush_image_layers_from_style`)
     /// because their style changed during this traversal.
     nodes_needing_style_image_flush: Mutex<Vec<NodeId>>,
+    /// Whether this traversal styled any element or eager pseudo-element as a query container.
+    saw_size_container: AtomicBool,
 }
 
 impl<'a> RecalcStyle<'a> {
@@ -1726,8 +1729,20 @@ impl<'a> RecalcStyle<'a> {
         RecalcStyle {
             context,
             nodes_needing_style_image_flush: Mutex::new(Vec::new()),
+            saw_size_container: AtomicBool::new(false),
         }
     }
+}
+
+fn is_size_container_style(style: &ComputedValues) -> bool {
+    !style.get_box().clone_container_type().is_normal()
+}
+
+/// Whether this element or one of its eager pseudo-elements styles as a query container.
+fn styles_a_size_container(styles: &style::data::ElementStyles) -> bool {
+    let pseudos = styles.pseudos.as_optional_array();
+    styles.get_primary().is_some_and(|s| is_size_container_style(s))
+        || pseudos.is_some_and(|styles| styles.iter().flatten().any(|s| is_size_container_style(s)))
 }
 
 #[allow(unsafe_code)]
@@ -1765,6 +1780,12 @@ impl<'dom> DomTraversal<BlitzNode<'dom>> for RecalcStyle<'_> {
             }
 
             sync_pseudo_element_styles(el, &data, &self.nodes_needing_style_image_flush);
+
+            if !self.saw_size_container.load(Ordering::Relaxed)
+                && styles_a_size_container(&data.styles)
+            {
+                self.saw_size_container.store(true, Ordering::Relaxed);
+            }
 
             if !data.damage.is_empty() {
                 // Mark the ancestor chain so that the damage propagation pass

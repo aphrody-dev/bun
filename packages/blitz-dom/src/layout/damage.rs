@@ -615,6 +615,108 @@ pub(crate) fn sort_layout_children_by_order(
 }
 
 impl BaseDocument {
+    /// `invalidate_inline_contexts` limited to text that can shape differently now that faces of
+    /// `families` (lowercased) exist: nodes whose `font-family` names one of them. Each match
+    /// damages the inline root holding its text and every inline root above it, since an
+    /// inline-block that reshapes resizes the lines around it.
+    pub(crate) fn invalidate_inline_contexts_using(&mut self, families: &[String]) {
+        let matched = self.nodes_naming_font_family(families);
+        if matched.is_empty() {
+            return;
+        }
+        let (roots, inputs) = self.inline_roots_above(&matched);
+        self.damage_inline_roots(&roots);
+        self.refresh_text_inputs(&inputs);
+    }
+
+    /// The connected nodes whose `font-family` names one of `families` (lowercased).
+    fn nodes_naming_font_family(&self, families: &[String]) -> Vec<NodeId> {
+        if families.is_empty() {
+            return Vec::new();
+        }
+        let names_family = |node: &Node| {
+            let Some(styles) = node.primary_styles() else {
+                // Unstyled boxes keep no record of their font; reshape them to be safe.
+                return node.element_data().is_some_and(|e| e.inline_layout_data().is_some());
+            };
+            styles.get_font().font_family.families.list.iter().any(|family| match family {
+                style::values::computed::font::SingleFontFamily::FamilyName(name) => {
+                    let name: &str = name.name.as_ref();
+                    families.iter().any(|f| {
+                        if name.is_ascii() {
+                            f.eq_ignore_ascii_case(name)
+                        } else {
+                            f.as_str() == name.to_lowercase().as_str()
+                        }
+                    })
+                }
+                style::values::computed::font::SingleFontFamily::Generic(_) => false,
+            })
+        };
+        self.nodes
+            .iter()
+            .filter(|(_, node)| node.flags.contains(NodeFlags::IS_IN_DOCUMENT))
+            .filter(|(_, node)| node.element_data().is_some() && names_family(node))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// The inline roots holding text of each node in `starts` and those above them, plus the
+    /// text inputs among `starts`.
+    fn inline_roots_above(&self, starts: &[NodeId]) -> (Vec<NodeId>, Vec<NodeId>) {
+        let mut visited = std::collections::HashSet::new();
+        let mut roots = Vec::new();
+        let mut inputs = Vec::new();
+        for &start in starts {
+            if self.nodes[start].element_data().is_some_and(|e| e.text_input_data().is_some()) {
+                inputs.push(start);
+            }
+            let mut at = Some(start);
+            while let Some(id) = at {
+                if !visited.insert(id) {
+                    break;
+                }
+                let node = &self.nodes[id];
+                if node.element_data().is_some_and(|e| e.inline_layout_data().is_some()) {
+                    roots.push(id);
+                }
+                at = node.layout_parent.get().or(node.parent.get());
+            }
+        }
+        (roots, inputs)
+    }
+
+    /// Damages each inline root, and the block that re-collects an anonymous one.
+    fn damage_inline_roots(&mut self, roots: &[NodeId]) {
+        for &id in roots {
+            let node = &mut self.nodes[id];
+            node.insert_damage(ALL_DAMAGE);
+            if node.is_anonymous() {
+                if let Some(parent_id) = node.layout_parent.get() {
+                    self.nodes[parent_id].insert_damage(ALL_DAMAGE);
+                }
+            }
+        }
+    }
+
+    /// Reshapes the editor of each text input against the newly registered faces.
+    fn refresh_text_inputs(&mut self, inputs: &[NodeId]) {
+        let scale = self.viewport.scale();
+        let font_ctx = &self.font_ctx;
+        let layout_ctx = &mut self.layout_ctx;
+        for &id in inputs {
+            let node = &mut self.nodes[id];
+            if let Some(input) =
+                node.data.downcast_element_mut().and_then(|e| e.text_input_data_mut())
+            {
+                input.editor.set_scale(scale);
+                let mut font_ctx = font_ctx.lock().unwrap();
+                input.editor.refresh_layout(&mut font_ctx, layout_ctx);
+                node.insert_damage(ONLY_RELAYOUT);
+            }
+        }
+    }
+
     pub(crate) fn invalidate_inline_contexts(&mut self) {
         let scale = self.viewport.scale();
 

@@ -301,6 +301,15 @@ pub struct BaseDocument {
     // Config
     /// Base url for resolving linked resources (stylesheets, images, fonts, etc)
     pub(crate) url: DocumentUrl,
+    /// Sticky: some element was ever styled as a query container, so a style-only resolve can
+    /// no longer skip layout. Saves `resolve_style` a scan of every node on each read.
+    pub(crate) size_container_seen: bool,
+    /// A web font arrived since the last resolve, so inline contexts must be reshaped.
+    pub(crate) inline_contexts_stale: bool,
+    /// Lowercased families of the faces registered since the last resolve. Only text whose
+    /// `font-family` names one of them can shape differently, unless a face had no name.
+    pub(crate) stale_font_families: Vec<String>,
+    pub(crate) stale_font_family_unknown: bool,
     // Devtool settings. Currently used to render debug overlays
     pub(crate) devtool_settings: DevtoolSettings,
     // Viewport details such as the dimensions, HiDPI scale, and zoom factor,
@@ -708,6 +717,10 @@ impl BaseDocument {
             counters_seen: false,
             counters_built_once: false,
             url: base_url,
+            size_container_seen: false,
+            inline_contexts_stale: false,
+            stale_font_families: Vec::new(),
+            stale_font_family_unknown: false,
             author_sheet_cache: HashMap::new(),
             pending_style_nodes: HashSet::new(),
             author_sheet_keys: HashMap::new(),
@@ -2429,6 +2442,20 @@ impl BaseDocument {
                         });
                     }
                 }
+                let mut names: Vec<String> =
+                    overrides.family_name.iter().map(|name| name.to_lowercase()).collect();
+                for (family, _) in &registered {
+                    if let Some(name) = global_font_ctx.collection.family_name(*family) {
+                        names.push(name.to_lowercase());
+                    }
+                }
+                // A face with no family name can change the shaping of any text.
+                self.stale_font_family_unknown |= names.is_empty();
+                for name in names {
+                    if !self.stale_font_families.contains(&name) {
+                        self.stale_font_families.push(name);
+                    }
+                }
 
                 #[cfg(feature = "parallel-construct")]
                 {
@@ -2444,8 +2471,9 @@ impl BaseDocument {
                 }
                 drop(global_font_ctx);
 
-                // TODO: see if we can only invalidate if resolved fonts may have changed
-                self.invalidate_inline_contexts();
+                // Deferred to the next resolve: the damage is only read there, and a page
+                // receiving N faces would otherwise walk every node N times.
+                self.inline_contexts_stale = true;
             }
             Resource::None => {
                 // Do nothing
