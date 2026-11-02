@@ -382,7 +382,7 @@ impl crate::document::BaseDocument {
     ///
     /// `iter_origins` only sees document-level origins, so any shadow root
     /// forces the slow path rather than risk missing a shadow `:has()`.
-    fn has_relative_selectors(&self) -> bool {
+    pub(crate) fn has_relative_selectors(&self) -> bool {
         !self.shadow_roots.is_empty()
             || self
                 .stylist
