@@ -58,7 +58,7 @@ impl UndisplayedLayoutTraversal {
             let Some(node) = doc.nodes.get(id) else {
                 continue;
             };
-            self.pending.extend(node.children.iter().copied());
+            self.pending.extend(node.children());
             self.pending
                 .extend(node.assigned_nodes().into_iter().flatten().copied());
             self.pending.extend(node.before());
@@ -207,7 +207,7 @@ impl BaseDocument {
                 .retain(|_, last| last.elapsed() < FADE_DELAY + FADE_DURATION);
         }
 
-        let root_node_id = self.root_element().id;
+        let root_node_id = self.root_element().id();
         debug_timer!(timer, feature = "log-phase-times");
 
         // Apply any device changes (viewport resize, zoom, color-scheme, etc)
@@ -355,7 +355,7 @@ impl BaseDocument {
 
         // Clear all damage and dirty flags, walking only subtrees which are
         // marked as (potentially) containing damage.
-        let doc_node_id = self.root_node().id;
+        let doc_node_id = self.root_node().id();
         self.clear_damage_and_dirty_flags(doc_node_id);
         timer.record_time("c_damage");
 
@@ -609,7 +609,7 @@ impl BaseDocument {
     }
 
     pub fn resolve_layout_children(&mut self) {
-        resolve_layout_children_recursive(self, self.root_node().id);
+        resolve_layout_children_recursive(self, self.root_node().id());
 
         fn resolve_layout_children_recursive(doc: &mut BaseDocument, node_id: NodeId) {
             // Anonymous blocks and pseudo-elements can be removed from the slab
@@ -684,7 +684,7 @@ impl BaseDocument {
                     if !doc.nodes.contains_key(child_id) {
                         continue;
                     }
-                    doc.nodes[child_id].layout_parent.set(Some(node_id));
+                    doc.nodes[child_id].set_layout_parent_id(Some(node_id));
                     if let Some(mut data) = doc.nodes[child_id]
                         .try_stylo_element_data_mut()
                         .and_then(|s| s.get_mut())
@@ -694,6 +694,10 @@ impl BaseDocument {
                     }
                 }
 
+                // Child links are bare slot indexes, so a child that dropped out of this
+                // list must not keep one to us: once our slot is reused, that index names
+                // the new occupant. Clear the ones this pass did not re-collect.
+                BaseDocument::clear_dropped_layout_parents(doc, node_id, &layout_children);
                 doc.nodes[node_id].set_layout_children(Some(layout_children.clone()));
 
                 damage.remove(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
@@ -709,7 +713,7 @@ impl BaseDocument {
                             continue;
                         }
                         resolve_layout_children_recursive(doc, child_id);
-                        doc.nodes[child_id].layout_parent.set(Some(node_id));
+                        doc.nodes[child_id].set_layout_parent_id(Some(node_id));
                     }
 
                     doc.nodes[node_id].set_layout_children(Some(layout_children));
@@ -737,9 +741,13 @@ impl BaseDocument {
             let anonymous_blocks = node.take_anonymous_blocks();
             node.take_layout_children();
             node.take_paint_children();
+            node.clear_hoisted_children();
+            node.clear_sc_contribution_cache();
+            node.set_oof_containing_block(None);
+            node.set_stacking_context(None);
             if !is_root {
                 // The root keeps its own box slot: its container may still list it.
-                node.layout_parent.set(None);
+                node.set_layout_parent_id(None);
             }
             // A user or script set the scroll offset, and layout cannot rebuild
             // it, so a scrolled box keeps its layout data while hidden. Text and
@@ -753,7 +761,7 @@ impl BaseDocument {
                 element.set_list_item_data(None);
                 element.clear_detailed_layout_info();
                 if !is_root && !scrolled {
-                    element.layout_data = None;
+                    element.layout_data.take();
                 }
             }
             for anon_id in anonymous_blocks {
@@ -781,7 +789,7 @@ impl BaseDocument {
                     panic!("layout child {child_id:?} of {parent_id:?} is not in the slab");
                 };
                 debug_assert_eq!(
-                    child.layout_parent.get(),
+                    child.layout_parent_id(),
                     Some(parent_id),
                     "layout_parent of {child_id:?} does not point at its layout container {parent_id:?}"
                 );
@@ -908,7 +916,7 @@ impl BaseDocument {
             height: AvailableSpace::Definite(size.height.to_f32_px()),
         };
 
-        let root_element_id = crate::taffy_node_id(self.root_element().id);
+        let root_element_id = crate::taffy_node_id(self.root_element().id());
 
         // println!("\n\nRESOLVE LAYOUT\n===========\n");
 
@@ -943,7 +951,7 @@ impl BaseDocument {
                 let Some(element) = node.element_data() else {
                     continue;
                 };
-                let SpecialElementData::TableRoot(table) = &element.special_data else {
+                let SpecialElementData::TableRoot(table) = element.special_data() else {
                     continue;
                 };
                 let Some(mut grid_info) = table.computed_grid_info.borrow().clone() else {
@@ -1076,7 +1084,7 @@ mod undisplayed_layout_tests {
             viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
             ..Default::default()
         });
-        let document_root = doc.root_node().id;
+        let document_root = doc.root_node().id();
         let block_style = || Attribute::new(qual_name!("style"), "display:block".to_string());
         let mut mutator = doc.mutate();
         let html = mutator.create_element(qual_name!("html"), vec![block_style()]);
@@ -1129,6 +1137,7 @@ mod undisplayed_layout_tests {
             .element_data()
             .unwrap()
             .layout_data
+            .get()
             .is_some());
         doc.mutate()
             .set_attribute(outer, qual_name!("style"), "display:none");
@@ -1137,6 +1146,7 @@ mod undisplayed_layout_tests {
             .element_data()
             .unwrap()
             .layout_data
+            .get()
             .is_none());
     }
 }

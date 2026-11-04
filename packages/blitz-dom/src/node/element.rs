@@ -3,15 +3,16 @@ use kurbo::{Affine, Rect as KurboRect};
 use linebender_resource_handle::Blob;
 use markup5ever::{ExpandedName, LocalName, Namespace, Prefix, QualName, local_name, ns};
 use selectors::matching::{ElementSelectorFlags, QuirksMode};
-use std::cell::Cell;
+use std::cell::OnceCell;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU32, Ordering};
 use style::Atom;
 use style::parser::ParserContext;
 use style::properties::{Importance, PropertyDeclaration, PropertyId, SourcePropertyDeclaration};
 use style::stylesheets::{DocumentStyleSheet, Origin, UrlExtraData};
 use style::values::computed::Display as StyloDisplay;
+use style::values::specified::box_::{DisplayInside, DisplayOutside};
 use style::{
     properties::{PropertyDeclarationBlock, parse_style_attribute},
     servo_arc::Arc as ServoArc,
@@ -24,7 +25,7 @@ use taffy::{Cache, prelude::Layout};
 use thin_vec::ThinVec;
 use url::Url;
 
-use super::stylo_data::StyloData;
+use super::stylo_data::{NodeStateFlags, StyloCell, StyloData, StyloDataMut};
 #[cfg(feature = "svg")]
 use super::svg::SvgImageData;
 use super::{Attribute, Attributes, OptNodeId};
@@ -42,11 +43,17 @@ macro_rules! local_names {
     };
 }
 
+unsafe impl crate::pool::Pooled for ElementData {
+    fn pool() -> &'static std::sync::Mutex<crate::pool::Pool> {
+        static POOL: std::sync::Mutex<crate::pool::Pool> =
+            std::sync::Mutex::new(crate::pool::Pool::new());
+        &POOL
+    }
+}
+
 pub struct ElementData {
     /// The element's local name; see [`Self::namespace`] and [`Self::prefix`] for the rest.
     pub name: ElementName,
-    /// The name's namespace kind and whether the element is focussable or has a snapshot.
-    bits: ElementBits,
 
     /// The elements id attribute parsed as an atom (if it has one)
     pub id: Option<Atom>,
@@ -59,14 +66,7 @@ pub struct ElementData {
     /// The element's attributes
     pub attrs: Attributes,
 
-    /// Heterogeneous data that depends on the element's type.
-    /// For example:
-    ///   - The image data for \<img\> elements.
-    ///   - The parley Layout for inline roots.
-    ///   - The text editor for input/textarea elements
-    pub special_data: SpecialElementData,
-
-    /// Links, the style attribute and image layers, which few elements have.
+    /// Links, the style attribute, image layers and special data, which few elements have.
     rare: Option<Box<ElementRare>>,
     // /// Whether the node is a [HTML integration point] (https://html.spec.whatwg.org/multipage/#html-integration-point)
     // pub mathml_annotation_xml_integration_point: bool,
@@ -75,35 +75,138 @@ pub struct ElementData {
     // Fields moved from `Node`. These live on the element data so that the
     // `Node` struct itself only carries tree-structure information.
     // ---------------------------------------------------------------------
-    /// Style data from stylo, plus a lock guard that allows access to it.
-    pub stylo_element_data: StyloData,
-    pub selector_flags: SelectorFlagsCell,
+    /// Style data from stylo; read through [`Self::stylo_data`].
+    pub(crate) stylo_element_data: StyloCell,
     pub element_state: ElementStateBits,
-    pub snapshot_handled: AtomicBool,
-    /// Whether any descendant of this node needs restyling.
-    /// Used by Stylo's incremental style traversal to skip unchanged subtrees.
-    pub dirty_descendants: AtomicBool,
-    /// Whether this node or any of its descendants may carry `RestyleDamage`.
-    /// Used by the damage propagation pass to skip unchanged subtrees.
-    pub damaged_descendants: AtomicBool,
-
-    // Taffy layout data:
-    pub display_constructed_as: StyloDisplay,
+    /// Whether `stylo_element_data` is initialized, the traversal flags, the selector flags,
+    /// the [`ElementBits`] and `display_constructed_as`, packed into one word.
+    pub(crate) state_flags: NodeStateFlags,
     /// Layout output state (`None` until layout first writes to this node).
-    pub layout_data: Option<Box<LayoutData>>,
-    pub(crate) child_lists: super::node::LayoutChildLists,
+    /// Allocated by the first layout write or derived child list.
+    pub layout_data: OnceCell<crate::pool::PoolBox<LayoutData>>,
 }
+
+// Pooled per element: 56 bytes on wasm32 release, where the stylo wrapper is 16.
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(
+    std::mem::size_of::<ElementData>()
+        <= (40 + std::mem::size_of::<style::data::ElementDataWrapper>()).next_multiple_of(8)
+);
 
 /// Taffy layout output state (cache, layouts, scroll offset and overflow).
 ///
 /// Lazily boxed on [`ElementData`] / [`DocumentData`]: inline-level elements
 /// are positioned by the inline (parley) layout rather than by taffy, so most
 /// nodes on text-heavy pages never allocate one.
+unsafe impl crate::pool::Pooled for LayoutData {
+    fn pool() -> &'static std::sync::Mutex<crate::pool::Pool> {
+        static POOL: std::sync::Mutex<crate::pool::Pool> =
+            std::sync::Mutex::new(crate::pool::Pool::new());
+        &POOL
+    }
+}
+
+/// The fields of a taffy [`Layout`] kept inline in [`LayoutData`]: border, padding and
+/// scrollbar size are zero on three in four boxes, so they live in [`BoxEdges`] instead.
+#[derive(Debug, Clone, Copy)]
+struct InlineLayout {
+    order: u32,
+    location: taffy::Point<f32>,
+    size: taffy::Size<f32>,
+    scrollable_overflow_rect: taffy::Rect<f32>,
+    margin: taffy::Rect<f32>,
+}
+
+impl InlineLayout {
+    const ZERO: Self = Self::of(&Layout::new());
+
+    const fn of(layout: &Layout) -> Self {
+        Self {
+            order: layout.order,
+            location: layout.location,
+            size: layout.size,
+            scrollable_overflow_rect: layout.scrollable_overflow_rect,
+            margin: layout.margin,
+        }
+    }
+
+    fn with(&self, edges: &Edges) -> Layout {
+        Layout {
+            order: self.order,
+            location: self.location,
+            size: self.size,
+            scrollable_overflow_rect: self.scrollable_overflow_rect,
+            scrollbar_size: edges.scrollbar_size,
+            border: edges.border,
+            padding: edges.padding,
+            margin: self.margin,
+        }
+    }
+}
+
+/// The out-of-line part of one taffy [`Layout`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Edges {
+    border: taffy::Rect<f32>,
+    padding: taffy::Rect<f32>,
+    scrollbar_size: taffy::Size<f32>,
+}
+
+impl Edges {
+    const ZERO: Self = Self::of(&Layout::new());
+
+    const fn of(layout: &Layout) -> Self {
+        Self {
+            border: layout.border,
+            padding: layout.padding,
+            scrollbar_size: layout.scrollbar_size,
+        }
+    }
+
+    /// All bits zero, so that leaving these edges out (and reading `ZERO` back) is exact.
+    fn is_zero(&self) -> bool {
+        let r = |r: &taffy::Rect<f32>| [r.left, r.right, r.top, r.bottom];
+        let s = &self.scrollbar_size;
+        r(&self.border)
+            .into_iter()
+            .chain(r(&self.padding))
+            .chain([s.width, s.height])
+            .all(|v| v.to_bits() == 0)
+    }
+}
+
+/// Both layouts' edges, allocated only while one of them is non-zero.
+#[derive(Debug, Clone, Copy)]
+struct BoxEdges {
+    unrounded: Edges,
+    rounded: Edges,
+}
+
+unsafe impl crate::pool::Pooled for BoxEdges {
+    fn pool() -> &'static std::sync::Mutex<crate::pool::Pool> {
+        static POOL: std::sync::Mutex<crate::pool::Pool> =
+            std::sync::Mutex::new(crate::pool::Pool::new());
+        &POOL
+    }
+}
+
+impl Default for BoxEdges {
+    fn default() -> Self {
+        Self {
+            unrounded: Edges::ZERO,
+            rounded: Edges::ZERO,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LayoutData {
     pub cache: Cache,
-    pub unrounded_layout: Layout,
-    pub final_layout: Layout,
+    /// Taffy's unrounded and rounded layouts, split between these and `edges`; read through
+    /// `unrounded_layout` and `final_layout`.
+    unrounded: InlineLayout,
+    rounded: InlineLayout,
+    edges: Option<crate::pool::PoolBox<BoxEdges>>,
     /// Allocated by the first offset written: few boxes are scrolled or pinned.
     offsets: Option<Box<BoxOffsets>>,
     pub scrollable_overflow: KurboRect,
@@ -114,14 +217,18 @@ pub struct LayoutData {
     /// Parley text layout (elements with inline inner display mode only). Inline roots are
     /// laid out by taffy too, so it shares their box; see [`ElementData::inline_layout_data`].
     inline_layout: Option<Box<TextLayout>>,
+    /// Derived layout and paint children; read through `Node::layout_children`.
+    pub(crate) child_lists: super::node::LayoutChildLists,
 }
 
 impl LayoutData {
     pub const fn new() -> Self {
         Self {
+            child_lists: super::node::LayoutChildLists::new(),
             cache: Cache::new(),
-            unrounded_layout: Layout::new(),
-            final_layout: Layout::new(),
+            unrounded: InlineLayout::ZERO,
+            rounded: InlineLayout::ZERO,
+            edges: None,
             offsets: None,
             scrollable_overflow: KurboRect::ZERO,
             #[cfg(feature = "writing-mode")]
@@ -150,6 +257,54 @@ static NO_OFFSETS: BoxOffsets = BoxOffsets {
 };
 
 impl LayoutData {
+    /// Taffy's unrounded layout of this box.
+    #[inline]
+    pub fn unrounded_layout(&self) -> Layout {
+        let edges = self.edges.as_deref().map_or(&Edges::ZERO, |edges| &edges.unrounded);
+        self.unrounded.with(edges)
+    }
+
+    /// This box's rounded layout, with any sticky pin shift baked into its location.
+    #[inline]
+    pub fn final_layout(&self) -> Layout {
+        let edges = self.edges.as_deref().map_or(&Edges::ZERO, |edges| &edges.rounded);
+        self.rounded.with(edges)
+    }
+
+    pub fn set_unrounded_layout(&mut self, layout: &Layout) {
+        self.unrounded = InlineLayout::of(layout);
+        self.set_edges(Edges::of(layout), |edges| &mut edges.unrounded);
+    }
+
+    pub fn set_final_layout(&mut self, layout: &Layout) {
+        self.rounded = InlineLayout::of(layout);
+        self.set_edges(Edges::of(layout), |edges| &mut edges.rounded);
+    }
+
+    /// Stores one layout's edges, keeping the box exactly while either layout's are non-zero.
+    fn set_edges(&mut self, value: Edges, slot: fn(&mut BoxEdges) -> &mut Edges) {
+        match self.edges.as_deref_mut() {
+            Some(edges) => {
+                *slot(edges) = value;
+                if edges.unrounded.is_zero() && edges.rounded.is_zero() {
+                    self.edges = None;
+                }
+            }
+            None if value.is_zero() => {}
+            None => {
+                let mut edges = crate::pool::PoolBox::<BoxEdges>::default();
+                *slot(&mut edges) = value;
+                self.edges = Some(edges);
+            }
+        }
+    }
+
+    /// Moves the rounded layout's location by `(dx, dy)`.
+    pub(crate) fn shift_final_location(&mut self, dx: f32, dy: f32) {
+        self.rounded.location.x += dx;
+        self.rounded.location.y += dy;
+    }
+
     fn offsets(&self) -> &BoxOffsets {
         self.offsets.as_deref().unwrap_or(&NO_OFFSETS)
     }
@@ -179,7 +334,13 @@ impl LayoutData {
 
 /// Shared read-only default returned by accessors for nodes whose
 /// [`LayoutData`] has never been allocated.
-pub(crate) static DEFAULT_LAYOUT_DATA: LayoutData = LayoutData::new();
+pub(crate) static DEFAULT_LAYOUT_DATA: SharedLayoutData = SharedLayoutData(LayoutData::new());
+
+pub(crate) struct SharedLayoutData(pub(crate) LayoutData);
+
+// SAFETY: the shared default is only ever read. Its one interior-mutable part, the child
+// lists, is reached only through `Node::child_lists`, which never yields the default.
+unsafe impl Sync for SharedLayoutData {}
 
 type ImageLayers = ThinVec<Option<ImageResourceData>>;
 
@@ -213,7 +374,8 @@ enum NameNs {
     Other,
 }
 
-/// An element's [`NameNs`] and its plain boolean flags, packed into one byte.
+/// An element's [`NameNs`] and its plain boolean flags, packed into five bits of its
+/// [`NodeStateFlags`] word.
 #[derive(Clone, Copy)]
 struct ElementBits(u8);
 
@@ -252,7 +414,185 @@ impl ElementBits {
     }
 }
 
-const _: () = assert!(ElementSelectorFlags::all().bits() <= u16::MAX as usize);
+const _: () = assert!(NameNs::Other as u8 <= ElementBits::NS);
+const _: () = assert!(
+    (ElementBits::NS | ElementBits::FOCUSSABLE | ElementBits::HAS_SNAPSHOT) as u32
+        <= NodeStateFlags::ELEMENT_BITS_MASK >> NodeStateFlags::ELEMENT_BITS_SHIFT
+);
+const _: () = assert!(ElementSelectorFlags::all().bits() < 1 << 12);
+
+/// Every [`DisplayInside`], indexed by discriminant.
+const DISPLAY_INSIDE: [DisplayInside; 15] = {
+    use DisplayInside::*;
+    [
+        None,
+        Contents,
+        Flow,
+        FlowRoot,
+        Flex,
+        Grid,
+        Table,
+        TableRowGroup,
+        TableColumn,
+        TableColumnGroup,
+        TableHeaderGroup,
+        TableFooterGroup,
+        TableRow,
+        TableCell,
+        WebkitBox,
+    ]
+};
+
+/// Every [`DisplayOutside`], indexed by discriminant.
+const DISPLAY_OUTSIDE: [DisplayOutside; 5] = {
+    use DisplayOutside::*;
+    [None, Inline, Block, TableCaption, InternalTable]
+};
+
+// The tables must list every variant (these matches are exhaustive) at its discriminant.
+const _: fn(DisplayInside) = |inside| match inside {
+    DisplayInside::None
+    | DisplayInside::Contents
+    | DisplayInside::Flow
+    | DisplayInside::FlowRoot
+    | DisplayInside::Flex
+    | DisplayInside::Grid
+    | DisplayInside::Table
+    | DisplayInside::TableRowGroup
+    | DisplayInside::TableColumn
+    | DisplayInside::TableColumnGroup
+    | DisplayInside::TableHeaderGroup
+    | DisplayInside::TableFooterGroup
+    | DisplayInside::TableRow
+    | DisplayInside::TableCell
+    | DisplayInside::WebkitBox => {}
+};
+const _: fn(DisplayOutside) = |outside| match outside {
+    DisplayOutside::None
+    | DisplayOutside::Inline
+    | DisplayOutside::Block
+    | DisplayOutside::TableCaption
+    | DisplayOutside::InternalTable => {}
+};
+const _: () = {
+    let mut i = 0;
+    while i < DISPLAY_INSIDE.len() {
+        assert!(DISPLAY_INSIDE[i] as usize == i);
+        i += 1;
+    }
+    let mut i = 0;
+    while i < DISPLAY_OUTSIDE.len() {
+        assert!(DISPLAY_OUTSIDE[i] as usize == i);
+        i += 1;
+    }
+    assert!((DisplayInside::WebkitBox as u32) < 1 << DISPLAY_OUTSIDE_SHIFT);
+    let outside_bits = DISPLAY_LIST_ITEM_SHIFT - DISPLAY_OUTSIDE_SHIFT;
+    assert!((DisplayOutside::InternalTable as u32) < 1 << outside_bits);
+};
+
+/// Position of the outside value and the list-item bit in a display code.
+const DISPLAY_OUTSIDE_SHIFT: u32 = 5;
+const DISPLAY_LIST_ITEM_SHIFT: u32 = 8;
+/// The inside value in a display code: the bits below the outside value.
+const DISPLAY_INSIDE_MASK: u32 = (1 << DISPLAY_OUTSIDE_SHIFT) - 1;
+/// The outside value in a display code: the bits between the inside value and the list-item bit.
+const DISPLAY_OUTSIDE_MASK: u32 = (1 << (DISPLAY_LIST_ITEM_SHIFT - DISPLAY_OUTSIDE_SHIFT)) - 1;
+
+/// A [`StyloDisplay`] as a 9-bit code: inside, outside and list-item. Stylo's `Display` is
+/// exactly `from3` of these three, so [`display_from_code`] restores it.
+#[inline]
+fn display_code(display: StyloDisplay) -> u32 {
+    display.inside() as u32
+        | (display.outside() as u32) << DISPLAY_OUTSIDE_SHIFT
+        | u32::from(display.is_list_item()) << DISPLAY_LIST_ITEM_SHIFT
+}
+
+#[inline]
+fn display_from_code(code: u32) -> StyloDisplay {
+    let inside = DISPLAY_INSIDE[(code & DISPLAY_INSIDE_MASK) as usize];
+    let outside = (code >> DISPLAY_OUTSIDE_SHIFT) & DISPLAY_OUTSIDE_MASK;
+    StyloDisplay::from3(
+        DISPLAY_OUTSIDE[outside as usize],
+        inside,
+        code & 1 << DISPLAY_LIST_ITEM_SHIFT != 0,
+    )
+}
+
+/// The fields of the [`NodeStateFlags`] word besides its state bits (12 to 15): selector
+/// flags in bits 0 to 11, [`ElementBits`] in 16 to 20 (zero on the document) and the
+/// `display_constructed_as` code in 21 to 29.
+impl NodeStateFlags {
+    const SELECTOR_MASK: u32 = (1 << 12) - 1;
+    const ELEMENT_BITS_SHIFT: u32 = 16;
+    const ELEMENT_BITS_MASK: u32 = 0b1_1111 << Self::ELEMENT_BITS_SHIFT;
+    const DISPLAY_SHIFT: u32 = 21;
+    const DISPLAY_MASK: u32 = ((1 << (DISPLAY_LIST_ITEM_SHIFT + 1)) - 1) << Self::DISPLAY_SHIFT;
+
+    /// Empty selector flags, the initial state bits, `bits` and a `Block` display.
+    fn for_node(bits: ElementBits) -> Self {
+        Self(AtomicU32::new(
+            Self::INITIAL_STATE
+                | u32::from(bits.0) << Self::ELEMENT_BITS_SHIFT
+                | display_code(StyloDisplay::Block) << Self::DISPLAY_SHIFT,
+        ))
+    }
+
+    #[inline]
+    fn selector_flags(&self) -> ElementSelectorFlags {
+        let bits = self.0.load(Ordering::Relaxed) & Self::SELECTOR_MASK;
+        ElementSelectorFlags::from_bits_retain(bits as usize)
+    }
+
+    /// Replaces the selector flags, leaving the rest of the word unchanged.
+    #[inline]
+    fn set_selector_flags(&self, flags: ElementSelectorFlags) {
+        let bits = flags.bits() as u32 & Self::SELECTOR_MASK;
+        let _ = self.0.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
+            Some(word & !Self::SELECTOR_MASK | bits)
+        });
+    }
+
+    #[inline]
+    fn element_bits(&self) -> ElementBits {
+        let word = self.0.load(Ordering::Relaxed);
+        ElementBits(((word & Self::ELEMENT_BITS_MASK) >> Self::ELEMENT_BITS_SHIFT) as u8)
+    }
+
+    #[inline]
+    fn set_element_bits(&mut self, bits: ElementBits) {
+        let word = self.0.get_mut();
+        *word = *word & !Self::ELEMENT_BITS_MASK | u32::from(bits.0) << Self::ELEMENT_BITS_SHIFT;
+    }
+
+    #[inline]
+    fn display(&self) -> StyloDisplay {
+        let word = self.0.load(Ordering::Relaxed);
+        display_from_code((word & Self::DISPLAY_MASK) >> Self::DISPLAY_SHIFT)
+    }
+
+    #[inline]
+    fn set_display(&mut self, display: StyloDisplay) {
+        let word = self.0.get_mut();
+        *word = *word & !Self::DISPLAY_MASK | display_code(display) << Self::DISPLAY_SHIFT;
+    }
+}
+
+// The word's fields are disjoint.
+const _: () = {
+    let masks = [
+        NodeStateFlags::SELECTOR_MASK,
+        NodeStateFlags::STATE_MASK,
+        NodeStateFlags::ELEMENT_BITS_MASK,
+        NodeStateFlags::DISPLAY_MASK,
+    ];
+    let (mut union, mut ones, mut i) = (0u32, 0, 0);
+    while i < masks.len() {
+        union |= masks[i];
+        ones += masks[i].count_ones();
+        i += 1;
+    }
+    assert!(union.count_ones() == ones);
+};
 
 /// [`ElementState`] stored in 32 bits. Blitz sets only states in bits 0 to 31 (focus ring is
 /// bit 30); storing a higher one panics rather than dropping it.
@@ -298,19 +638,21 @@ impl ElementStateBits {
     }
 }
 
-/// A cell of [`ElementSelectorFlags`] stored in 16 bits, which hold every defined flag.
-#[derive(Debug, Default)]
-pub struct SelectorFlagsCell(Cell<u16>);
+/// The [`ElementSelectorFlags`] of an element or document node, stored in 12 bits of its
+/// state word, which hold every defined flag.
+#[derive(Clone, Copy)]
+pub struct SelectorFlagsRef<'a>(&'a NodeStateFlags);
 
-impl SelectorFlagsCell {
+impl SelectorFlagsRef<'_> {
     #[inline]
-    pub fn get(&self) -> ElementSelectorFlags {
-        ElementSelectorFlags::from_bits_retain(usize::from(self.0.get()))
+    pub fn get(self) -> ElementSelectorFlags {
+        self.0.selector_flags()
     }
 
+    /// Replaces the stored flags.
     #[inline]
-    pub fn set(&self, flags: ElementSelectorFlags) {
-        self.0.set(flags.bits() as u16);
+    pub fn set(self, flags: ElementSelectorFlags) {
+        self.0.set_selector_flags(flags);
     }
 }
 
@@ -345,7 +687,19 @@ struct ElementRare {
     list_item_data: Option<Box<ListItemLayout>>,
     /// The resolved 2D transform in device pixels, when the element has one.
     transform: Option<Box<Affine>>,
+    /// Heterogeneous data that depends on the element's type, such as the image data for
+    /// \<img\> or the text editor for input/textarea elements.
+    special_data: SpecialElementData,
 }
+
+/// Shared read-only `None` returned by [`ElementData::special_data`] without a rare box.
+static NO_SPECIAL_DATA: SharedSpecialData = SharedSpecialData(SpecialElementData::None);
+
+struct SharedSpecialData(SpecialElementData);
+
+// SAFETY: the static holds the payload-free `None` variant and is only ever read through a
+// shared reference, so no thread can observe a non-`Sync` payload or a mutation.
+unsafe impl Sync for SharedSpecialData {}
 
 impl ElementRare {
     fn is_empty(&self) -> bool {
@@ -360,6 +714,7 @@ impl ElementRare {
             && self.detailed_layout_info.is_none()
             && self.list_item_data.is_none()
             && self.transform.is_none()
+            && matches!(self.special_data, SpecialElementData::None)
     }
 }
 
@@ -367,23 +722,47 @@ impl ElementData {
     /// Whether the element is focussable.
     #[inline]
     pub fn is_focussable(&self) -> bool {
-        self.bits.get(ElementBits::FOCUSSABLE)
+        self.state_flags.element_bits().get(ElementBits::FOCUSSABLE)
     }
 
     #[inline]
     pub fn has_snapshot(&self) -> bool {
-        self.bits.get(ElementBits::HAS_SNAPSHOT)
+        self.state_flags.element_bits().get(ElementBits::HAS_SNAPSHOT)
     }
 
     #[inline]
     pub fn set_has_snapshot(&mut self, value: bool) {
-        self.bits.set(ElementBits::HAS_SNAPSHOT, value);
+        self.set_element_bit(ElementBits::HAS_SNAPSHOT, value);
+    }
+
+    #[inline]
+    fn set_element_bit(&mut self, bit: u8, value: bool) {
+        let mut bits = self.state_flags.element_bits();
+        bits.set(bit, value);
+        self.state_flags.set_element_bits(bits);
+    }
+
+    /// Selector flags deposited by stylo's `apply_selector_flags`.
+    #[inline]
+    pub fn selector_flags(&self) -> SelectorFlagsRef<'_> {
+        SelectorFlagsRef(&self.state_flags)
+    }
+
+    /// The display this element's box was last constructed with.
+    #[inline]
+    pub fn display_constructed_as(&self) -> StyloDisplay {
+        self.state_flags.display()
+    }
+
+    #[inline]
+    pub fn set_display_constructed_as(&mut self, display: StyloDisplay) {
+        self.state_flags.set_display(display);
     }
 
     /// The namespace of the element's name.
     #[inline]
     pub fn namespace(&self) -> &Namespace {
-        match self.bits.name_ns() {
+        match self.state_flags.element_bits().name_ns() {
             NameNs::Html => &NS_HTML,
             NameNs::Svg => &NS_SVG,
             NameNs::MathMl => &NS_MATHML,
@@ -395,7 +774,7 @@ impl ElementData {
     /// The prefix of the element's name, if any.
     #[inline]
     pub fn prefix(&self) -> Option<&Prefix> {
-        match self.bits.name_ns() {
+        match self.state_flags.element_bits().name_ns() {
             NameNs::Other => self.name_ext().0.as_ref(),
             _ => None,
         }
@@ -564,6 +943,35 @@ impl ElementData {
         self.update_rare(|rare| store_transform(&mut rare.transform, transform));
     }
 
+    /// Heterogeneous data that depends on the element's type. For example the image data for
+    /// \<img\> elements or the text editor for input/textarea elements.
+    #[inline]
+    pub fn special_data(&self) -> &SpecialElementData {
+        self.rare.as_ref().map_or(&NO_SPECIAL_DATA.0, |rare| &rare.special_data)
+    }
+
+    /// Mutable access to the special data; `None` when it is `SpecialElementData::None`.
+    /// Never allocates the rare box.
+    #[inline]
+    pub fn special_data_mut(&mut self) -> Option<&mut SpecialElementData> {
+        match &mut self.rare.as_deref_mut()?.special_data {
+            SpecialElementData::None => None,
+            data => Some(data),
+        }
+    }
+
+    /// Replaces the special data; storing `None` never allocates the rare box.
+    pub fn set_special_data(&mut self, data: SpecialElementData) {
+        self.update_rare(|rare| rare.special_data = data);
+    }
+
+    /// Takes the special data, leaving `None`.
+    pub fn take_special_data(&mut self) -> SpecialElementData {
+        let mut taken = SpecialElementData::None;
+        self.update_rare(|rare| taken = rare.special_data.take());
+        taken
+    }
+
     // Updates an absent box on a stack default, so clearing a field never allocates.
     fn update_rare(&mut self, update: impl FnOnce(&mut ElementRare)) {
         match self.rare.as_deref_mut() {
@@ -587,25 +995,25 @@ impl ElementData {
     /// never written to this element.
     #[inline]
     pub fn layout_data(&self) -> &LayoutData {
-        self.layout_data.as_deref().unwrap_or(&DEFAULT_LAYOUT_DATA)
+        self.layout_data.get().map_or(&DEFAULT_LAYOUT_DATA.0, |data| data)
     }
 
     /// Mutable access to this element's layout output state, allocating it if
     /// it does not yet exist.
     #[inline]
     pub fn layout_data_mut(&mut self) -> &mut LayoutData {
-        self.layout_data.get_or_insert_default()
+        layout_data_mut(&mut self.layout_data)
     }
 
     /// Parley text layout (elements with inline inner display mode only).
     #[inline]
     pub fn inline_layout_data(&self) -> Option<&TextLayout> {
-        self.layout_data.as_deref()?.inline_layout.as_deref()
+        self.layout_data.get()?.inline_layout.as_deref()
     }
 
     #[inline]
     pub fn inline_layout_data_mut(&mut self) -> Option<&mut TextLayout> {
-        self.layout_data.as_deref_mut()?.inline_layout.as_deref_mut()
+        self.layout_data.get_mut()?.inline_layout.as_deref_mut()
     }
 
     /// Sets the text layout; clearing it never allocates the layout box.
@@ -619,8 +1027,16 @@ impl ElementData {
     }
 
     pub fn take_inline_layout_data(&mut self) -> Option<Box<TextLayout>> {
-        self.layout_data.as_deref_mut()?.inline_layout.take()
+        self.layout_data.get_mut()?.inline_layout.take()
     }
+}
+
+#[inline]
+fn layout_data_mut(cell: &mut OnceCell<crate::pool::PoolBox<LayoutData>>) -> &mut LayoutData {
+    if cell.get().is_none() {
+        let _ = cell.set(crate::pool::PoolBox::default());
+    }
+    cell.get_mut().expect("layout data was just allocated")
 }
 
 impl DocumentData {
@@ -628,14 +1044,14 @@ impl DocumentData {
     /// has never written to it.
     #[inline]
     pub fn layout_data(&self) -> &LayoutData {
-        self.layout_data.as_deref().unwrap_or(&DEFAULT_LAYOUT_DATA)
+        self.layout_data.get().map_or(&DEFAULT_LAYOUT_DATA.0, |data| data)
     }
 
     /// Mutable access to the document node's layout output state, allocating
     /// it if it does not yet exist.
     #[inline]
     pub fn layout_data_mut(&mut self) -> &mut LayoutData {
-        self.layout_data.get_or_insert_default()
+        layout_data_mut(&mut self.layout_data)
     }
 }
 
@@ -645,20 +1061,15 @@ impl DocumentData {
 /// carries the same style/layout fields that were previously stored directly on
 /// [`Node`](super::Node).
 pub struct DocumentData {
-    pub(crate) child_lists: super::node::LayoutChildLists,
-    pub stylo_element_data: StyloData,
-    /// Selector flags deposited here by `apply_selector_flags` when a
-    /// `for_parent()` flag is applied while matching the root `<html>` element,
-    /// whose parent node is the document.
-    pub selector_flags: SelectorFlagsCell,
-    pub dirty_descendants: AtomicBool,
-    pub damaged_descendants: AtomicBool,
+    pub(crate) stylo_element_data: StyloCell,
+    /// See [`ElementData`]'s field of the same name. Its selector flags are deposited by
+    /// `apply_selector_flags` when a `for_parent()` flag is applied while matching the root
+    /// `<html>` element, whose parent node is the document.
+    pub(crate) state_flags: NodeStateFlags,
     pub element_state: ElementStateBits,
     pub has_snapshot: bool,
-    pub snapshot_handled: AtomicBool,
-    pub display_constructed_as: StyloDisplay,
     /// Layout output state (`None` until layout first writes to this node).
-    pub layout_data: Option<Box<LayoutData>>,
+    pub layout_data: OnceCell<crate::pool::PoolBox<LayoutData>>,
     pub transform: Option<Box<Affine>>,
 }
 
@@ -667,13 +1078,13 @@ pub struct DocumentData {
 impl std::fmt::Debug for DocumentData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DocumentData")
-            .field("stylo_element_data", &self.stylo_element_data)
-            .field("dirty_descendants", &self.dirty_descendants)
-            .field("damaged_descendants", &self.damaged_descendants)
+            .field("stylo_element_data", &self.stylo_data())
+            .field("dirty_descendants", &self.state_flags.dirty_descendants())
+            .field("damaged_descendants", &self.state_flags.damaged_descendants())
             .field("element_state", &self.element_state)
             .field("has_snapshot", &self.has_snapshot)
-            .field("snapshot_handled", &self.snapshot_handled)
-            .field("display_constructed_as", &self.display_constructed_as)
+            .field("snapshot_handled", &self.state_flags.snapshot_handled())
+            .field("display_constructed_as", &self.display_constructed_as())
             .field("layout_data", &self.layout_data)
             .field("transform", &self.transform)
             .finish_non_exhaustive()
@@ -683,18 +1094,39 @@ impl std::fmt::Debug for DocumentData {
 impl DocumentData {
     pub fn new() -> Self {
         Self {
-            child_lists: Default::default(),
             stylo_element_data: Default::default(),
-            selector_flags: SelectorFlagsCell::default(),
-            dirty_descendants: AtomicBool::new(true),
-            damaged_descendants: AtomicBool::new(true),
+            state_flags: NodeStateFlags::for_node(ElementBits(0)),
             element_state: ElementStateBits::default(),
             has_snapshot: false,
-            snapshot_handled: AtomicBool::new(false),
-            display_constructed_as: StyloDisplay::Block,
-            layout_data: None,
+            layout_data: OnceCell::new(),
             transform: None,
         }
+    }
+
+    /// See [`ElementData::selector_flags`].
+    #[inline]
+    pub fn selector_flags(&self) -> SelectorFlagsRef<'_> {
+        SelectorFlagsRef(&self.state_flags)
+    }
+
+    #[inline]
+    pub fn display_constructed_as(&self) -> StyloDisplay {
+        self.state_flags.display()
+    }
+
+    #[inline]
+    pub fn set_display_constructed_as(&mut self, display: StyloDisplay) {
+        self.state_flags.set_display(display);
+    }
+
+    #[inline]
+    pub(crate) fn stylo_data(&self) -> StyloData<'_> {
+        StyloData::new(&self.stylo_element_data, &self.state_flags)
+    }
+
+    #[inline]
+    pub(crate) fn stylo_data_mut(&mut self) -> StyloDataMut<'_> {
+        StyloDataMut::new(&mut self.stylo_element_data, &self.state_flags)
     }
 }
 
@@ -720,14 +1152,14 @@ impl std::fmt::Debug for ElementData {
             .field("attrs", &self.attrs)
             .field("is_focussable", &self.is_focussable())
             .field("style_attribute", &self.style_attribute())
-            .field("special_data", &self.special_data)
+            .field("special_data", self.special_data())
             .field("background_images", &self.background_images())
             .field("mask_images", &self.mask_images())
             .field("inline_layout_data", &self.inline_layout_data())
             .field("list_item_data", &self.list_item_data())
             .field("template_contents", &self.template_contents())
             .field("element_state", &self.element_state)
-            .field("display_constructed_as", &self.display_constructed_as)
+            .field("display_constructed_as", &self.display_constructed_as())
             .finish_non_exhaustive()
     }
 }
@@ -739,17 +1171,13 @@ impl Clone for ElementData {
     /// the clone behaves like a freshly-created element that has not yet been
     /// styled or laid out.
     fn clone(&self) -> Self {
+        let mut bits = self.state_flags.element_bits();
+        bits.set(ElementBits::HAS_SNAPSHOT, false);
         Self {
             name: self.name.clone(),
-            bits: {
-                let mut bits = self.bits;
-                bits.set(ElementBits::HAS_SNAPSHOT, false);
-                bits
-            },
             id: self.id.clone(),
             attrs: self.attrs.clone(),
             classes: self.classes.clone(),
-            special_data: self.special_data.clone(),
             // Shadow roots and pseudo element nodes are never cloned.
             rare: self.rare.as_deref().and_then(|rare| {
                 let clone = ElementRare {
@@ -758,21 +1186,17 @@ impl Clone for ElementData {
                     style_attribute: rare.style_attribute.clone(),
                     background_images: rare.background_images.clone(),
                     mask_images: rare.mask_images.clone(),
+                    special_data: rare.special_data.clone(),
                     ..ElementRare::default()
                 };
                 (!clone.is_empty()).then(|| Box::new(clone))
             }),
 
             // Runtime state: reset to defaults.
-            child_lists: Default::default(),
             stylo_element_data: Default::default(),
-            selector_flags: SelectorFlagsCell::default(),
             element_state: self.element_state,
-            snapshot_handled: AtomicBool::new(false),
-            dirty_descendants: AtomicBool::new(true),
-            damaged_descendants: AtomicBool::new(true),
-            display_constructed_as: StyloDisplay::Block,
-            layout_data: None,
+            state_flags: NodeStateFlags::for_node(bits),
+            layout_data: OnceCell::new(),
         }
     }
 }
@@ -884,23 +1308,16 @@ impl ElementData {
             None => NameNs::Other,
         };
         let mut data = ElementData {
-            child_lists: Default::default(),
             name: ElementName { local },
-            bits: ElementBits::new(name_ns),
             id: id_attr_atom,
             classes: class_atoms,
             attrs: Attributes::new(attrs),
-            special_data: SpecialElementData::None,
             rare: None,
 
             stylo_element_data: Default::default(),
-            selector_flags: SelectorFlagsCell::default(),
             element_state: ElementStateBits::default(),
-            snapshot_handled: AtomicBool::new(false),
-            dirty_descendants: AtomicBool::new(true),
-            damaged_descendants: AtomicBool::new(true),
-            display_constructed_as: StyloDisplay::Block,
-            layout_data: None,
+            state_flags: NodeStateFlags::for_node(ElementBits::new(name_ns)),
+            layout_data: OnceCell::new(),
         };
         if name_ns == NameNs::Other {
             data.update_rare(|rare| rare.name_ext = Some(Box::new((prefix, ns))));
@@ -930,6 +1347,16 @@ impl ElementData {
         }
 
         data
+    }
+
+    #[inline]
+    pub(crate) fn stylo_data(&self) -> StyloData<'_> {
+        StyloData::new(&self.stylo_element_data, &self.state_flags)
+    }
+
+    #[inline]
+    pub(crate) fn stylo_data_mut(&mut self) -> StyloDataMut<'_> {
+        StyloDataMut::new(&mut self.stylo_element_data, &self.state_flags)
     }
 
     pub fn attrs(&self) -> &[Attribute] {
@@ -977,15 +1404,15 @@ impl ElementData {
     }
 
     pub fn image_data(&self) -> Option<&ImageData> {
-        match &self.special_data {
+        match self.special_data() {
             SpecialElementData::Image(data) => Some(&**data),
             _ => None,
         }
     }
 
     pub fn image_data_mut(&mut self) -> Option<&mut ImageData> {
-        match self.special_data {
-            SpecialElementData::Image(ref mut data) => Some(&mut **data),
+        match self.special_data_mut() {
+            Some(SpecialElementData::Image(data)) => Some(&mut **data),
             _ => None,
         }
     }
@@ -1005,22 +1432,22 @@ impl ElementData {
     }
 
     pub fn canvas_data(&self) -> Option<&CanvasData> {
-        match &self.special_data {
+        match self.special_data() {
             SpecialElementData::Canvas(data) => Some(data),
             _ => None,
         }
     }
 
     pub fn sub_doc_data(&self) -> Option<&dyn Document> {
-        match &self.special_data {
+        match self.special_data() {
             SpecialElementData::SubDocument(data) => Some(data.as_ref().as_ref()),
             _ => None,
         }
     }
 
     pub fn sub_doc_data_mut(&mut self) -> Option<&mut dyn Document> {
-        match &mut self.special_data {
-            SpecialElementData::SubDocument(data) => Some(data.as_mut().as_mut()),
+        match self.special_data_mut() {
+            Some(SpecialElementData::SubDocument(data)) => Some(data.as_mut().as_mut()),
             _ => None,
         }
     }
@@ -1044,22 +1471,22 @@ impl ElementData {
     }
 
     pub fn text_input_data(&self) -> Option<&TextInputData> {
-        match &self.special_data {
+        match self.special_data() {
             SpecialElementData::TextInput(data) => Some(data),
             _ => None,
         }
     }
 
     pub fn text_input_data_mut(&mut self) -> Option<&mut TextInputData> {
-        match &mut self.special_data {
-            SpecialElementData::TextInput(data) => Some(data),
+        match self.special_data_mut() {
+            Some(SpecialElementData::TextInput(data)) => Some(data),
             _ => None,
         }
     }
 
     #[cfg(feature = "custom-widget")]
     pub fn custom_widget_data(&self) -> Option<&CustomWidgetData> {
-        match &self.special_data {
+        match self.special_data() {
             SpecialElementData::CustomWidget(data) => Some(data),
             _ => None,
         }
@@ -1067,14 +1494,14 @@ impl ElementData {
 
     #[cfg(feature = "custom-widget")]
     pub fn custom_widget_data_mut(&mut self) -> Option<&mut CustomWidgetData> {
-        match &mut self.special_data {
-            SpecialElementData::CustomWidget(data) => Some(data),
+        match self.special_data_mut() {
+            Some(SpecialElementData::CustomWidget(data)) => Some(data),
             _ => None,
         }
     }
 
     pub fn checkbox_input_checked(&self) -> Option<bool> {
-        match self.special_data {
+        match *self.special_data() {
             SpecialElementData::CheckboxInput(checked) => Some(checked),
             _ => None,
         }
@@ -1083,15 +1510,15 @@ impl ElementData {
     /// Live value of an `<input type=range>`, when the
     /// special data has been initialized (layout construct pass).
     pub fn range_input_value(&self) -> Option<f64> {
-        match self.special_data {
-            SpecialElementData::RangeInput(ref value) => Some(**value),
+        match self.special_data() {
+            SpecialElementData::RangeInput(value) => Some(**value),
             _ => None,
         }
     }
 
     pub fn checkbox_input_checked_mut(&mut self) -> Option<&mut bool> {
-        match self.special_data {
-            SpecialElementData::CheckboxInput(ref mut checked) => Some(checked),
+        match self.special_data_mut() {
+            Some(SpecialElementData::CheckboxInput(checked)) => Some(checked),
             _ => None,
         }
     }
@@ -1108,7 +1535,7 @@ impl ElementData {
 
     #[cfg(feature = "file-input")]
     pub fn file_data(&self) -> Option<&FileData> {
-        match &self.special_data {
+        match self.special_data() {
             SpecialElementData::FileInput(data) => Some(data),
             _ => None,
         }
@@ -1116,8 +1543,8 @@ impl ElementData {
 
     #[cfg(feature = "file-input")]
     pub fn file_data_mut(&mut self) -> Option<&mut FileData> {
-        match &mut self.special_data {
-            SpecialElementData::FileInput(data) => Some(data),
+        match self.special_data_mut() {
+            Some(SpecialElementData::FileInput(data)) => Some(data),
             _ => None,
         }
     }
@@ -1154,7 +1581,7 @@ impl ElementData {
                         }
                     }
                 });
-        self.bits.set(ElementBits::FOCUSSABLE, is_focussable);
+        self.set_element_bit(ElementBits::FOCUSSABLE, is_focussable);
     }
 
     pub fn flush_style_attribute(&mut self, guard: &SharedRwLock, url_extra_data: &UrlExtraData) {
@@ -1276,17 +1703,17 @@ impl ElementData {
     }
 
     pub fn set_sub_document(&mut self, sub_document: Box<dyn Document>) {
-        self.special_data = SpecialElementData::SubDocument(Box::new(sub_document));
+        self.set_special_data(SpecialElementData::SubDocument(Box::new(sub_document)));
     }
 
     pub fn remove_sub_document(&mut self) {
-        self.special_data = SpecialElementData::None;
+        self.set_special_data(SpecialElementData::None);
     }
 
     #[cfg(feature = "custom-widget")]
     pub fn set_custom_widget(&mut self, widget: Box<dyn crate::Widget>) {
         use crate::node::custom_widget::CustomWidgetData;
-        self.special_data = SpecialElementData::CustomWidget(CustomWidgetData::new(widget));
+        self.set_special_data(SpecialElementData::CustomWidget(CustomWidgetData::new(widget)));
     }
 
     #[cfg(feature = "custom-widget")]
@@ -1295,7 +1722,7 @@ impl ElementData {
             .custom_widget_data_mut()
             .map(|widget_data| widget_data.take_resource_ids())
             .unwrap_or_default();
-        self.special_data = SpecialElementData::None;
+        self.set_special_data(SpecialElementData::None);
         resource_ids
     }
 
@@ -1655,6 +2082,38 @@ mod rare_tests {
     use markup5ever::{QualName, local_name, ns};
 
     #[test]
+    fn layouts_round_trip_with_edges_kept_only_while_non_zero() {
+        use taffy::{Layout, Point, Rect, Size};
+        let mut data = super::LayoutData::new();
+        let mut plain = Layout::new();
+        plain.order = 3;
+        plain.location = Point { x: 1.5, y: -2.0 };
+        plain.size = Size { width: 10.0, height: 20.0 };
+        plain.margin = Rect { left: 1.0, right: 2.0, top: 3.0, bottom: 4.0 };
+        plain.scrollable_overflow_rect = Rect { left: -1.0, right: 9.0, top: 0.0, bottom: 7.0 };
+        data.set_unrounded_layout(&plain);
+        data.set_final_layout(&plain);
+        assert!(data.edges.is_none());
+        assert_eq!(data.unrounded_layout(), plain);
+
+        let mut edged = plain;
+        edged.border = Rect { left: 1.0, right: 1.0, top: 0.0, bottom: 0.0 };
+        edged.padding.top = -0.0;
+        edged.scrollbar_size = Size { width: 15.0, height: 0.0 };
+        data.set_final_layout(&edged);
+        assert!(data.edges.is_some());
+        let rounded = data.final_layout();
+        assert_eq!(rounded, edged);
+        assert!(rounded.padding.top.is_sign_negative(), "-0.0 survives");
+        assert_eq!(data.unrounded_layout(), plain);
+
+        data.shift_final_location(2.0, 3.0);
+        assert_eq!(data.final_layout().location, Point { x: 3.5, y: 1.0 });
+        data.set_final_layout(&plain);
+        assert!(data.edges.is_none(), "box dropped once both layouts' edges are zero");
+    }
+
+    #[test]
     fn rare_links_round_trip_and_clone_drops_the_shadow_root() {
         let name = QualName::new(None, ns!(html), local_name!("template"));
         let mut el = ElementData::new(name, Vec::new());
@@ -1669,6 +2128,23 @@ mod rare_tests {
         assert_eq!((clone.template_contents(), clone.shadow_root()), (Some(contents), None));
         el.set_template_contents(None);
         el.set_shadow_root(None);
+        assert!(el.rare.is_none());
+    }
+
+    #[test]
+    fn special_data_lives_in_rare_and_survives_clone() {
+        use super::SpecialElementData;
+        let name = QualName::new(None, ns!(html), local_name!("input"));
+        let mut el = ElementData::new(name, Vec::new());
+        assert!(matches!(el.special_data(), SpecialElementData::None));
+        el.set_special_data(SpecialElementData::None);
+        assert!(el.special_data_mut().is_none());
+        assert!(el.rare.is_none());
+        el.set_special_data(SpecialElementData::CheckboxInput(true));
+        assert!(matches!(el.special_data(), SpecialElementData::CheckboxInput(true)));
+        let clone = el.clone();
+        assert!(matches!(clone.special_data(), SpecialElementData::CheckboxInput(true)));
+        assert!(matches!(el.take_special_data(), SpecialElementData::CheckboxInput(true)));
         assert!(el.rare.is_none());
     }
 
@@ -1705,7 +2181,7 @@ mod rare_tests {
         let href = || {
             vec![super::Attribute::new(
                 QualName::new(None, ns!(), local_name!("href")),
-                "#".into(),
+                "#",
             )]
         };
         let html = QualName::new(None, ns!(html), local_name!("a"));
@@ -1732,8 +2208,8 @@ mod rare_tests {
             ElementState::FOCUSRING | ElementState::UNVISITED | ElementState::HOVER
         );
         let flags = ElementSelectorFlags::all();
-        el.selector_flags.set(flags);
-        assert_eq!(el.selector_flags.get().bits(), flags.bits());
+        el.selector_flags().set(flags);
+        assert_eq!(el.selector_flags().get().bits(), flags.bits());
     }
 
     #[test]
@@ -1774,5 +2250,155 @@ mod rare_tests {
         el.clear_image_layers(true);
         assert!(el.rare.is_none());
         assert!(el.grid_info().is_none());
+    }
+
+    #[test]
+    fn display_codes_round_trip_every_display() {
+        use super::{DISPLAY_INSIDE, DISPLAY_OUTSIDE, display_code, display_from_code};
+        use style::values::computed::Display;
+        let name = QualName::new(None, ns!(html), local_name!("div"));
+        let mut el = ElementData::new(name, Vec::new());
+        let mut checked = 0;
+        for outside in DISPLAY_OUTSIDE {
+            for inside in DISPLAY_INSIDE {
+                for list_item in [false, true] {
+                    let display = Display::from3(outside, inside, list_item);
+                    let decoded = display_from_code(display_code(display));
+                    assert_eq!(decoded, display);
+                    assert_eq!(decoded.to_u16(), display.to_u16());
+                    el.set_display_constructed_as(display);
+                    assert_eq!(el.display_constructed_as().to_u16(), display.to_u16());
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 5 * 15 * 2);
+    }
+
+    /// Every field packed into an element's state word.
+    #[derive(Clone, Debug, PartialEq)]
+    struct WordFields {
+        selector: usize,
+        stylo_data: bool,
+        dirty: bool,
+        damaged: bool,
+        snapshot_handled: bool,
+        ns: super::NameNs,
+        focussable: bool,
+        has_snapshot: bool,
+        display: u16,
+    }
+
+    fn word_fields(el: &ElementData) -> WordFields {
+        let flags = &el.state_flags;
+        WordFields {
+            selector: el.selector_flags().get().bits(),
+            stylo_data: el.stylo_data().has_data(),
+            dirty: flags.dirty_descendants(),
+            damaged: flags.damaged_descendants(),
+            snapshot_handled: flags.snapshot_handled(),
+            ns: flags.element_bits().name_ns(),
+            focussable: el.is_focussable(),
+            has_snapshot: el.has_snapshot(),
+            display: el.display_constructed_as().to_u16(),
+        }
+    }
+
+    #[test]
+    fn fresh_element_word_has_initial_values() {
+        use style::values::computed::Display;
+        let name = QualName::new(None, ns!(html), local_name!("div"));
+        let fresh = WordFields {
+            selector: 0,
+            stylo_data: false,
+            dirty: true,
+            damaged: true,
+            snapshot_handled: false,
+            ns: super::NameNs::Html,
+            focussable: false,
+            has_snapshot: false,
+            display: Display::Block.to_u16(),
+        };
+        assert_eq!(word_fields(&ElementData::new(name, Vec::new())), fresh);
+        let svg = QualName::new(None, ns!(svg), local_name!("svg"));
+        let svg_fields = word_fields(&ElementData::new(svg, Vec::new()));
+        assert_eq!(svg_fields, WordFields { ns: super::NameNs::Svg, ..fresh });
+        let doc = super::DocumentData::new();
+        assert!(doc.selector_flags().get().is_empty());
+        assert_eq!(doc.display_constructed_as(), Display::Block);
+    }
+
+    #[test]
+    fn word_fields_are_independent() {
+        use super::{ElementBits, NameNs};
+        use selectors::matching::ElementSelectorFlags;
+        use style::values::computed::Display;
+        use style::values::specified::box_::{DisplayInside, DisplayOutside};
+
+        type Step = (fn(&mut ElementData, bool), fn(&mut WordFields, bool));
+        fn selector(v: bool) -> ElementSelectorFlags {
+            match v {
+                true => ElementSelectorFlags::all(),
+                false => ElementSelectorFlags::empty(),
+            }
+        }
+        fn display(v: bool) -> Display {
+            let (outside, inside) = (DisplayOutside::InternalTable, DisplayInside::WebkitBox);
+            match v {
+                true => Display::from3(outside, inside, true),
+                false => Display::Block,
+            }
+        }
+        fn ns(v: bool) -> NameNs {
+            if v { NameNs::Other } else { NameNs::Html }
+        }
+        let steps: [Step; 9] = [
+            (
+                |el, v| el.selector_flags().set(selector(v)),
+                |f, v| f.selector = selector(v).bits(),
+            ),
+            (
+                |el, v| match v {
+                    true => drop(el.stylo_data_mut().ensure_init_mut()),
+                    // SAFETY: no borrows of `el`'s stylo data are outstanding.
+                    false => unsafe { el.stylo_data().clear() },
+                },
+                |f, v| f.stylo_data = v,
+            ),
+            (|el, v| el.state_flags.set_dirty_descendants(v), |f, v| f.dirty = v),
+            (|el, v| el.state_flags.set_damaged_descendants(v), |f, v| f.damaged = v),
+            (|el, v| el.state_flags.set_snapshot_handled(v), |f, v| f.snapshot_handled = v),
+            (
+                |el, v| {
+                    let old = el.state_flags.element_bits().0;
+                    let bits = ElementBits(old & !ElementBits::NS | ns(v) as u8);
+                    el.state_flags.set_element_bits(bits);
+                },
+                |f, v| f.ns = ns(v),
+            ),
+            (
+                |el, v| el.set_element_bit(ElementBits::FOCUSSABLE, v),
+                |f, v| f.focussable = v,
+            ),
+            (|el, v| el.set_has_snapshot(v), |f, v| f.has_snapshot = v),
+            (
+                |el, v| el.set_display_constructed_as(display(v)),
+                |f, v| f.display = display(v).to_u16(),
+            ),
+        ];
+
+        let name = QualName::new(None, ns!(html), local_name!("div"));
+        let mut el = ElementData::new(name, Vec::new());
+        // The first pass starts from a fresh element; the second from every field set.
+        for _pass in 0..2 {
+            for (mutate, expect) in steps {
+                for value in [true, false, true] {
+                    let mut expected = word_fields(&el);
+                    expect(&mut expected, value);
+                    mutate(&mut el, value);
+                    assert_eq!(word_fields(&el), expected);
+                }
+            }
+        }
     }
 }

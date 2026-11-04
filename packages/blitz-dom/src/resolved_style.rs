@@ -534,7 +534,7 @@ impl BaseDocument {
                 let parent_layout = node
                     .containing_block()
                     .and_then(|id| self.get_node(id))
-                    .map(|parent| *parent.final_layout());
+                    .map(|parent| parent.final_layout());
 
                 match position {
                     // Used value: the relative offset. An `auto` side resolves
@@ -698,14 +698,14 @@ impl BaseDocument {
     /// that generates a box (skipping `display: contents` ancestors) is a flex
     /// or grid container.
     fn is_flex_or_grid_item(&self, node_id: NodeId) -> bool {
-        let mut parent_id = self.get_node(node_id).and_then(|node| node.parent.get());
+        let mut parent_id = self.get_node(node_id).and_then(|node| node.parent_id());
         while let Some(parent) = parent_id.and_then(|id| self.get_node(id)) {
             let Some(parent_styles) = parent.primary_styles() else {
                 return false;
             };
             let display = parent_styles.clone_display();
             if display.is_contents() {
-                parent_id = parent.parent.get();
+                parent_id = parent.parent_id();
                 continue;
             }
             return matches!(display.inside(), DisplayInside::Flex | DisplayInside::Grid);

@@ -83,7 +83,7 @@ icu_segmenter = { workspace = true }
 writeable = { workspace = true, optional = true }
 
 # Other dependencies
-slotmap = { workspace = true }
+compact_str = "0.8"
 bitflags = { workspace = true }
 encoding_rs = "0.8"
 tracing = { workspace = true, optional = true }

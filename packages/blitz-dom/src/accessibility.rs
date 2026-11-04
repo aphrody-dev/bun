@@ -111,10 +111,10 @@ impl BaseDocument {
         node: &BlitzDomNode,
         parent: &mut AccessKitNode,
     ) -> (NodeId, AccessKitNode) {
-        let id = NodeId(node.id.as_u64());
+        let id = NodeId(node.id().as_u64());
 
         let mut builder = AccessKitNode::default();
-        if node.parent.get().is_none() {
+        if node.parent_id().is_none() {
             builder.set_role(Role::Window)
         } else if let Some(element_data) = node.element_data() {
             let name = element_data.name.local.to_string();
@@ -210,7 +210,7 @@ impl BlitzDomNode {
         match &self.data {
             NodeData::Text(data) => out.push(&data.content),
             NodeData::Element(..) | NodeData::AnonymousBlock(..) => {
-                for &child_id in &self.children {
+                for child_id in self.children() {
                     self.with(child_id).write_flat_text_content(out);
                 }
             }

@@ -18,8 +18,9 @@ pub struct AttrName {
 pub struct Attribute {
     /// The name of the attribute (e.g. the `class` in `<div class="test">`)
     pub name: AttrName,
-    /// The value of the attribute (e.g. the `"test"` in `<div class="test">`)
-    pub value: String,
+    /// The value of the attribute (e.g. the `"test"` in `<div class="test">`). Inline up to
+    /// 12 bytes on wasm32.
+    pub value: compact_str::CompactString,
     /// The prefix and namespace of an attribute that has either.
     ext: Option<Box<(Option<Prefix>, Namespace)>>,
 }
@@ -27,12 +28,12 @@ pub struct Attribute {
 static NS_EMPTY: Namespace = ns!();
 
 impl Attribute {
-    pub fn new(name: QualName, value: String) -> Self {
+    pub fn new(name: QualName, value: impl Into<compact_str::CompactString>) -> Self {
         let QualName { prefix, ns, local } = name;
         let ext = (prefix.is_some() || ns != ns!()).then(|| Box::new((prefix, ns)));
         Self {
             name: AttrName { local },
-            value,
+            value: value.into(),
             ext,
         }
     }
@@ -95,10 +96,9 @@ impl Attributes {
     pub fn set(&mut self, name: QualName, value: &str) {
         let existing_attr = self.inner.iter_mut().find(|a| a.has_name(&name));
         if let Some(existing_attr) = existing_attr {
-            existing_attr.value.clear();
-            existing_attr.value.push_str(value);
+            existing_attr.value = value.into();
         } else {
-            self.push(Attribute::new(name, value.to_string()));
+            self.push(Attribute::new(name, value));
         }
     }
 
@@ -124,6 +124,20 @@ impl DerefMut for Attributes {
 mod tests {
     use super::{Attribute, Attributes};
     use markup5ever::{QualName, local_name, ns};
+
+    #[test]
+    fn short_values_stay_inline_across_rewrites() {
+        let name = QualName::new(None, ns!(), local_name!("class"));
+        let mut attrs = Attributes::new(Vec::new());
+        attrs.set(name.clone(), "a long value past twelve bytes");
+        assert!(attrs.get(&name).unwrap().value.is_heap_allocated());
+        attrs.set(name.clone(), "short");
+        let value = &attrs.get(&name).unwrap().value;
+        assert_eq!(value.as_str(), "short");
+        assert!(!value.is_heap_allocated(), "a rewrite to a short value frees the heap copy");
+        let text = crate::node::TextNodeData::new("\n  ");
+        assert!(!text.content.is_heap_allocated());
+    }
 
     #[test]
     fn attribute_names_round_trip_and_match_exactly() {

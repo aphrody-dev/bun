@@ -321,7 +321,7 @@ impl BaseDocument {
                 .copied()
                 .filter(|&id| {
                     self.nodes.get(id).is_some_and(|n| {
-                        n.layout_parent.get() != Some(node_id) && !self.paints_rehomed(id)
+                        n.layout_parent_id() != Some(node_id) && !self.paints_rehomed(id)
                     })
                 })
                 .map(|id| {
@@ -438,7 +438,7 @@ impl BaseDocument {
         let Some(cb) = node.oof_containing_block() else {
             return false;
         };
-        let Some(flow_parent) = node.layout_parent.get() else {
+        let Some(flow_parent) = node.layout_parent_id() else {
             return false;
         };
         if flow_parent == cb || node.z_index() != 0 {
@@ -458,8 +458,7 @@ impl BaseDocument {
     fn clipped_below(&self, flow_parent: NodeId, cb: NodeId) -> bool {
         let next = |id: NodeId| {
             let node = self.nodes.get(id)?;
-            node.parent
-                .get()
+            node.parent_id()
                 .or_else(|| node.shadow_root_data().map(|data| data.host))
         };
         let mut cur = next(flow_parent);
@@ -493,7 +492,7 @@ impl BaseDocument {
             .unwrap_or_default();
         for id in hoisted {
             let Some(child) = self.nodes.get(id) else { continue };
-            let Some(flow_parent) = child.layout_parent.get() else { continue };
+            let Some(flow_parent) = child.layout_parent_id() else { continue };
             if flow_parent == node_id {
                 continue;
             }
@@ -507,7 +506,7 @@ impl BaseDocument {
                 let Some(cur_id) = cur.filter(|&c| c != node_id) else { break };
                 let Some(node) = self.nodes.get_mut(cur_id) else { break };
                 node.insert_damage(RestyleDamage::REBUILD_STACKING_CONTEXT);
-                cur = node.layout_parent.get();
+                cur = node.layout_parent_id();
             }
         }
     }
@@ -517,7 +516,7 @@ impl BaseDocument {
     fn layout_child_containing(&self, node_id: NodeId, id: NodeId) -> Option<NodeId> {
         let mut current = id;
         loop {
-            let parent = self.nodes.get(current)?.layout_parent.get()?;
+            let parent = self.nodes.get(current)?.layout_parent_id()?;
             if parent == node_id {
                 return Some(current);
             }

@@ -439,9 +439,7 @@ impl LayoutChildren {
         if self.anonymous_table_id.is_none() {
             self.create_anonymous_table(container_node_id, doc);
         }
-        doc.nodes[self.anonymous_table_id.unwrap()]
-            .children
-            .push(child_id);
+        doc.nodes[self.anonymous_table_id.unwrap()].push_child(child_id);
     }
 
     fn create_anonymous_table(&mut self, container_node_id: NodeId, doc: &mut BaseDocument) {
@@ -452,7 +450,7 @@ impl LayoutChildren {
             ns: ns!(html),
             local: local_name!("table"),
         };
-        let node_id = doc.create_node(NodeData::AnonymousBlock(Box::new(ElementData::new(
+        let node_id = doc.create_node(NodeData::AnonymousBlock(crate::pool::PoolBox::new(ElementData::new(
             NAME,
             Vec::new(),
         ))));
@@ -485,10 +483,8 @@ impl LayoutChildren {
         {
             doc.nodes[node_id].flags.insert(NodeFlags::IS_IN_DOCUMENT);
         }
-        doc.nodes[node_id].parent.set(Some(container_node_id));
-        doc.nodes[node_id]
-            .layout_parent
-            .set(Some(container_node_id));
+        doc.nodes[node_id].set_parent_id(Some(container_node_id));
+        doc.nodes[node_id].set_layout_parent_id(Some(container_node_id));
 
         self.children.push(node_id);
         self.anonymous_blocks.push(node_id);
@@ -497,7 +493,7 @@ impl LayoutChildren {
 
     fn maybe_push_anon_block(&mut self, doc: &mut BaseDocument) {
         fn block_is_only_whitespace(doc: &BaseDocument, node_id: NodeId) -> bool {
-            for child_id in doc.nodes[node_id].children.iter().copied() {
+            for child_id in doc.nodes[node_id].children() {
                 let child = &doc.nodes[child_id];
                 if !child.is_collapsible_whitespace_node() {
                     return false;
@@ -533,9 +529,7 @@ impl LayoutChildren {
         if self.anonymous_block_id.is_none() {
             self.create_anonymous_block(container_node_id, doc);
         }
-        doc.nodes[self.anonymous_block_id.unwrap()]
-            .children
-            .push(child_id);
+        doc.nodes[self.anonymous_block_id.unwrap()].push_child(child_id);
     }
 
     fn create_anonymous_block(&mut self, container_node_id: NodeId, doc: &mut BaseDocument) {
@@ -546,7 +540,7 @@ impl LayoutChildren {
             ns: ns!(html),
             local: local_name!("div"),
         };
-        let node_id = doc.create_node(NodeData::AnonymousBlock(Box::new(ElementData::new(
+        let node_id = doc.create_node(NodeData::AnonymousBlock(crate::pool::PoolBox::new(ElementData::new(
             NAME,
             Vec::new(),
         ))));
@@ -579,10 +573,8 @@ impl LayoutChildren {
         {
             doc.nodes[node_id].flags.insert(NodeFlags::IS_IN_DOCUMENT);
         }
-        doc.nodes[node_id].parent.set(Some(container_node_id));
-        doc.nodes[node_id]
-            .layout_parent
-            .set(Some(container_node_id));
+        doc.nodes[node_id].set_parent_id(Some(container_node_id));
+        doc.nodes[node_id].set_layout_parent_id(Some(container_node_id));
 
         self.children.push(node_id);
         self.anonymous_block_id = Some(node_id);
@@ -594,7 +586,7 @@ fn push_children_and_pseudos(layout_children: &mut ThinVec<NodeId>, node: &Node)
     if let Some(before) = node.before() {
         layout_children.push(before);
     }
-    layout_children.extend(node.flat_children().iter().copied().filter(|child_id| {
+    layout_children.extend(node.flat_children().iter().filter(|child_id| {
         let child_node = node.with(*child_id);
         child_node.data.kind() != NodeKind::Comment
     }));
@@ -675,22 +667,25 @@ fn push_hoisted_children_and_pseudos(
     let use_assigned = doc.nodes[flat_src]
         .assigned_nodes()
         .is_some_and(|a| !a.is_empty());
-    let children = if use_assigned {
-        doc.nodes[flat_src].take_assigned_nodes().unwrap()
-    } else {
-        std::mem::take(&mut doc.nodes[flat_src].children)
-    };
-    for child_id in children.iter().copied() {
-        let child = &doc.nodes[child_id];
-        if child.data.kind() == NodeKind::Comment || child.is_collapsible_whitespace_node() {
-            continue;
+    let push_all = |doc: &mut BaseDocument,
+                    ids: &mut dyn Iterator<Item = NodeId>,
+                    out: &mut LayoutChildren| {
+        for child_id in ids {
+            let child = &doc.nodes[child_id];
+            if child.data.kind() == NodeKind::Comment || child.is_collapsible_whitespace_node() {
+                continue;
+            }
+            push_hoisted_child(doc, child_id, out, wrap);
         }
-        push_hoisted_child(doc, child_id, out, wrap);
-    }
+    };
     if use_assigned {
+        let children = doc.nodes[flat_src].take_assigned_nodes().unwrap();
+        push_all(doc, &mut children.iter().copied(), out);
         doc.nodes[flat_src].set_assigned_nodes(Some(children));
     } else {
-        doc.nodes[flat_src].children = children;
+        let children = doc.nodes[flat_src].take_detached_children();
+        push_all(doc, &mut children.ids().iter(), out);
+        doc.nodes[flat_src].restore_detached_children(children);
     }
     if let Some(after) = doc.nodes[container_node_id].after() {
         push_hoisted_child(doc, after, out, wrap);
@@ -701,7 +696,7 @@ fn push_non_whitespace_children_and_pseudos(layout_children: &mut ThinVec<NodeId
     if let Some(before) = node.before() {
         layout_children.push(before);
     }
-    layout_children.extend(node.flat_children().iter().copied().filter(|child_id| {
+    layout_children.extend(node.flat_children().iter().filter(|child_id| {
         let child_node = node.with(*child_id);
         !child_node.is_whitespace_node() && child_node.data.kind() != NodeKind::Comment
     }));
@@ -755,7 +750,7 @@ fn classify_flow_children(
                 .unwrap_or(Display::inline());
             matches!(display.inside(), DisplayInside::Contents)
         });
-    let child_ids = node.flat_children().iter().copied().chain(pseudo_ids);
+    let child_ids = node.flat_children().iter().chain(pseudo_ids);
     for child_id in child_ids {
         let child = &doc.nodes[child_id];
 
@@ -841,7 +836,7 @@ fn collect_layout_children_with_wrap(
 ) {
     // Record the `display` the box is being constructed with
     if let Some(display) = doc.nodes[container_node_id].display_style() {
-        *doc.nodes[container_node_id].display_constructed_as_mut() = display;
+        doc.nodes[container_node_id].set_display_constructed_as(display);
     }
 
     // Reset construction flags
@@ -895,7 +890,7 @@ fn collect_layout_children_with_wrap(
                     .data
                     .downcast_element_mut()
                     .unwrap();
-                if !matches!(el.special_data, SpecialElementData::RangeInput(_)) {
+                if !matches!(el.special_data(), SpecialElementData::RangeInput(_)) {
                     // Rust `str::parse::<f64>()` accepts "NaN",
                     // "inf", "-inf": feeding those into
                     // f64::clamp panics (requires !NaN and min<=
@@ -919,7 +914,7 @@ fn collect_layout_children_with_wrap(
                         .and_then(parse_finite)
                         .unwrap_or((min + max) / 2.0)
                         .clamp(min, max);
-                    el.special_data = SpecialElementData::RangeInput(Box::new(value));
+                    el.set_special_data(SpecialElementData::RangeInput(Box::new(value)));
                 }
                 return;
             }
@@ -1010,8 +1005,9 @@ fn collect_layout_children_with_wrap(
                 Ok(mut svg) => {
                     svg.snapshot_prefix = Some(snapshot_prefix);
                     let node = doc.get_node_mut(container_node_id).unwrap();
-                    node.element_data_mut().unwrap().special_data =
-                        SpecialElementData::Image(Box::new(crate::node::ImageData::Svg(svg)));
+                    node.element_data_mut().unwrap().set_special_data(
+                        SpecialElementData::Image(Box::new(crate::node::ImageData::Svg(svg))),
+                    );
                 }
                 Err(err) => {
                     #[cfg(feature = "tracing")]
@@ -1081,7 +1077,6 @@ fn collect_layout_children_with_wrap(
             let has_text_node_or_contents = container
                 .flat_children()
                 .iter()
-                .copied()
                 .chain(container.before())
                 .chain(container.after())
                 .map(|child_id| &doc.nodes[child_id])
@@ -1121,7 +1116,7 @@ fn collect_layout_children_with_wrap(
                 .data
                 .downcast_element_mut()
                 .unwrap()
-                .special_data = data;
+                .set_special_data(data);
             if let Some(before) = doc.nodes[container_node_id].before() {
                 out.push(before, doc);
             }
@@ -1179,7 +1174,7 @@ fn collect_layout_children_with_wrap(
             let has_table_internal = doc.nodes[container_node_id]
                 .flat_children()
                 .iter()
-                .any(|&child_id| {
+                .any(|child_id| {
                     let child = &doc.nodes[child_id];
                     child.data.kind() == NodeKind::Element
                         && child
@@ -1291,11 +1286,11 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
 
         // Create pseudo element if it should exist but doesn't
         if let (None, Some(pe_style)) = (pe_node_id, &pe_style) {
-            let new_node_id = doc.create_node(NodeData::AnonymousBlock(Box::new(
+            let new_node_id = doc.create_node(NodeData::AnonymousBlock(crate::pool::PoolBox::new(
                 ElementData::new(DUMMY_NAME, Vec::new()),
             )));
-            doc.nodes[new_node_id].parent.set(Some(node_id));
-            doc.nodes[new_node_id].layout_parent.set(Some(node_id));
+            doc.nodes[new_node_id].set_parent_id(Some(node_id));
+            doc.nodes[new_node_id].set_layout_parent_id(Some(node_id));
             if doc.nodes[node_id].flags.contains(NodeFlags::IS_IN_DOCUMENT) {
                 doc.nodes[new_node_id]
                     .flags
@@ -1304,8 +1299,8 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
 
             if let Some(text) = pe_content_text_resolved(doc, node_id, idx, pe_style) {
                 let text_node_id = doc.create_text_node(&text);
-                doc.nodes[text_node_id].parent.set(Some(new_node_id));
-                doc.nodes[new_node_id].children.push(text_node_id);
+                doc.nodes[text_node_id].set_parent_id(Some(new_node_id));
+                doc.nodes[new_node_id].push_child(text_node_id);
                 if doc.nodes[node_id].flags.is_in_document() {
                     doc.nodes[text_node_id]
                         .flags
@@ -1340,9 +1335,8 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
             // style traversal without the text having been updated.
             let new_text = pe_content_text_resolved(doc, node_id, idx, &pe_style);
             let existing_text_node_id = doc.nodes[pe_node_id]
-                .children
+                .children()
                 .first()
-                .copied()
                 .filter(|&child_id| doc.nodes[child_id].is_text_node());
             match (existing_text_node_id, new_text) {
                 (Some(text_node_id), Some(new_text)) => {
@@ -1352,15 +1346,15 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
                         let in_document = doc.nodes[node_id].flags.is_in_document();
                         doc.note_text_codepoints(&new_text, in_document);
                         let text_data = doc.nodes[text_node_id].text_data_mut().unwrap();
-                        text_data.content = new_text;
+                        text_data.content = new_text.into();
                         doc.nodes[node_id].insert_damage(ALL_DAMAGE);
                     }
                 }
                 (None, Some(new_text)) => {
                     let in_document = doc.nodes[node_id].flags.is_in_document();
                     let text_node_id = doc.create_text_node(&new_text);
-                    doc.nodes[text_node_id].parent.set(Some(pe_node_id));
-                    doc.nodes[pe_node_id].children.push(text_node_id);
+                    doc.nodes[text_node_id].set_parent_id(Some(pe_node_id));
+                    doc.nodes[pe_node_id].push_child(text_node_id);
                     if in_document {
                         doc.nodes[text_node_id]
                             .flags
@@ -1370,9 +1364,7 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
                     doc.nodes[node_id].insert_damage(ALL_DAMAGE);
                 }
                 (Some(text_node_id), None) => {
-                    doc.nodes[pe_node_id]
-                        .children
-                        .retain(|&child_id| child_id != text_node_id);
+                    doc.nodes[pe_node_id].remove_child(text_node_id);
                     doc.remove_node_from_tree(text_node_id);
                     doc.nodes[node_id].insert_damage(ALL_DAMAGE);
                 }
@@ -1520,7 +1512,7 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
     let parley_style = node
         .primary_styles()
         .as_ref()
-        .map(|s| stylo_to_parley::style(node.id, s))
+        .map(|s| stylo_to_parley::style(node.id(), s))
         .unwrap_or_default();
     let alignment = node
         .primary_styles()
@@ -1570,7 +1562,7 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
     // (defaultValue) decoupled, and this construct pass re-runs on
     // every layout, so without the override precedence a JS value
     // write would be clobbered right back to the attribute text.
-    let value_override = match &element.special_data {
+    let value_override = match element.special_data() {
         SpecialElementData::TextInput(d) => d.value_override.clone(),
         _ => None,
     };
@@ -1595,15 +1587,15 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
     let placeholder_color = placeholder_look.map(|(color, _)| color);
     let placeholder_font_style = placeholder_look.map(|(_, font_style)| font_style);
 
-    if !matches!(element.special_data, SpecialElementData::TextInput(_)) {
+    if !matches!(element.special_data(), SpecialElementData::TextInput(_)) {
         let mut text_input_data = TextInputData::new(is_multiline);
         let editor = &mut text_input_data.editor;
         editor.set_text(&display_text);
         text_input_data.is_showing_placeholder = is_placeholder;
         text_input_data.placeholder_color = placeholder_color;
         text_input_data.placeholder_font_style = placeholder_font_style;
-        element.special_data = SpecialElementData::TextInput(Box::new(text_input_data));
-    } else if let SpecialElementData::TextInput(data) = &mut element.special_data {
+        element.set_special_data(SpecialElementData::TextInput(Box::new(text_input_data)));
+    } else if let Some(SpecialElementData::TextInput(data)) = element.special_data_mut() {
         // Update the editor's text on subsequent layouts so an
         // empty input switches between placeholder and real
         // value as the user types. This guard keeps the
@@ -1618,7 +1610,7 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
         data.placeholder_font_style = placeholder_font_style;
     }
 
-    let SpecialElementData::TextInput(text_input_data) = &mut element.special_data else {
+    let Some(SpecialElementData::TextInput(text_input_data)) = element.special_data_mut() else {
         unreachable!();
     };
 
@@ -1659,9 +1651,9 @@ fn create_checkbox_input(doc: &mut BaseDocument, input_element_id: NodeId) {
     let node = &mut doc.nodes[input_element_id];
 
     let element = &mut node.data.downcast_element_mut().unwrap();
-    if !matches!(element.special_data, SpecialElementData::CheckboxInput(_)) {
+    if !matches!(element.special_data(), SpecialElementData::CheckboxInput(_)) {
         let checked = element.has_attr(local_name!("checked"));
-        element.special_data = SpecialElementData::CheckboxInput(checked);
+        element.set_special_data(SpecialElementData::CheckboxInput(checked));
         element.set_checkbox_input_checked(checked);
     }
 }
@@ -1719,7 +1711,7 @@ pub(crate) fn find_inline_layout_embedded_boxes(
         let node = &mut doc.nodes[node_id];
 
         // Set layout_parent for node.
-        node.layout_parent.set(Some(parent_id));
+        node.set_layout_parent_id(Some(parent_id));
 
         match &node.data {
             NodeData::Element(element_data) | NodeData::AnonymousBlock(element_data) => {
@@ -1840,8 +1832,7 @@ pub(crate) fn build_inline_layout_into(
     let root_node = &nodes[inline_context_root_node_id];
     let root_node_style = root_node.primary_styles().or_else(|| {
         root_node
-            .parent
-            .get()
+            .parent_id()
             .and_then(|parent_id| nodes[parent_id].primary_styles())
     });
 
@@ -1916,7 +1907,7 @@ pub(crate) fn build_inline_layout_into(
             node_ranges,
         );
     }
-    for child_id in root_node.flat_children().iter().copied() {
+    for child_id in root_node.flat_children().iter() {
         build_inline_layout_recursive(
             &mut builder,
             &mut text_transformer,
@@ -2002,7 +1993,7 @@ pub(crate) fn build_inline_layout_into(
                                 .as_ref()
                                 .map_or(&[][..], |styles| styles.as_slice()),
                         );
-                        for child_id in node.flat_children().iter().copied() {
+                        for child_id in node.flat_children().iter() {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             build_inline_layout_recursive(
                                 builder,
@@ -2067,7 +2058,7 @@ pub(crate) fn build_inline_layout_into(
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             let style = node
                                 .primary_styles()
-                                .map(|s| stylo_to_parley::style(node.id, &s))
+                                .map(|s| stylo_to_parley::style(node.id(), &s))
                                 .unwrap_or_else(|| parley::TextStyle {
                                     white_space_collapse: WhiteSpaceCollapse::Collapse,
                                     ..Default::default()
@@ -2090,7 +2081,7 @@ pub(crate) fn build_inline_layout_into(
                                 );
                             }
 
-                            for child_id in node.flat_children().iter().copied() {
+                            for child_id in node.flat_children().iter() {
                                 build_inline_layout_recursive(
                                     builder,
                                     text_transformer,

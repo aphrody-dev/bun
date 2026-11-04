@@ -230,7 +230,7 @@ pub fn walk_tree(indent: usize, node: &Node) {
     }
 
     print!("{}", " ".repeat(indent));
-    let id = node.id;
+    let id = node.id();
     match &node.data {
         NodeData::Document(_) => println!("#Document {id}"),
 
@@ -264,7 +264,7 @@ pub fn walk_tree(indent: usize, node: &Node) {
             for attr in data.attrs.iter() {
                 print!(" {}=\"{}\"", attr.name.local, attr.value);
             }
-            if !node.children.is_empty() {
+            if !node.children().is_empty() {
                 println!(">");
             } else {
                 println!("/>");
@@ -277,9 +277,9 @@ pub fn walk_tree(indent: usize, node: &Node) {
           // NodeData::ProcessingInstruction { .. } => unreachable!(),
     }
 
-    if !node.children.is_empty() {
-        for child_id in node.children.iter() {
-            walk_tree(indent + 2, node.with(*child_id));
+    if !node.children().is_empty() {
+        for child_id in node.children().iter() {
+            walk_tree(indent + 2, node.with(child_id));
         }
 
         if let NodeData::Element(data) = &node.data {

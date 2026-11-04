@@ -1,6 +1,7 @@
 #![allow(clippy::module_inception)]
 
 mod attributes;
+mod child_list;
 #[cfg(feature = "custom-widget")]
 mod custom_widget;
 mod element;
@@ -19,7 +20,7 @@ pub use custom_widget::{
 };
 pub use element::{
     CanvasData, DocumentData, ElementData, ElementStateBits, ImageData, ImageResourceData,
-    LayoutData, ListItemLayout, ListItemLayoutPosition, Marker, RasterImageData, SelectorFlagsCell,
+    LayoutData, ListItemLayout, ListItemLayoutPosition, Marker, RasterImageData, SelectorFlagsRef,
     SpecialElementData, SpecialElementType, Status, parse_class_list,
 };
 pub use node::*;

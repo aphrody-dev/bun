@@ -533,15 +533,15 @@ impl<'a> TNode for BlitzNode<'a> {
     type ConcreteShadowRoot = BlitzNode<'a>;
 
     fn parent_node(&self) -> Option<Self> {
-        self.parent.get().map(|id| self.with(id))
+        self.parent_id().map(|id| self.with(id))
     }
 
     fn first_child(&self) -> Option<Self> {
-        self.children.first().map(|id| self.with(*id))
+        self.children().first().map(|id| self.with(id))
     }
 
     fn last_child(&self) -> Option<Self> {
-        self.children.last().map(|id| self.with(*id))
+        self.children().last().map(|id| self.with(id))
     }
 
     fn prev_sibling(&self) -> Option<Self> {
@@ -555,7 +555,7 @@ impl<'a> TNode for BlitzNode<'a> {
     fn owner_doc(&self) -> Self::ConcreteDocument {
         // Walk up the (layout-)parent chain to the root Document node.
         let mut node = *self;
-        while let Some(parent_id) = node.parent.get() {
+        while let Some(parent_id) = node.parent_id() {
             node = node.with(parent_id);
         }
         node
@@ -579,11 +579,11 @@ impl<'a> TNode for BlitzNode<'a> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        OpaqueNode(self.id.as_u64() as usize)
+        OpaqueNode(Node::id(self).as_u64() as usize)
     }
 
     fn debug_id(self) -> usize {
-        self.id.as_u64() as usize
+        self.id().as_u64() as usize
     }
 
     fn as_element(&self) -> Option<Self::ConcreteElement> {
@@ -620,7 +620,7 @@ impl selectors::Element for BlitzNode<'_> {
         // find some other solution that will enable "rehydration". This is required to enable and use the
         // Shadow DOM functionality in Stylo.
         let non_null =
-            NonNull::new((self.id.as_u64() as usize).wrapping_add(1) as *mut ()).unwrap();
+            NonNull::new((Node::id(self).as_u64() as usize).wrapping_add(1) as *mut ()).unwrap();
         OpaqueElement::from_non_null_ptr(non_null)
     }
 
@@ -631,8 +631,7 @@ impl selectors::Element for BlitzNode<'_> {
     }
 
     fn parent_node_is_shadow_root(&self) -> bool {
-        self.parent
-            .get()
+        self.parent_id()
             .is_some_and(|id| self.with(id).is_shadow_root())
     }
 
@@ -653,24 +652,26 @@ impl selectors::Element for BlitzNode<'_> {
     // Locate self in the parent's child list once, then scan from there: stepping with
     // forward(n)/backward(n) repeated that lookup for every skipped text node.
     fn prev_sibling_element(&self) -> Option<Self> {
-        let parent = self.with(self.parent.get()?);
+        let parent = self.with(self.parent_id()?);
         let index = self.child_index().unwrap_or(0);
-        parent.children[..index]
+        let children = parent.children();
+        assert!(index <= children.len(), "child index past the end of the child list");
+        children
             .iter()
+            .take(index)
             .rev()
-            .map(|id| self.with(*id))
+            .map(|id| self.with(id))
             .find(|node| node.is_element())
     }
 
     fn next_sibling_element(&self) -> Option<Self> {
-        let parent = self.with(self.parent.get()?);
+        let parent = self.with(self.parent_id()?);
         let index = self.child_index().unwrap_or(0);
         parent
-            .children
-            .get(index + 1..)
-            .unwrap_or_default()
+            .children()
             .iter()
-            .map(|id| self.with(*id))
+            .skip(index + 1)
+            .map(|id| self.with(id))
             .find(|node| node.is_element())
     }
 
@@ -1071,11 +1072,11 @@ impl<'a> TElement for BlitzNode<'a> {
     }
 
     fn handled_snapshot(&self) -> bool {
-        self.snapshot_handled().load(Ordering::SeqCst)
+        self.snapshot_handled()
     }
 
     unsafe fn set_handled_snapshot(&self) {
-        self.snapshot_handled().store(true, Ordering::SeqCst);
+        self.set_snapshot_handled(true);
     }
 
     // Stylo calls this on elements it is already traversing (or has already
@@ -1198,7 +1199,7 @@ impl<'a> TElement for BlitzNode<'a> {
         self.attrs()?
             .iter()
             .find(|a| a.name.local == attr.0 && *a.namespace() == ns.0)
-            .map(|a| a.value.clone())
+            .map(|a| a.value.to_string())
     }
 
     fn lang_attr(&self) -> Option<style::selector_parser::AttrValue> {
@@ -1227,7 +1228,7 @@ impl<'a> TElement for BlitzNode<'a> {
         let root_element = TDocument::as_node(&root_node)
             .first_element_child()
             .unwrap();
-        root_element.children.contains(&self.id)
+        root_element.children().contains(Node::id(self))
     }
 
     fn synthesize_presentational_hints_for_legacy_attributes<V>(
@@ -1686,7 +1687,7 @@ impl<'a> Iterator for Traverser<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let node_id = self.parent.flat_children().get(self.child_index)?;
-        let node = self.parent.with(*node_id);
+        let node = self.parent.with(node_id);
 
         self.child_index += 1;
 
@@ -1696,7 +1697,7 @@ impl<'a> Iterator for Traverser<'a> {
 
 impl std::hash::Hash for BlitzNode<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write_u64(self.id.as_u64())
+        state.write_u64(Node::id(self).as_u64())
     }
 }
 
@@ -1798,7 +1799,7 @@ impl<'dom> DomTraversal<BlitzNode<'dom>> for RecalcStyle<'_> {
                     self.nodes_needing_style_image_flush
                         .lock()
                         .unwrap()
-                        .push(el.id);
+                        .push(Node::id(el));
                 }
             }
 

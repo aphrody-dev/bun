@@ -6,7 +6,7 @@ use crate::layout::TaffyDebugTree;
 
 impl BaseDocument {
     pub fn print_taffy_tree(&self) {
-        let root_id = crate::taffy_node_id(self.root_element().id);
+        let root_id = crate::taffy_node_id(self.root_element().id());
         taffy::print_tree(&TaffyDebugTree(self), root_id);
         for &node_id in &self.sub_document_nodes {
             if let Some(sub_doc) = self.nodes[node_id].subdoc() {
@@ -25,7 +25,7 @@ impl BaseDocument {
             tracing::info!("Display: {:?}", node.taffy_display());
         }
 
-        println!("\nNode {} {}", node.id, node.node_debug_str());
+        println!("\nNode {} {}", node.id(), node.node_debug_str());
 
         println!("Attrs:");
 
@@ -116,22 +116,22 @@ impl BaseDocument {
             t = layout.margin.top,
             b = layout.margin.bottom,
         );
-        println!("Parent: {:?}", node.parent.get());
+        println!("Parent: {:?}", node.parent_id());
 
         let children: Vec<_> = node
-            .children
+            .children()
             .iter()
-            .map(|id| &self.nodes[*id])
-            .map(|node| (node.id, node.order(), node.node_debug_str()))
+            .map(|id| &self.nodes[id])
+            .map(|node| (node.id(), node.order(), node.node_debug_str()))
             .collect();
         println!("Children: {children:?}");
 
-        println!("Layout Parent: {:?}", node.layout_parent.get());
+        println!("Layout Parent: {:?}", node.layout_parent_id());
 
         let layout_children: Option<Vec<_>> = node.layout_children().as_ref().map(|lc| {
             lc.iter()
                 .map(|id| &self.nodes[*id])
-                .map(|node| (node.id, node.order(), node.node_debug_str()))
+                .map(|node| (node.id(), node.order(), node.node_debug_str()))
                 .collect()
         });
         if let Some(layout_children) = layout_children {
@@ -141,7 +141,7 @@ impl BaseDocument {
         let paint_children: Option<Vec<_>> = node.paint_children().as_ref().map(|lc| {
             lc.iter()
                 .map(|id| &self.nodes[*id])
-                .map(|node| (node.id, node.order(), node.node_debug_str()))
+                .map(|node| (node.id(), node.order(), node.node_debug_str()))
                 .collect()
         });
         if let Some(paint_children) = paint_children {
@@ -164,7 +164,7 @@ mod tests {
             viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
             ..Default::default()
         });
-        let root = doc.root_node().id;
+        let root = doc.root_node().id();
         let mut mutator = doc.mutate();
         let html = mutator.create_element(qual_name!("html", html), vec![]);
         let body = mutator.create_element(qual_name!("body", html), vec![]);
@@ -190,7 +190,7 @@ mod tests {
         assert_eq!(tree.get_final_layout(child_id).size.height, 20.0);
         assert_eq!(
             tree.get_final_layout(child_id),
-            *doc.nodes[child].final_layout()
+            doc.nodes[child].final_layout()
         );
 
         let mut output = Vec::new();

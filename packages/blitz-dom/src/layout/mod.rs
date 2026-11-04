@@ -127,7 +127,7 @@ impl<'doc> LayoutPassState<'doc> {
 
     pub(crate) fn new(doc: &'doc mut BaseDocument) -> Self {
         #[cfg(feature = "writing-mode")]
-        let root_id = doc.try_root_element().map(|root| root.id);
+        let root_id = doc.try_root_element().map(|root| root.id());
         Self {
             #[cfg(feature = "writing-mode")]
             root_wm: root_id.map_or(stylo_taffy::WritingMode::empty(), |id| {
@@ -430,7 +430,7 @@ impl LayoutPassState<'_> {
                     };
 
                     // Get the element's intrinsic dimensions and default object size
-                    let (intrinsic_sizes, default_object_size) = match &element_data.special_data {
+                    let (intrinsic_sizes, default_object_size) = match element_data.special_data() {
                         SpecialElementData::Image(image_data) => match &**image_data {
                             ImageData::Raster(image) => {
                                 let (width, height) = (image.width as f32, image.height as f32);
@@ -570,11 +570,11 @@ impl LayoutPassState<'_> {
                             inputs.available_space.maybe_min(max_available_space);
                     }
 
-                    let SpecialElementData::TableRoot(context) = &self.nodes[dom_node_id(node_id)]
+                    let SpecialElementData::TableRoot(context) = self.nodes[dom_node_id(node_id)]
                         .data
                         .downcast_element()
                         .unwrap()
-                        .special_data
+                        .special_data()
                     else {
                         panic!("Node marked as table root but doesn't have TableContext");
                     };
@@ -720,9 +720,9 @@ impl LayoutPartialTree for LayoutPassState<'_> {
         // round_layout is a pure function of these, so noting whether any of
         // them actually moved lets resolve skip the whole rounding walk.
         if !self.layout_changed {
-            self.layout_changed = *self.node_from_id(node_id).unrounded_layout() != *layout;
+            self.layout_changed = self.node_from_id(node_id).unrounded_layout() != *layout;
         }
-        *self.node_from_id_mut(node_id).unrounded_layout_mut() = *layout;
+        self.node_from_id_mut(node_id).set_unrounded_layout(layout);
     }
 
     fn resolve_calc_value(&self, calc_ptr: *const (), parent_size: f32) -> f32 {
@@ -986,12 +986,12 @@ impl taffy::LayoutGridContainer for LayoutPassState<'_> {
 
 impl RoundTree for LayoutPassState<'_> {
     fn get_unrounded_layout(&self, node_id: NodeId) -> Layout {
-        *self.node_from_id(node_id).unrounded_layout()
+        self.node_from_id(node_id).unrounded_layout()
     }
 
     fn set_final_layout(&mut self, node_id: NodeId, layout: &Layout) {
         let layout_data = self.node_from_id_mut(node_id).layout_data_mut();
-        layout_data.final_layout = *layout;
+        layout_data.set_final_layout(layout);
         // This is the only wholesale write of a location, so it is also the
         // only place a baked sticky shift can silently disappear.
         layout_data.set_pin_offset(taffy::Point { x: 0.0, y: 0.0 });
@@ -1087,7 +1087,7 @@ impl PrintTree for TaffyDebugTree<'_> {
     }
 
     fn get_final_layout(&self, node_id: NodeId) -> Layout {
-        *self.node_from_id(node_id).final_layout()
+        self.node_from_id(node_id).final_layout()
     }
 }
 

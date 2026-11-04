@@ -293,11 +293,11 @@ impl LayoutPassState<'_> {
         // The spans of an anonymous inline root are descendants of its parent
         let root_parent = root
             .is_anonymous()
-            .then_some(root.parent.get())
+            .then_some(root.parent_id())
             .flatten();
 
         let mut flags = StyleFlags::empty();
-        let mut current = self.nodes[box_id].parent.get();
+        let mut current = self.nodes[box_id].parent_id();
         while let Some(id) = current {
             if id == root_id || Some(id) == root_parent {
                 return flags;
@@ -317,7 +317,7 @@ impl LayoutPassState<'_> {
                     }
                 }
             }
-            current = ancestor.parent.get();
+            current = ancestor.parent_id();
         }
         StyleFlags::empty()
     }
@@ -1034,10 +1034,12 @@ impl LayoutPassState<'_> {
                             x: pos.x + margin.left + container_pb.left + relative_inset.x,
                             y: pos.y + margin.top + container_pb.top + relative_inset.y,
                         };
-                        let layout = self.nodes[float_id].unrounded_layout_mut();
+                        let float_node = &mut self.nodes[float_id];
+                        let mut layout = float_node.unrounded_layout();
                         layout.size = output.size;
                         layout.location = location;
                         layout.margin = margin;
+                        float_node.set_unrounded_layout(&layout);
 
                         // Translate anchors from item-relative to container-relative
                         // coordinates and collect candidates bubbled from the float's subtree
@@ -1335,10 +1337,12 @@ impl LayoutPassState<'_> {
                             container_direction,
                         ));
                     } else if is_floated {
-                        let layout = self.nodes[NodeId::from_u64(ibox.id)].unrounded_layout_mut();
+                        let float_node = &mut self.nodes[NodeId::from_u64(ibox.id)];
+                        let mut layout = float_node.unrounded_layout();
                         layout.padding = padding; //.map(|p| p / scale);
                         layout.border = border; //.map(|p| p / scale);
                         layout.margin = margin;
+                        float_node.set_unrounded_layout(&layout);
                     } else {
                         // Re-measure the box to get its border-box size (this hits the layout
                         // cache). The size cannot be recovered from `ibox` dimensions as the
@@ -1362,7 +1366,7 @@ impl LayoutPassState<'_> {
                             taffy::Point::ZERO
                         };
 
-                        let layout = node.unrounded_layout_mut();
+                        let mut layout = node.unrounded_layout();
                         layout.size = size;
                         layout.scrollable_overflow_rect = output.scrollable_overflow_rect;
                         layout.location.x =
@@ -1374,6 +1378,7 @@ impl LayoutPassState<'_> {
                         layout.padding = padding; //.map(|p| p / scale);
                         layout.border = border; //.map(|p| p / scale);
                         layout.margin = margin;
+                        node.set_unrounded_layout(&layout);
 
                         // Translate anchors from item-relative to container-relative
                         // coordinates and collect candidates bubbled from the box's subtree

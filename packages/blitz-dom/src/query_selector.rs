@@ -77,7 +77,7 @@ impl BaseDocument {
             if candidates.contains(&node_id) {
                 return Some(node_id);
             }
-            stack.extend(self.nodes[node_id].children.iter().rev().copied());
+            stack.extend(self.nodes[node_id].children().iter().rev());
         }
         None
     }
@@ -198,7 +198,7 @@ impl BaseDocument {
             self.may_use_invalidation_for(scope),
         );
 
-        result.map(|node| node.id)
+        result.map(|node| node.id())
     }
 
     /// Find all nodes that match the selector specified as a string
@@ -259,7 +259,7 @@ impl BaseDocument {
             self.may_use_invalidation_for(scope),
         );
 
-        results.iter().map(|node| node.id).collect()
+        results.iter().map(|node| node.id()).collect()
     }
 
     fn may_use_invalidation_for(&self, scope: NodeId) -> MayUseInvalidation {
@@ -351,7 +351,7 @@ impl Node {
             &mut result,
             MayUseInvalidation::No,
         );
-        result.map(|node| node.id)
+        result.map(|node| node.id())
     }
 
     /// Find all descendants of this node that match the selector(s) specified
@@ -372,7 +372,7 @@ impl Node {
             &mut results,
             MayUseInvalidation::No,
         );
-        results.iter().map(|node| node.id).collect()
+        results.iter().map(|node| node.id()).collect()
     }
 
     /// Test whether this element matches the selector(s) specified in
@@ -395,6 +395,6 @@ impl Node {
             return None;
         }
 
-        element_closest(self, selector_list, self.owner_doc().quirks_mode()).map(|node| node.id)
+        element_closest(self, selector_list, self.owner_doc().quirks_mode()).map(|node| node.id())
     }
 }

@@ -62,12 +62,12 @@ impl BaseDocument {
         // Walk their real children and bubble that damage to the host without
         // touching the element-only layout accessors.
         if self.nodes[node_id].is_shadow_root() {
-            let children = std::mem::take(&mut self.nodes[node_id].children);
+            let children = self.nodes[node_id].take_detached_children();
             let mut damage = RestyleDamage::empty();
-            for child in children.iter() {
-                damage |= self.propagate_damage_flags(*child);
+            for child in children.ids() {
+                damage |= self.propagate_damage_flags(child);
             }
-            self.nodes[node_id].children = children;
+            self.nodes[node_id].restore_detached_children(children);
             return damage;
         }
 
@@ -85,12 +85,12 @@ impl BaseDocument {
         // may skip a display:none child, and then nothing revisits its subtree.
         if own_damage.contains(CONSTRUCT_BOX) {
             let node = &self.nodes[node_id];
-            let was_displayed = !is_display_none(*node.display_constructed_as());
+            let was_displayed = !is_display_none(node.display_constructed_as());
             let display = node.display_style();
             if let Some(display) = display.filter(|d| is_display_none(*d)) {
                 if was_displayed {
                     self.release_undisplayed_layout(node_id);
-                    *self.nodes[node_id].display_constructed_as_mut() = display;
+                    self.nodes[node_id].set_display_constructed_as(display);
                 }
             } else if !was_displayed {
                 // Shown again. Box construction records the display for the nodes it collects as
@@ -98,7 +98,7 @@ impl BaseDocument {
                 // display:contents element are consumed elsewhere and would keep the `none` that
                 // the has-box walks stop at, so record it here.
                 if let Some(display) = display {
-                    *self.nodes[node_id].display_constructed_as_mut() = display;
+                    self.nodes[node_id].set_display_constructed_as(display);
                 }
             }
         }
@@ -115,9 +115,9 @@ impl BaseDocument {
         }
 
         let mut damage_from_children = RestyleDamage::empty();
-        let children = std::mem::take(&mut self.nodes[node_id].children);
-        for child in children.iter() {
-            damage_from_children |= self.propagate_damage_flags(*child);
+        let children = self.nodes[node_id].take_detached_children();
+        for child in children.ids() {
+            damage_from_children |= self.propagate_damage_flags(child);
         }
         if let Some(before_id) = self.nodes[node_id].before() {
             damage_from_children |= self.propagate_damage_flags(before_id);
@@ -153,7 +153,7 @@ impl BaseDocument {
         damage |= damage_from_children;
 
         // Put children back
-        self.nodes[node_id].children = children;
+        self.nodes[node_id].restore_detached_children(children);
 
         if damage.contains(CONSTRUCT_BOX) {
             damage.insert(RestyleDamage::RELAYOUT);
@@ -233,13 +233,13 @@ impl BaseDocument {
         // current or owned by a container which reconstructs this frame. A
         // stale key for a freed block yields `None` (slab keys are versioned).
         if invalidate_anonymous_ancestors {
-            let mut current = self.nodes[node_id].layout_parent.get();
+            let mut current = self.nodes[node_id].layout_parent_id();
             while let Some(ancestor) = current.and_then(|id| self.nodes.get_mut(id)) {
                 if !ancestor.is_anonymous() {
                     break;
                 }
                 ancestor.invalidate_layout_cache();
-                current = ancestor.layout_parent.get();
+                current = ancestor.layout_parent_id();
             }
         }
 
@@ -368,7 +368,7 @@ impl BaseDocument {
     }
 
     /// Mark every node in the document with `ALL_DAMAGE` (non-incremental
-    /// mode). Iterates the node slotmap directly rather than walking the tree,
+    /// mode). Iterates the node slab directly rather than walking the tree,
     /// which is cheaper and also reaches pseudo-elements and anonymous boxes
     /// without special-casing them. Detached nodes get marked too, which is
     /// harmless: they are reconstructed on re-attachment anyway.
@@ -410,15 +410,15 @@ impl BaseDocument {
             return;
         }
         let anonymous_blocks = node.take_anonymous_blocks();
-        let children = std::mem::take(&mut node.children);
+        let children = node.take_detached_children();
         let (before, after) = (node.before(), node.after());
 
         for anon_id in anonymous_blocks.iter() {
             self.clear_damage_and_dirty_flags(*anon_id);
         }
         if !is_anonymous {
-            for child in children.iter() {
-                self.clear_damage_and_dirty_flags(*child);
+            for child in children.ids() {
+                self.clear_damage_and_dirty_flags(child);
             }
         }
         if let Some(before_id) = before {
@@ -433,7 +433,7 @@ impl BaseDocument {
 
         let node = &mut self.nodes[node_id];
         node.set_anonymous_blocks(anonymous_blocks);
-        node.children = children;
+        node.restore_detached_children(children);
         node.clear_damage_mut();
         node.unset_damaged_descendants();
         node.unset_dirty_descendants();
@@ -680,7 +680,7 @@ impl BaseDocument {
                 if node.element_data().is_some_and(|e| e.inline_layout_data().is_some()) {
                     roots.push(id);
                 }
-                at = node.layout_parent.get().or(node.parent.get());
+                at = node.layout_parent_id().or(node.parent_id());
             }
         }
         (roots, inputs)
@@ -692,7 +692,7 @@ impl BaseDocument {
             let node = &mut self.nodes[id];
             node.insert_damage(ALL_DAMAGE);
             if node.is_anonymous() {
-                if let Some(parent_id) = node.layout_parent.get() {
+                if let Some(parent_id) = node.layout_parent_id() {
                     self.nodes[parent_id].insert_damage(ALL_DAMAGE);
                 }
             }
@@ -742,7 +742,7 @@ impl BaseDocument {
                 // shaped before the webfont arrived (for example an icon font).
                 node.insert_damage(ALL_DAMAGE);
                 if node.is_anonymous() {
-                    anon_nodes.push(node.id);
+                    anon_nodes.push(node.id());
                 }
             } else if let Some(input) = element.text_input_data_mut() {
                 input.editor.set_scale(scale);
@@ -753,7 +753,7 @@ impl BaseDocument {
         }
 
         for node_id in anon_nodes {
-            if let Some(parent_id) = self.nodes[node_id].layout_parent.get() {
+            if let Some(parent_id) = self.nodes[node_id].layout_parent_id() {
                 self.nodes[parent_id].insert_damage(ALL_DAMAGE);
             }
         }

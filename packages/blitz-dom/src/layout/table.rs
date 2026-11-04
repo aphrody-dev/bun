@@ -239,7 +239,7 @@ impl TableRow {
 fn table_wm(doc: &BaseDocument, table_root_node_id: NodeId) -> WritingMode {
     #[cfg(feature = "writing-mode")]
     {
-        if doc.try_root_element().map(|root| root.id) == Some(table_root_node_id) {
+        if doc.try_root_element().map(|root| root.id()) == Some(table_root_node_id) {
             doc.root_layout_wm(table_root_node_id)
         } else {
             doc.nodes[table_root_node_id].writing_mode()
@@ -368,7 +368,7 @@ pub(crate) fn build_table_context(
     let wm = table_wm(doc, table_root_node_id);
     let root_node = &mut doc.nodes[table_root_node_id];
 
-    let children = std::mem::take(&mut root_node.children);
+    let children = root_node.take_detached_children();
 
     let Some(stylo_styles) = root_node.primary_styles() else {
         panic!("Ignoring table because it has no styles");
@@ -399,7 +399,7 @@ pub(crate) fn build_table_context(
 
     let mut columns: Vec<TableColumn> = Vec::new();
     let mut column_sizes: Vec<taffy::TrackSizingFunction> = Vec::new();
-    for child_id in children.iter().copied() {
+    for child_id in children.ids() {
         collect_columns(doc, child_id, wm, &mut columns, &mut column_sizes);
     }
     // Percentage column widths only take effect in the fixed table layout algorithm
@@ -427,7 +427,7 @@ pub(crate) fn build_table_context(
     };
     let mut stray_run = false;
     for order in 0..3 {
-        for child_id in children.iter().copied() {
+        for child_id in children.ids() {
             if row_group_order(doc, child_id) != order {
                 continue;
             }
@@ -603,7 +603,7 @@ pub(crate) fn build_table_context(
         .chain(oof_children.iter().map(|(node_id, _)| *node_id))
         .collect();
     let root_node = &mut doc.nodes[table_root_node_id];
-    root_node.children = children;
+    root_node.restore_detached_children(children);
 
     (
         TableContext {
@@ -647,11 +647,11 @@ fn collect_columns(
     match display.inside() {
         DisplayInside::TableColumnGroup => {
             let first_column = columns.len();
-            let children = std::mem::take(&mut doc.nodes[node_id].children);
-            for child_id in children.iter().copied() {
+            let children = doc.nodes[node_id].take_detached_children();
+            for child_id in children.ids() {
                 collect_columns(doc, child_id, wm, columns, column_sizes);
             }
-            doc.nodes[node_id].children = children;
+            doc.nodes[node_id].restore_detached_children(children);
             for column in &mut columns[first_column..] {
                 column.group.get_or_insert(node_id);
             }
@@ -754,9 +754,9 @@ fn collect_table_cells(
         | DisplayInside::Contents => {
             let first_row = rows.len();
             *stray_run = false;
-            let children = std::mem::take(&mut doc.nodes[node_id].children);
+            let children = doc.nodes[node_id].take_detached_children();
             let mut group_stray = false;
-            for child_id in children.iter().copied() {
+            for child_id in children.ids() {
                 doc.nodes[child_id]
                     .remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                 collect_table_cells(
@@ -777,7 +777,7 @@ fn collect_table_cells(
                     &mut group_stray,
                 );
             }
-            doc.nodes[node_id].children = children;
+            doc.nodes[node_id].restore_detached_children(children);
             if display.inside() != DisplayInside::Contents {
                 for row in &mut rows[first_row..] {
                     row.group.get_or_insert(node_id);
@@ -801,9 +801,9 @@ fn collect_table_cells(
                 is_constrained: height.is_some(),
             });
 
-            let children = std::mem::take(&mut doc.nodes[node_id].children);
+            let children = doc.nodes[node_id].take_detached_children();
             let mut row_stray = false;
-            for child_id in children.iter().copied() {
+            for child_id in children.ids() {
                 collect_table_cells(
                     doc,
                     child_id,
@@ -822,7 +822,7 @@ fn collect_table_cells(
                     &mut row_stray,
                 );
             }
-            doc.nodes[node_id].children = children;
+            doc.nodes[node_id].restore_detached_children(children);
         }
         DisplayInside::TableCell => {
             // A cell outside any real row opens an implicit (anonymous)

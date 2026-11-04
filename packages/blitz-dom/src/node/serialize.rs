@@ -190,9 +190,9 @@ impl Node {
         };
         found
             || self
-                .children
+                .children()
                 .iter()
-                .any(|&child_id| self.tree()[child_id].subtree_contains(needle))
+                .any(|child_id| self.tree()[child_id].subtree_contains(needle))
     }
 
     /// Return the inline snapshot ID for a descendant, or `None` when it is outside this SVG.
@@ -207,7 +207,7 @@ impl Node {
     /// Return `None` when `target` is not a descendant element.
     pub fn svg_snapshot_index(&self, target: crate::NodeId) -> Option<u32> {
         fn walk(node: &Node, target: crate::NodeId, next: &mut u32) -> Option<u32> {
-            for &child_id in &node.children {
+            for child_id in node.children() {
                 let child = &node.tree()[child_id];
                 if !matches!(child.data, NodeData::Element(_)) {
                     continue;
@@ -246,7 +246,7 @@ impl Node {
     ) {
         const INDENT: &str = "  ";
         let style = opts.style;
-        let has_children = !self.children.is_empty();
+        let has_children = !self.children().is_empty();
         let current_color = opts
             .resolve_current_color
             .then(|| self.primary_styles())
@@ -267,8 +267,7 @@ impl Node {
                     }
                 }
                 let in_raw_text_element = self
-                    .parent
-                    .get()
+                    .parent_id()
                     .and_then(|id| self.tree()[id].data.downcast_element())
                     .is_some_and(|el| {
                         // Documents are parsed with scripting disabled, so `<noscript>` is not raw text
@@ -415,7 +414,7 @@ impl Node {
                 }
 
                 if has_children {
-                    for &child_id in &self.children {
+                    for child_id in self.children() {
                         self.tree()[child_id].write_outer_html_in_style(
                             writer,
                             opts,
@@ -448,7 +447,7 @@ mod tests {
     #[test]
     fn snapshot_ids_do_not_satisfy_literal_fragment_references() {
         let mut doc = BaseDocument::new(DocumentConfig::default());
-        let root_id = doc.root_node().id;
+        let root_id = doc.root_node().id();
         let mut mutator = doc.mutate();
         let svg = mutator.create_element(qual_name!("svg", svg), vec![]);
         let earlier_rect = mutator.create_element(qual_name!("rect", svg), vec![]);
@@ -478,7 +477,7 @@ mod tests {
     #[test]
     fn snapshot_prefix_without_a_seed_in_the_source_is_the_first() {
         let mut doc = BaseDocument::new(DocumentConfig::default());
-        let root_id = doc.root_node().id;
+        let root_id = doc.root_node().id();
         let mut mutator = doc.mutate();
         let svg = mutator.create_element(qual_name!("svg", svg), vec![]);
         let rect = mutator.create_element(qual_name!("rect", svg), vec![]);
