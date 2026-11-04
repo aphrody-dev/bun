@@ -256,8 +256,56 @@ impl EvictedBreak {
 pub(crate) struct EvictedSummary {
     /// Breaks the lines at another width.
     pub(crate) lines: parley::BreakSummary,
+    /// `None` when the root has no inline boxes. A thin box keeps every
+    /// evicted root's state within its wasm32 chunk.
+    pub(crate) out_of_flow: Option<Box<OutOfFlow>>,
+}
+
+impl EvictedSummary {
     /// The root's inline boxes, all absolutely positioned, in layout order.
-    pub(crate) out_of_flow: Box<[NodeId]>,
+    pub(crate) fn out_of_flow_ids(&self) -> &[NodeId] {
+        self.out_of_flow.as_deref().map_or(&[], |oof| &oof.ids)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct OutOfFlow {
+    pub(crate) ids: Box<[NodeId]>,
+    /// Kept when a box's static position depends on where along its line it
+    /// sits, which only the shaped line knows.
+    pub(crate) static_x: Option<StaticX>,
+}
+
+/// The inline offset of each out-of-flow box in its line, in layout units, as
+/// the live layout placed it when broken and aligned with `aligned`. A pass
+/// with other inputs rebuilds the root instead.
+#[derive(Clone)]
+pub(crate) struct StaticX {
+    pub(crate) aligned: AlignInputs,
+    /// Per box in [`EvictedSummary::out_of_flow_ids`] order.
+    pub(crate) x: Box<[f32]>,
+}
+
+/// The inputs that place items along a broken line. Floats compare by bits,
+/// so the recorded offsets are only reused for identical inputs.
+#[derive(Clone, Copy)]
+pub(crate) struct AlignInputs {
+    pub(crate) max_advance: f32,
+    pub(crate) indent: (f32, IndentOptions),
+    pub(crate) alignment: Option<Alignment>,
+    pub(crate) last_line_alignment: Option<Alignment>,
+    pub(crate) clamp_lines: Option<usize>,
+}
+
+impl PartialEq for AlignInputs {
+    fn eq(&self, other: &Self) -> bool {
+        self.max_advance.to_bits() == other.max_advance.to_bits()
+            && self.indent.0.to_bits() == other.indent.0.to_bits()
+            && self.indent.1 == other.indent.1
+            && self.alignment == other.alignment
+            && self.last_line_alignment == other.last_line_alignment
+            && self.clamp_lines == other.clamp_lines
+    }
 }
 
 /// An [`EvictedSummary`] that a rebuild, which only borrows the layout, can
@@ -290,7 +338,12 @@ impl SummaryCell {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map_or(0, |summary| {
-                summary.lines.heap_size() + size_of_val(&*summary.out_of_flow)
+                let oof = summary.out_of_flow.as_deref().map_or(0, |oof| {
+                    size_of::<OutOfFlow>()
+                        + size_of_val(&*oof.ids)
+                        + oof.static_x.as_ref().map_or(0, |s| size_of_val(&*s.x))
+                });
+                summary.lines.heap_size() + oof
             })
     }
 }

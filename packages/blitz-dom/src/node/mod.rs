@@ -33,6 +33,7 @@ pub use text::{
     inline_layout_rebuild_count, inline_summary_stats,
 };
 pub(crate) use text::{
-    EvictedBreak, EvictedLayout, EvictedSummary, InlineRebuild, SummaryCell, count_inline_summary,
+    AlignInputs, EvictedBreak, EvictedLayout, EvictedSummary, InlineRebuild, OutOfFlow, StaticX,
+    SummaryCell, count_inline_summary,
     with_rebuild_contexts,
 };

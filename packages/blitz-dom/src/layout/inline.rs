@@ -448,7 +448,7 @@ impl LayoutPassState<'_> {
                 Some(layout) => layout.inline_boxes().len() == 0,
                 None => inline_layout
                     .evicted_summary()
-                    .is_none_or(|summary| summary.out_of_flow.is_empty()),
+                    .is_none_or(|summary| summary.out_of_flow.is_none()),
             }
         {
             inline_layout.replayable_break = false;
@@ -828,11 +828,23 @@ impl LayoutPassState<'_> {
             );
             #[cfg(not(feature = "floats"))]
             let clear_of_floats = true;
+            // Boxes whose static position needs their place along the line
+            // reuse the recorded one only when it is what aligning these lines
+            // again gives; a measure pass places no boxes.
             let summary = inline_layout
                 .evicted_summary()
                 .filter(|summary| {
+                    let static_x = summary.out_of_flow.as_deref().and_then(|oof| oof.static_x.as_ref());
                     !super::evict::is_vertical(&self.nodes[node_id])
-                        && summary.out_of_flow.iter().all(|&id| self.abspos_static_x_is_unused(id))
+                        && (summary
+                            .out_of_flow_ids()
+                            .iter()
+                            .all(|&id| self.abspos_static_x_is_unused(id))
+                            || static_x.is_some_and(|static_x| {
+                                inputs.run_mode != RunMode::PerformLayout
+                                    || static_x.aligned
+                                        == self.inline_align_inputs(node_id, width, indent)
+                            }))
                 })
                 .map(|summary| &summary.lines)
                 .filter(|_| clear_of_floats);
@@ -1225,7 +1237,8 @@ impl LayoutPassState<'_> {
         // and it clips away.
         let commit_positions = inputs.run_mode == taffy::RunMode::PerformLayout;
         // A summarized root's inline boxes are all absolutely positioned, with
-        // static positions that need only their line (see eviction).
+        // static positions that need only their line, or recorded offsets
+        // along it that the summary check found current (see eviction).
         if let (true, Some(lines), Some(summary)) = (
             commit_positions,
             &summary_lines,
@@ -1235,7 +1248,9 @@ impl LayoutPassState<'_> {
                 start: container_pb.left,
                 end: final_size.width - container_pb.right,
             };
-            for (&box_id, &line) in summary.out_of_flow.iter().zip(lines.box_lines()) {
+            let static_x = summary.out_of_flow.as_deref().and_then(|oof| oof.static_x.as_ref());
+            let ids = summary.out_of_flow_ids();
+            for (index, (&box_id, &line)) in ids.iter().zip(lines.box_lines()).enumerate() {
                 // Clamped away: the missing-box pass below offers it.
                 let Some(line) = lines.lines().get(line as usize) else {
                     continue;
@@ -1245,8 +1260,11 @@ impl LayoutPassState<'_> {
                     box_id,
                     ibox_order,
                     AbsposLine {
-                        // Unused: eviction requires a horizontal inset.
-                        x: container_pb.left,
+                        // Without recorded offsets every box has a horizontal
+                        // inset or is block-level, so this is unused.
+                        x: static_x.map_or(container_pb.left, |static_x| {
+                            (static_x.x[index] / scale) + container_pb.left
+                        }),
                         top: (line.block_min_coord / scale) + line_box_top,
                         bottom: (line.block_max_coord / scale) + line_box_top,
                     },
@@ -1675,6 +1693,24 @@ impl crate::BaseDocument {
 
     // -webkit-box + orient:vertical + line-clamp:N was rewritten to
     // flow-root at computed-value time; the stylo flag says clamp here.
+    /// The [`AlignInputs`] a pass breaking `node_id` at `width` (layout
+    /// units) with `indent` aligns its lines with.
+    fn inline_align_inputs(
+        &self,
+        node_id: NodeId,
+        width: f32,
+        indent: (f32, parley::IndentOptions),
+    ) -> crate::node::AlignInputs {
+        let (alignment, last_line_alignment) = self.inline_alignment(node_id);
+        crate::node::AlignInputs {
+            max_advance: width,
+            indent,
+            alignment: Some(alignment),
+            last_line_alignment,
+            clamp_lines: self.inline_clamp_lines(node_id),
+        }
+    }
+
     pub(crate) fn inline_clamp_lines(&self, node_id: NodeId) -> Option<usize> {
         self.nodes[node_id].primary_styles().and_then(|s| {
             use style::computed_value_flags::ComputedValueFlags;

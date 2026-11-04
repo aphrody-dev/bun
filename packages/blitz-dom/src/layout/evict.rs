@@ -10,7 +10,10 @@
 //! after, so no pass holds the shaped text of the whole document at once.
 
 use crate::BaseDocument;
-use crate::node::{EvictedBreak, EvictedLayout, EvictedSummary, SummaryCell};
+use crate::node::{
+    AlignInputs, EvictedBreak, EvictedLayout, EvictedSummary, OutOfFlow, StaticX, SummaryCell,
+    TextLayout,
+};
 use blitz_traits::node_id::NodeId;
 use style::values::specified::box_::DisplayOutside;
 
@@ -124,20 +127,18 @@ impl BaseDocument {
         let Some(lines) = layout.break_summary() else {
             return Eviction::Unsummarized;
         };
-        // A summary holds only absolutely positioned boxes, and only the line
-        // each lands on.
+        // A summary holds only absolutely positioned boxes, the line each
+        // lands on, and where along it when their static position needs that.
         let out_of_flow: Box<[NodeId]> = layout
             .inline_boxes()
             .map(|ibox| NodeId::from_u64(ibox.id))
             .collect();
-        if !out_of_flow.is_empty()
-            && (is_vertical(&self.nodes[node_id])
-                || !out_of_flow
-                    .iter()
-                    .all(|&id| self.abspos_static_x_is_unused(id)))
-        {
+        if !out_of_flow.is_empty() && is_vertical(&self.nodes[node_id]) {
             return Eviction::Unsummarized;
         }
+        let needs_static_x = !out_of_flow
+            .iter()
+            .all(|&id| self.abspos_static_x_is_unused(id));
         let clamp_lines = self.inline_clamp_lines(node_id);
         let (_, last_line_alignment) = self.inline_alignment(node_id);
         let inline = self
@@ -147,11 +148,28 @@ impl BaseDocument {
         let max_advance = layout.layout_max_advance();
         let indent = layout.text_indent();
         let alignment = layout.alignment();
+        let static_x = if needs_static_x {
+            let Some(x) = static_x_of(layout, &out_of_flow) else {
+                return Eviction::Unsummarized;
+            };
+            let aligned = AlignInputs {
+                max_advance,
+                indent,
+                alignment,
+                last_line_alignment,
+                clamp_lines,
+            };
+            Some(StaticX { aligned, x })
+        } else {
+            None
+        };
         let boxes = layout
             .inline_boxes()
             .map(|ibox| (ibox.width, ibox.height, ibox.baseline))
             .collect();
         // Content widths the layout pass measured stay in `inline.content_widths`.
+        let out_of_flow = (!out_of_flow.is_empty())
+            .then(|| Box::new(OutOfFlow { ids: out_of_flow, static_x }));
         let summary = Some(EvictedSummary { lines, out_of_flow });
         let breaking = EvictedBreak::new(
             max_advance,
@@ -411,6 +429,29 @@ impl BaseDocument {
         }
         RootScan::Far
     }
+}
+
+/// Each box's offset along its line in `layout`, in `ids` order, or `None`
+/// when one was clamped away. Looked up by id: bidi lines list items visually.
+fn static_x_of(
+    layout: &parley::layout::Layout<crate::node::TextBrush>,
+    ids: &[NodeId],
+) -> Option<Box<[f32]>> {
+    let mut placed: Vec<(u64, f32)> = layout
+        .lines()
+        .flat_map(|line| line.items())
+        .filter_map(|item| match item {
+            parley::layout::PositionedLayoutItem::InlineBox(ibox) => Some((ibox.id, ibox.x)),
+            parley::layout::PositionedLayoutItem::GlyphRun(_) => None,
+        })
+        .collect();
+    placed.sort_unstable_by_key(|&(id, _)| id);
+    ids.iter()
+        .map(|id| {
+            let at = placed.binary_search_by_key(&id.as_u64(), |&(id, _)| id).ok()?;
+            Some(placed[at].1)
+        })
+        .collect()
 }
 
 /// Whether `node` lays out in a vertical writing mode.
