@@ -6,7 +6,7 @@ use html5ever::tree_builder::TreeBuilderOpts;
 use std::borrow::Cow;
 use std::cell::{Cell, Ref, RefCell, RefMut};
 
-use blitz_dom::node::Attribute;
+use blitz_dom::node::{Attribute, Attributes};
 use blitz_dom::{DocumentMutator, ElementData, HtmlParserProvider, NodeId};
 use html5ever::{
     LocalName, Namespace, QualName,
@@ -411,7 +411,7 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
         attrs: Vec<html5ever::Attribute>,
         _flags: ElementFlags,
     ) -> Self::Handle {
-        let attrs = attrs.into_iter().map(html5ever_to_blitz_attr).collect();
+        let attrs: Attributes = attrs.into_iter().map(html5ever_to_blitz_attr).collect();
         self.mutr().create_element(name, attrs)
     }
 
