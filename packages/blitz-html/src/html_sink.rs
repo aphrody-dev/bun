@@ -15,10 +15,9 @@ use html5ever::{
     tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink},
 };
 
-/// Convert an html5ever Attribute which uses tendril for its value to a blitz Attribute
-/// which uses String.
+/// Convert an html5ever Attribute, which uses tendril for its value, to a blitz Attribute.
 fn html5ever_to_blitz_attr(attr: html5ever::Attribute) -> Attribute {
-    Attribute::new(attr.name, attr.value.to_string())
+    Attribute::new(attr.name, &*attr.value)
 }
 
 /// An element's name as the parser sees it, borrowed from the document.
@@ -365,7 +364,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
 
         // html5ever creates a new fragment root node under the document node and parses the nodes into that fragment root.
         // So here we move the children of the fragment root to element_id and then drop the fragment root.
-        let document_id = mutr.doc.root_node().id;
+        let document_id = mutr.doc.root_node().id();
         let fragment_root_id = mutr.last_child_id(document_id).unwrap();
         let child_ids = mutr.child_ids(fragment_root_id);
         mutr.append_children(element_id, &child_ids);
@@ -396,7 +395,7 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     }
 
     fn get_document(&self) -> Self::Handle {
-        self.document_mutator.borrow().doc.root_node().id
+        self.document_mutator.borrow().doc.root_node().id()
     }
 
     fn elem_name<'a>(&'a self, target: &'a Self::Handle) -> Self::ElemName<'a> {
