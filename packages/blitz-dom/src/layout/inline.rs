@@ -22,7 +22,7 @@ use stylo_taffy::StyleFlags;
 
 use super::resolve_calc_value;
 use crate::layout::LayoutPassState;
-use crate::node::{TextBrush, count_inline_summary};
+use crate::node::{TextBrush, TextLayout, count_inline_summary};
 use crate::stylo_to_parley;
 
 /// Subtract a child's margins from the definite axes of the available space it is laid out in.
@@ -452,13 +452,7 @@ impl LayoutPassState<'_> {
             }
         {
             inline_layout.replayable_break = false;
-            // Put layout back
-            self.nodes[node_id]
-                .data
-                .downcast_element_mut()
-                .unwrap()
-                .set_inline_layout_data(Some(inline_layout));
-            self.inline_roots.push(node_id);
+            self.put_back_inline_layout(node_id, inline_layout);
             return LayoutOutput::from_outer_size(
                 Size::ZERO.maybe_max(container_pb.sum_axes().map(Some)),
             );
@@ -785,13 +779,7 @@ impl LayoutPassState<'_> {
             if !inline_layout.is_evicted() {
                 inline_layout.replayable_break = false;
             }
-            // Put layout back
-            self.nodes[node_id]
-                .data
-                .downcast_element_mut()
-                .unwrap()
-                .set_inline_layout_data(Some(inline_layout));
-            self.inline_roots.push(node_id);
+            self.put_back_inline_layout(node_id, inline_layout);
 
             let measured_size = inputs.known_dimensions.unwrap_or(taffy::Size {
                 width: width.ceil() / scale,
@@ -1492,13 +1480,7 @@ impl LayoutPassState<'_> {
             inline_layout.span_cb_flags = span_cb_flags;
         }
 
-        // Put layout back
-        self.nodes[node_id]
-            .data
-            .downcast_element_mut()
-            .unwrap()
-            .set_inline_layout_data(Some(inline_layout));
-        self.inline_roots.push(node_id);
+        self.put_back_inline_layout(node_id, inline_layout);
         // A measure that broke lines shapes the root as a final layout does:
         // a flex item measures its whole subtree before laying any of it out.
         self.evict_inline_layout_after_break(node_id);
@@ -1640,6 +1622,22 @@ fn f32_max(a: f32, b: f32) -> f32 {
 }
 
 impl crate::BaseDocument {
+    /// Puts an inline root's layout back after a layout pass and indexes the root once. Each
+    /// measure and layout of a root used to push it again, so the index of a large page grew to
+    /// several times its root count before resolve deduplicated it.
+    pub(crate) fn put_back_inline_layout(&mut self, node_id: NodeId, mut layout: Box<TextLayout>) {
+        let push = !layout.mark_root_indexed();
+        self.nodes[node_id]
+            .data
+            .downcast_element_mut()
+            .unwrap()
+            .set_inline_layout_data(Some(layout));
+        if push {
+            self.inline_roots.push(node_id);
+        }
+        self.inline_roots_put = true;
+    }
+
     // Re-break a container's text to a width it already
     // committed to, without re-running layout. Repairing at the parley
     // level is deliberate: replaying `compute_inline_layout` would need

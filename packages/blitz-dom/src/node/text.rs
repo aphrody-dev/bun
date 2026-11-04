@@ -45,9 +45,10 @@ pub struct TextLayout {
     /// Set by every read; the eviction scan spares a far layout that was read
     /// since its last visit once, so a layout queried every frame stays live.
     recently_read: ReadFlag,
-    /// Sequence number of this root's latest entry in the layout pass's
-    /// eviction window, so older entries for it are skipped.
-    pub(crate) in_pass_seq: u32,
+    /// The low 31 bits: sequence number of this root's latest entry in the layout pass's
+    /// eviction window, so older entries for it are skipped. The top bit: the document's
+    /// `inline_roots` index holds this root, which it does while the node holds this layout.
+    seq_and_indexed: u32,
     /// Block-axis offset (in CSS px) of the line boxes from the top of the container's content
     /// box, as applied by `align-content`.
     pub block_offset: f32,
@@ -143,6 +144,25 @@ impl Default for TextLayout {
 }
 
 impl TextLayout {
+    /// The top bit of `seq_and_indexed`; pass sequence numbers stay below it.
+    pub(crate) const ROOT_INDEXED: u32 = 1 << 31;
+
+    pub(crate) fn in_pass_seq(&self) -> u32 {
+        self.seq_and_indexed & !Self::ROOT_INDEXED
+    }
+
+    pub(crate) fn set_in_pass_seq(&mut self, seq: u32) {
+        debug_assert_eq!(seq & Self::ROOT_INDEXED, 0);
+        self.seq_and_indexed = (self.seq_and_indexed & Self::ROOT_INDEXED) | seq;
+    }
+
+    /// Marks the root as held by the `inline_roots` index; true if it already was.
+    pub(crate) fn mark_root_indexed(&mut self) -> bool {
+        let was = self.seq_and_indexed & Self::ROOT_INDEXED != 0;
+        self.seq_and_indexed |= Self::ROOT_INDEXED;
+        was
+    }
+
     /// A layout holding neither text nor lines, for box construction to
     /// build or leave unbuilt next: an empty box would be freed unread.
     pub(crate) fn unfilled() -> Self {
@@ -153,7 +173,7 @@ impl TextLayout {
             evicted: None,
             replayable_break: false,
             recently_read: ReadFlag::default(),
-            in_pass_seq: 0,
+            seq_and_indexed: 0,
             block_offset: 0.0,
             span_cb_flags: stylo_taffy::StyleFlags::empty(),
             // NaN = no lines yet; the repair scan gives it some once

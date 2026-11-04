@@ -834,12 +834,14 @@ impl BaseDocument {
                     scale: self.viewport.scale(),
                     breaking: None,
                 });
+                layout.mark_root_indexed();
                 self.nodes[task.node_id].clear_layout_cache();
                 self.nodes[task.node_id]
                     .element_data_mut()
                     .unwrap()
                     .set_inline_layout_data(Some(layout));
                 self.inline_roots.push(task.node_id);
+                self.inline_roots_put = true;
             }
             return;
         }
@@ -906,13 +908,15 @@ impl BaseDocument {
 
         for result in results {
             match result.data {
-                ConstructionTaskResultData::InlineLayout(layout) => {
+                ConstructionTaskResultData::InlineLayout(mut layout) => {
+                    layout.mark_root_indexed();
                     self.nodes[result.node_id].clear_layout_cache();
                     self.nodes[result.node_id]
                         .element_data_mut()
                         .unwrap()
                         .set_inline_layout_data(Some(layout));
                     self.inline_roots.push(result.node_id);
+                    self.inline_roots_put = true;
                 }
             }
         }
@@ -955,7 +959,7 @@ impl BaseDocument {
         //
         // Except a rebuilt inline tree has no lines, and the restore pass below
         // re-breaks it against final_layout, which must not be a stale box.
-        if state.layout_changed || state.inline_roots.len() != state.inline_roots_settled {
+        if state.layout_changed || state.inline_roots_put {
             #[cfg(feature = "writing-mode")]
             state.physicalise_and_round_layout(root_element_id);
             #[cfg(not(feature = "writing-mode"))]
@@ -1025,7 +1029,7 @@ impl BaseDocument {
     fn restore_clobbered_inline_breaks(&mut self) {
         // Debug builds run the walk anyway and assert it finds nothing, so
         // every test exercises the skip predicate rather than trusting it.
-        let skip = !self.layout_changed && self.inline_roots.len() == self.inline_roots_settled;
+        let skip = !self.layout_changed && !self.inline_roots_put;
         if skip && !cfg!(debug_assertions) {
             return;
         }
@@ -1073,8 +1077,15 @@ impl BaseDocument {
             }
             true
         });
+        // Construction pushes every root again, so a rebuild of the whole
+        // page can leave the capacity several times the deduplicated length,
+        // and growth by doubling alone can leave up to twice it.
+        if roots.capacity() > roots.len() + roots.len() / 4 {
+            roots.shrink_to(roots.len() + roots.len() / 8);
+        }
         self.inline_roots_settled = roots.len();
         self.inline_roots = roots;
+        self.inline_roots_put = false;
         debug_assert!(
             !skip || stale.is_empty(),
             "skipped a resolve with {} stale inline roots: {stale:?}",

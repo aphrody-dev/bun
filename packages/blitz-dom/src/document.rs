@@ -487,6 +487,10 @@ pub struct BaseDocument {
     /// Length of `inline_roots` when it was last left sorted+deduped, so a
     /// frame that pushed nothing new can skip re-sorting 80k+ entries.
     pub(crate) inline_roots_settled: usize,
+    /// Some inline root got its layout back from construction or a layout pass since
+    /// restore_clobbered_inline_breaks last ran. A root already in `inline_roots` is not pushed
+    /// again, so the index length alone no longer tells.
+    pub(crate) inline_roots_put: bool,
     /// Inline roots farther than this many viewport heights from the viewport
     /// drop their shaped text after each resolve; `None` keeps every layout.
     pub(crate) inline_layout_eviction_viewports: Option<f32>,
@@ -757,6 +761,7 @@ impl BaseDocument {
             any_node_created: false,
             inline_roots: Vec::new(),
             inline_roots_settled: 0,
+            inline_roots_put: false,
             inline_layout_eviction_viewports: Some(2.0),
             inline_keep_extent: None,
             last_inline_eviction_scan: None,
@@ -2155,6 +2160,10 @@ impl BaseDocument {
             .retain(|f| !used.contains(&f.family_lc) || { ready.push(f.clone()); false });
         if !self.pending_font_faces.is_empty() {
             let mut used = std::mem::take(&mut self.used_font_families);
+            // Lowercase each distinct family atom once, not once per node: nodes share font
+            // structs, so most nodes repeat the previous node's list or a few known atoms.
+            let mut seen: std::collections::HashSet<style::Atom> = Default::default();
+            let mut previous: *const style::properties::style_structs::Font = std::ptr::null();
             for (_, node) in self.nodes.iter() {
                 if !node.flags.is_in_document() {
                     continue;
@@ -2162,9 +2171,16 @@ impl BaseDocument {
                 let Some(styles) = node.primary_styles() else {
                     continue;
                 };
-                for family in styles.get_font().font_family.families.iter() {
+                let font = styles.get_font();
+                if std::ptr::eq(font, previous) {
+                    continue;
+                }
+                previous = font;
+                for family in font.font_family.families.iter() {
                     if let SingleFontFamily::FamilyName(name) = family {
-                        used.insert(name.name.to_string().to_lowercase());
+                        if seen.insert(name.name.clone()) {
+                            used.insert(name.name.to_string().to_lowercase());
+                        }
                     }
                 }
             }
@@ -5200,8 +5216,10 @@ impl BaseDocument {
         use style::selector_parser::RestyleDamage;
         let repaint_bits = RestyleDamage::REPAINT.bits();
         let overflow_bits = RestyleDamage::RECALCULATE_OVERFLOW.bits();
-        let mut found: Vec<(NodeId, DamageClass)> = Vec::new();
         let mut any_construct = false;
+        let s = &mut self.damage_summary;
+        // One pass, folding as it goes: the first resolve damages every node, and collecting
+        // them first held a document-sized list that grew by doubling.
         for (id, node) in self.nodes.iter() {
             if !node.flags.contains(NodeFlags::IS_IN_DOCUMENT) {
                 continue;
@@ -5220,11 +5238,6 @@ impl BaseDocument {
             } else {
                 DamageClass::Layout
             };
-            found.push((id, class));
-        }
-        self.any_construct_damage = any_construct;
-        let s = &mut self.damage_summary;
-        for (id, class) in found {
             let (list, overflow) = match class {
                 DamageClass::Layout => (&mut s.layout_nodes, &mut s.layout_overflow),
                 DamageClass::Ink => (&mut s.ink_nodes, &mut s.ink_overflow),
@@ -5239,6 +5252,7 @@ impl BaseDocument {
                 list.push(id);
             }
         }
+        self.any_construct_damage = any_construct;
     }
 
     /// A box that moved with no damage of its own (a sticky pin written through

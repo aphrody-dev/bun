@@ -1820,6 +1820,13 @@ fn bidi_wrap_chars(
     }
 }
 
+std::thread_local! {
+    /// The text node ranges of the root being built, reused across builds. A nested build
+    /// finds it taken and starts its own.
+    static NODE_RANGES_SCRATCH: core::cell::RefCell<Vec<(NodeId, core::ops::Range<usize>)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
 pub(crate) fn build_inline_layout_into(
     nodes: &crate::NodeTree,
     layout_ctx: &mut LayoutContext<TextBrush>,
@@ -1895,7 +1902,8 @@ pub(crate) fn build_inline_layout_into(
 
     // Per-text-node byte ranges for the DOM-selection
     // paint bridge; measured around each push (see TextLayout).
-    let node_ranges: &mut Vec<(NodeId, core::ops::Range<usize>)> = &mut Vec::new();
+    let mut node_ranges_buf = NODE_RANGES_SCRATCH.with(core::cell::RefCell::take);
+    let node_ranges = &mut node_ranges_buf;
 
     if let Some(before_id) = root_node.before() {
         build_inline_layout_recursive(
@@ -1929,7 +1937,10 @@ pub(crate) fn build_inline_layout_into(
     }
 
     let text = builder.build_into(text_layout.layout_for_build());
-    text_layout.set_content(text, core::mem::take(node_ranges));
+    // An exact copy, so the scratch keeps its capacity for the next root.
+    text_layout.set_content(text, node_ranges_buf.as_slice().to_vec());
+    node_ranges_buf.clear();
+    NODE_RANGES_SCRATCH.with(|scratch| scratch.replace(node_ranges_buf));
     return;
 
     fn build_inline_layout_recursive(
@@ -2056,15 +2067,15 @@ pub(crate) fn build_inline_layout_into(
                             });
 
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-                            let style = node
-                                .primary_styles()
-                                .map(|s| stylo_to_parley::style(node.id(), &s))
-                                .unwrap_or_else(|| parley::TextStyle {
+                            match node.primary_styles() {
+                                Some(s) => builder.push_style_span(
+                                    stylo_to_parley::style_borrowed(node.id(), &s),
+                                ),
+                                None => builder.push_style_span(parley::TextStyle {
                                     white_space_collapse: WhiteSpaceCollapse::Collapse,
                                     ..Default::default()
-                                });
-
-                            builder.push_style_span(style);
+                                }),
+                            }
 
                             if let Some((open, _)) = bidi_wrap {
                                 builder.push_text(open);

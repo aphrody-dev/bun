@@ -252,12 +252,14 @@ impl BaseDocument {
         if self.inline_layout_eviction_viewports.is_none() {
             return;
         }
-        self.inline_pass_seq = self.inline_pass_seq.wrapping_add(1);
+        // The low bits of the seq word carry `ROOT_INDEXED`, so step the seq past it.
+        self.inline_pass_seq =
+            self.inline_pass_seq.wrapping_add(1) & !TextLayout::ROOT_INDEXED;
         let seq = self.inline_pass_seq;
         let Some(inline) = self.inline_layout_mut(node_id) else {
             return;
         };
-        inline.in_pass_seq = seq;
+        inline.set_in_pass_seq(seq);
         self.inline_pass_window.push_back((node_id, seq));
         if self.inline_pass_window.len() > IN_PASS_WINDOW {
             let (id, seq) = self.inline_pass_window.pop_front().expect("over capacity");
@@ -280,7 +282,7 @@ impl BaseDocument {
         // out from its break summary and never rebuilt.
         if self
             .inline_layout_mut(id)
-            .is_none_or(|inline| inline.in_pass_seq != seq || inline.is_evicted())
+            .is_none_or(|inline| inline.in_pass_seq() != seq || inline.is_evicted())
         {
             return;
         }
