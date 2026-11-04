@@ -101,7 +101,7 @@ pub(crate) fn paint_span_fragment_backgrounds(
             .background_color
             .resolve_to_absolute(&current_color)
             .as_srgb_color()
-            .multiply_alpha(crate::text::inline_opacity(doc, node.id, inline_root_id));
+            .multiply_alpha(crate::text::inline_opacity(doc, node.id(), inline_root_id));
         if bg.components[3] == 0.0 {
             continue;
         }
@@ -166,7 +166,7 @@ pub(crate) fn paint_span_fragment_borders(
             _ => continue,
         };
         let current_color = primary.clone_color();
-        let opacity = crate::text::inline_opacity(doc, node.id, inline_root_id);
+        let opacity = crate::text::inline_opacity(doc, node.id(), inline_root_id);
         let border = primary.get_border();
         let top_color = border
             .border_top_color
