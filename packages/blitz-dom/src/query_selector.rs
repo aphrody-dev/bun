@@ -96,10 +96,10 @@ impl BaseDocument {
             return;
         }
         match self.nodes_to_id.entry(id) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
+            Entry::Vacant(entry) => {
                 entry.insert(node_id);
             }
-            std::collections::hash_map::Entry::Occupied(entry) => {
+            Entry::Occupied(entry) => {
                 if *entry.get() != node_id {
                     let later = self.id_duplicates.entry(entry.key().clone()).or_default();
                     if !later.contains(&node_id) {

@@ -405,6 +405,7 @@ impl DocumentMutator<'_> {
 
     pub fn set_attribute(&mut self, node_id: NodeId, name: QualName, value: &str) {
         let node_is_in_document = self.doc.nodes[node_id].flags.is_in_document();
+        self.note_base_href_write(node_id, &name, node_is_in_document);
         if node_is_in_document {
             self.doc.snapshot_node_for_attr(node_id, Some(&name.local));
 
@@ -636,8 +637,19 @@ impl DocumentMutator<'_> {
         }
     }
 
+    /// A connected `<base>`'s href decides the document base URL, so its writes move the epoch.
+    fn note_base_href_write(&mut self, node_id: NodeId, name: &QualName, in_document: bool) {
+        if in_document
+            && name.local == local_name!("href")
+            && self.doc.nodes[node_id].data.is_element_with_tag_name(&local_name!("base"))
+        {
+            self.doc.base_epoch = self.doc.base_epoch.wrapping_add(1);
+        }
+    }
+
     pub fn clear_attribute(&mut self, node_id: NodeId, name: QualName) {
         let node_is_in_document = self.doc.nodes[node_id].flags.is_in_document();
+        self.note_base_href_write(node_id, &name, node_is_in_document);
         if node_is_in_document {
             self.doc.snapshot_node_for_attr(node_id, Some(&name.local));
 
@@ -984,6 +996,11 @@ impl DocumentMutator<'_> {
             let child = &mut self.doc.nodes[child_id];
             let child_was_in_doc = child.flags.is_in_document();
             self.mutations_occurred |= child_was_in_doc;
+            // A connected move can change which `base[href]` comes first even when the moved
+            // node is not the base itself, so every connected move invalidates the cached URL.
+            if child_was_in_doc {
+                self.doc.base_epoch = self.doc.base_epoch.wrapping_add(1);
+            }
             if new_parent_is_in_document
                 && child_was_in_doc
                 && child.containing_shadow_root_id().is_some() != new_in_shadow
@@ -1416,10 +1433,10 @@ impl<'doc> DocumentMutator<'doc> {
         self.eager_op_queue = ops;
     }
 
-    /// Re-derives id map membership for a connected subtree whose shadow containment
-    /// changed: only connected light-tree ids belong in the map, so template contents stay out.
-    /// `in_shadow` is the root's containment; descendants derive theirs from the traversal
-    /// parent, in iter_subtree_mut's order, so no id node walks its ancestors.
+    /// Re-derives id map membership for a connected subtree whose shadow containment changed:
+    /// only connected light-tree ids belong in the map. `in_shadow` is the root's containment;
+    /// each descendant derives its own from its traversal parent, so no id node walks its
+    /// ancestors.
     fn reindex_subtree_ids(&mut self, node_id: NodeId, in_shadow: bool) {
         let node = &self.doc.nodes[node_id];
         if let Some(id_attr) = node.attr(local_name!("id")).map(ToString::to_string) {
@@ -1428,6 +1445,19 @@ impl<'doc> DocumentMutator<'doc> {
             if indexed {
                 self.doc.add_to_id_map(&id_attr, node_id);
             }
+        }
+
+        // A shadow root's parent is its host, so it shares the host's containment.
+        let children_in_shadow = in_shadow || self.doc.nodes[node_id].is_shadow_root();
+        if let Some(shadow_root_id) = self.doc.nodes[node_id].attached_shadow_root_id() {
+            self.reindex_subtree_ids(shadow_root_id, in_shadow);
+        }
+        for index in 0..self.doc.nodes[node_id].children().len() {
+            let child_id = self.doc.nodes[node_id]
+                .children()
+                .get(index)
+                .expect("index is below the child count");
+            self.reindex_subtree_ids(child_id, children_in_shadow);
         }
     }
 
@@ -1478,6 +1508,7 @@ impl<'doc> DocumentMutator<'doc> {
                 "style" => {
                     self.style_nodes.insert(node_id);
                 }
+                "base" => doc.base_epoch = doc.base_epoch.wrapping_add(1),
                 _ if has_custom_widget => {}
                 "link" => self.eager_op_queue.push(SpecialOp::LoadStylesheet(node_id)),
                 "img" => self.eager_op_queue.push(SpecialOp::LoadImage(node_id)),
@@ -1522,6 +1553,9 @@ impl<'doc> DocumentMutator<'doc> {
             // ancestor chain, IME disable on blur of a focused input).
             doc.clear_interaction_state_for_removed_node(node_id);
 
+            if doc.nodes[node_id].data.is_element_with_tag_name(&local_name!("base")) {
+                doc.base_epoch = doc.base_epoch.wrapping_add(1);
+            }
             let is_style = doc.nodes[node_id]
                 .data
                 .is_element_with_tag_name(&local_name!("style"));
@@ -2987,6 +3021,45 @@ mod test {
             node.element_state().contains(ElementState::ENABLED),
             "form node is enabled"
         );
+    }
+
+    #[test]
+    fn base_epoch_moves_only_for_connected_base_changes() {
+        let mut document = BaseDocument::new(DocumentConfig::default());
+        let base = document.create_node(NodeData::Element(crate::pool::PoolBox::new(
+            ElementData::new(qual_name!("base"), vec![]),
+        )));
+        let div = document.create_node(NodeData::Element(crate::pool::PoolBox::new(
+            ElementData::new(qual_name!("div"), vec![]),
+        )));
+        let root = document.root_node().id();
+        let mut mutator = document.mutate();
+        mutator.set_attribute(base, qual_name!("href"), "/detached/");
+        drop(mutator);
+        assert_eq!(document.base_epoch, 0, "a detached base does not count");
+
+        let mut mutator = document.mutate();
+        mutator.append_children(root, &[base, div]);
+        drop(mutator);
+        let attached = document.base_epoch;
+        assert_ne!(attached, 0, "connecting a base moves the epoch");
+
+        let mut mutator = document.mutate();
+        mutator.set_attribute(div, qual_name!("href"), "/x/");
+        mutator.set_attribute(base, qual_name!("target"), "_top");
+        drop(mutator);
+        assert_eq!(document.base_epoch, attached, "other writes leave it");
+
+        let mut mutator = document.mutate();
+        mutator.set_attribute(base, qual_name!("href"), "/y/");
+        drop(mutator);
+        let rewritten = document.base_epoch;
+        assert_ne!(rewritten, attached, "a base href write moves it");
+
+        let mut mutator = document.mutate();
+        mutator.clear_attribute(base, qual_name!("href"));
+        drop(mutator);
+        assert_ne!(document.base_epoch, rewritten, "removing the href moves it");
     }
 
     #[test]

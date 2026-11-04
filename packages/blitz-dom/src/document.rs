@@ -568,6 +568,9 @@ pub struct BaseDocument {
     /// embedder loads fallback faces for scripts it finds in the navigate
     /// HTML; a bump here tells it script-written text may need more.
     pub(crate) non_latin_text_writes: u32,
+    /// Moves whenever a connected `<base>` is added or removed or its href is written, so the
+    /// embedder re-resolves the base URL only when it can have changed.
+    pub base_epoch: u32,
 
     /// Tracks in-flight image requests. When an image is being fetched, additional
     /// requests for the same URL are queued here instead of starting new fetches.
@@ -776,6 +779,7 @@ impl BaseDocument {
             used_font_families: std::collections::HashSet::new(),
             used_codepoints: Vec::new(),
             non_latin_text_writes: 0,
+            base_epoch: 0,
             pending_images: HashMap::new(),
             pending_style_image_nodes: Vec::new(),
             pending_critical_resources: HashSet::new(),

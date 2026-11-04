@@ -3,6 +3,7 @@
 use blitz_traits::node_id::NodeId;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use thin_vec::ThinVec;
 
 use debug_timer::debug_timer;
 use kurbo::{Affine, Rect};
@@ -724,6 +725,27 @@ impl BaseDocument {
             }
 
             doc.nodes[node_id].set_damage(damage);
+        }
+    }
+
+    /// Clear `layout_parent` on the children `node_id`'s rebuild dropped from its layout
+    /// child list.
+    fn clear_dropped_layout_parents(
+        doc: &mut BaseDocument,
+        node_id: NodeId,
+        layout_children: &ThinVec<NodeId>,
+    ) {
+        let kept: HashSet<NodeId> = layout_children.iter().copied().collect();
+        let previous = doc.nodes[node_id].take_layout_children();
+        for child_id in previous.unwrap_or_default() {
+            if kept.contains(&child_id) {
+                continue;
+            }
+            if let Some(child) = doc.nodes.get_mut(child_id) {
+                if child.layout_parent_id() == Some(node_id) {
+                    child.set_layout_parent_id(None);
+                }
+            }
         }
     }
 
