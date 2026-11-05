@@ -1285,7 +1285,8 @@ pub fn parse_class_list(value: &str) -> ThinVec<Atom> {
 }
 
 impl ElementData {
-    pub fn new(name: QualName, attrs: Vec<Attribute>) -> Self {
+    pub fn new(name: QualName, attrs: impl Into<Attributes>) -> Self {
+        let attrs: Attributes = attrs.into();
         let id_attr_atom = attrs
             .iter()
             .find(|attr| &attr.name.local == "id")
@@ -1311,7 +1312,7 @@ impl ElementData {
             name: ElementName { local },
             id: id_attr_atom,
             classes: class_atoms,
-            attrs: Attributes::new(attrs),
+            attrs,
             rare: None,
 
             stylo_element_data: Default::default(),

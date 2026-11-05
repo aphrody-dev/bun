@@ -88,6 +88,24 @@ impl Attributes {
             inner: inner.into_iter().collect(),
         }
     }
+}
+
+impl From<Vec<Attribute>> for Attributes {
+    fn from(inner: Vec<Attribute>) -> Self {
+        Self::new(inner)
+    }
+}
+
+/// Collects straight into the list, without a `Vec` to copy from first.
+impl FromIterator<Attribute> for Attributes {
+    fn from_iter<I: IntoIterator<Item = Attribute>>(iter: I) -> Self {
+        Self {
+            inner: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl Attributes {
 
     pub fn get(&mut self, name: &QualName) -> Option<&Attribute> {
         self.inner.iter().find(|attr| attr.has_name(name))

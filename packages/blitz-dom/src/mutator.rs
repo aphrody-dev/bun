@@ -199,7 +199,11 @@ impl DocumentMutator<'_> {
         self.doc.create_text_node(text)
     }
 
-    pub fn create_element(&mut self, name: QualName, attrs: Vec<Attribute>) -> NodeId {
+    pub fn create_element(
+        &mut self,
+        name: QualName,
+        attrs: impl Into<crate::node::Attributes>,
+    ) -> NodeId {
         let mut data = ElementData::new(name, attrs);
         data.flush_style_attribute(self.doc.guard(), &self.doc.url.url_extra_data());
 
