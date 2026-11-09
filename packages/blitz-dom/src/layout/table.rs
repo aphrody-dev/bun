@@ -904,7 +904,11 @@ fn collect_table_cells(
                             taffy::BoxSizing::ContentBox => style_helpers::length(
                                 len + padding.left + padding.right + border.left + border.right,
                             ),
-                            taffy::BoxSizing::BorderBox => style_helpers::length(len),
+                            // The cell box cannot shrink below its padding and border, so a
+                            // narrower column would let it overlap the next column's cells.
+                            taffy::BoxSizing::BorderBox => style_helpers::length(
+                                len.max(padding.left + padding.right + border.left + border.right),
+                            ),
                         }
                     }
                     taffy::CompactLength::PERCENT_TAG => {
