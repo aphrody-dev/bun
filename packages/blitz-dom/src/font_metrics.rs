@@ -86,6 +86,30 @@ fn advance_of(
     Some(advance * (font_size / upem as f32))
 }
 
+/// The average and widest character widths a text field's `size` counts in, as Blink reads them
+/// on Linux: the OS/2 average and the width of the `head` bounding box, in whole pixels.
+pub(crate) fn text_field_char_widths(
+    font_ctx: &Mutex<FontContext>,
+    font_styles: &FontStyles,
+    font_size: f32,
+) -> Option<(f32, f32)> {
+    let mut font_ctx = font_ctx.lock().unwrap();
+    let font_ctx = &mut *font_ctx;
+    let mut query = query_for_font_styles(font_ctx, font_styles);
+    let font = find_font_for(&mut query, '0')?;
+    let font_ref = skrifa::FontRef::from_index(font.blob.as_ref(), font.index).ok()?;
+    let metrics = Metrics::new(&font_ref, Size::new(font_size), LocationRef::default());
+    if let (Some(average), Some(bounds)) = (metrics.average_width, metrics.bounds) {
+        if average > 0.0 {
+            return Some((average.round(), (bounds.x_max - bounds.x_min).round()));
+        }
+    }
+    // A font without an OS/2 average makes Blink count in the advance of a zero, with no widest
+    // character added.
+    let variations = stylo_to_parley::font_variations(&font_styles.font_variation_settings);
+    Some((advance_of(&mut query, '0', font_size, &variations)?, 0.0))
+}
+
 #[derive(Clone)]
 pub(crate) struct BlitzFontMetricsProvider {
     pub(crate) font_ctx: Arc<Mutex<FontContext>>,

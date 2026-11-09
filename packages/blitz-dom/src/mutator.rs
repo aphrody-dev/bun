@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 
-use crate::layout::damage::{ALL_DAMAGE, CONSTRUCT_BOX};
+use crate::layout::damage::{ALL_DAMAGE, CONSTRUCT_BOX, ONLY_RELAYOUT};
 use crate::net::{ImageHandler, ResourceHandler, StylesheetHandler};
 use crate::node::{CanvasData, NodeFlags, ShadowRootMode, SpecialElementData, TextInputData};
 use crate::stylo_device::DeviceChanges;
@@ -481,6 +481,16 @@ impl DocumentMutator<'_> {
         if node_is_in_document && counter_input_changed {
             // Counter resolution reads these attributes outside Stylo's style diff.
             node.insert_damage(CONSTRUCT_BOX);
+        }
+        let text_field_size_changed = name.ns == ns!()
+            && name.local == local_name!("size")
+            && node
+                .element_data()
+                .is_some_and(|element| element.name.local == local_name!("input"));
+        if node_is_in_document && text_field_size_changed {
+            // Layout reads a text field's size outside Stylo's style diff, so the field would
+            // keep the width its cached layout has.
+            node.insert_damage(ONLY_RELAYOUT);
         }
 
         let NodeData::Element(ref mut element) = node.data else {

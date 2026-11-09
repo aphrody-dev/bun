@@ -76,6 +76,30 @@ fn tag_intrinsic_sizes(
     (IntrinsicSizes::default(), DEFAULT_OBJECT_SIZE)
 }
 
+/// A text field's `size` attribute: a non-negative integer (HTML's parsing rules), counted only
+/// when it is above zero and within the range HTML gives such an integer.
+fn parse_text_field_size(value: &str) -> Option<u32> {
+    let value = value.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let value = value.strip_prefix('+').unwrap_or(value);
+    let digits = value.find(|c: char| !c.is_ascii_digit()).unwrap_or(value.len());
+    value[..digits].parse().ok().filter(|size| (1..=i32::MAX as u32).contains(size))
+}
+
+/// The content width of a text field with no specified width, as Blink sizes it: `size` average
+/// characters plus one widest-minus-average character.
+fn text_field_intrinsic_width(
+    font_ctx: &std::sync::Mutex<parley::FontContext>,
+    font_styles: Option<&style::properties::style_structs::Font>,
+    font_size: f32,
+    size: u32,
+) -> f32 {
+    let (average, widest) = font_styles
+        .and_then(|font| crate::font_metrics::text_field_char_widths(font_ctx, font, font_size))
+        .unwrap_or((font_size / 2.0, 0.0));
+    let width = (average * size as f32).ceil();
+    if widest > 0.0 { width + widest - average } else { width }
+}
+
 pub(crate) fn resolve_calc_value(calc_ptr: *const (), parent_size: f32) -> f32 {
     let calc = unsafe { &*(calc_ptr as *const CalcLengthPercentage) };
     let result = calc.resolve(CSSPixelLength::new(parent_size));
@@ -335,7 +359,7 @@ impl LayoutPassState<'_> {
         inputs: taffy::tree::LayoutInput,
     ) -> Option<taffy::tree::LayoutOutput> {
         let orthogonal_percent_basis = self.orthogonal_percent_basis_of(dom_node_id(node_id));
-        let node = &mut self.nodes[dom_node_id(node_id)];
+        let node = &mut self.doc.nodes[dom_node_id(node_id)];
 
         let font_styles = node.primary_styles().map(|style| {
             use style::values::computed::font::LineHeight;
@@ -447,16 +471,36 @@ impl LayoutPassState<'_> {
                             | "week" | "time",
                         ) => {}
                         _ => {
+                            let size = element_data
+                                .attr(local_name!("size"))
+                                .and_then(parse_text_field_size)
+                                .unwrap_or(20);
+                            // Asked for only when the width is not known: the font lookup behind
+                            // it is wasted on a field with a definite width, the common case.
+                            let intrinsic_width = || {
+                                text_field_intrinsic_width(
+                                    &self.doc.font_ctx,
+                                    node.primary_styles().as_deref().map(|style| style.get_font()),
+                                    font_size.unwrap_or(16.0),
+                                    size,
+                                )
+                            };
+                            // The measure's own space is the content box's; the caller's is not,
+                            // and clamped to it a field overflowed by its padding and border.
                             return Some(compute_leaf_layout(
                                 inputs,
                                 &node.layout_style(),
                                 resolve_calc_value,
-                                |_known_size, _available_space| taffy::Size {
-                                    width: match inputs.available_space.width {
-                                        AvailableSpace::Definite(limit) => limit.min(300.0),
-                                        AvailableSpace::MinContent => 0.0,
-                                        AvailableSpace::MaxContent => 300.0,
-                                    },
+                                |known_size, available_space| taffy::Size {
+                                    width: known_size.width.unwrap_or_else(|| {
+                                        match available_space.width {
+                                            AvailableSpace::Definite(limit) => {
+                                                limit.min(intrinsic_width())
+                                            }
+                                            AvailableSpace::MinContent => 0.0,
+                                            AvailableSpace::MaxContent => intrinsic_width(),
+                                        }
+                                    }),
                                     height: resolved_line_height.unwrap_or(16.0),
                                 },
                             ));
