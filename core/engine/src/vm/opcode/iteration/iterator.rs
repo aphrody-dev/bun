@@ -362,7 +362,7 @@ impl IteratorToArray {
 
         let mut values = Vec::new();
 
-        loop {
+        while !iterator.done() {
             let done = match iterator.step(context) {
                 Ok(done) => done,
                 Err(err) => {
