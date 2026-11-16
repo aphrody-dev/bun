@@ -74,7 +74,7 @@ fn class_name_is_uninitialized_in_computed_keys() {
         run_test_actions([TestAction::assert_native_error(
             source,
             crate::JsNativeErrorKind::Reference,
-            "C is not defined",
+            "access of uninitialized binding",
         )]);
     }
 }
