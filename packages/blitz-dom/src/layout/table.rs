@@ -63,7 +63,10 @@ pub struct TableContext {
     caption_margin_adjustments: Vec<Arc<CaptionMarginAdjustment>>,
 }
 
+// Taffy's CompactLength keeps a tag in the low three bits of a calc pointer, and this is passed
+// as one, so it must be 8-aligned on 32-bit targets too rather than relying on the allocator.
 #[derive(Debug)]
+#[repr(align(8))]
 struct CaptionMarginAdjustment {
     value: taffy::LengthPercentageAuto,
     spacing: f32,
