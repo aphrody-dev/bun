@@ -1943,15 +1943,26 @@ impl BaseDocument {
         element.set_special_data(SpecialElementData::Stylesheet(stylesheet.clone()));
 
         if let Some(shadow_root_id) = shadow_scope {
-            // Appends arrive in tree order (process_added_subtree is a
-            // pre-order walk), which preserves document order per root.
+            // Pending <style> elements are processed in hash order, so place the
+            // sheet by tree order instead of appending it.
+            let before = self.next_scoped_stylesheet(shadow_root_id, node_id);
             if let NodeData::ShadowRoot(ref mut data) = self.nodes[shadow_root_id].data {
-                data.author_styles.stylesheets.append_stylesheet(
-                    None,
-                    &Default::default(),
-                    stylesheet,
-                    &self.guard.read(),
-                );
+                let guard = self.guard.read();
+                match before {
+                    Some(before) => data.author_styles.stylesheets.insert_stylesheet_before(
+                        None,
+                        &Default::default(),
+                        stylesheet,
+                        before,
+                        &guard,
+                    ),
+                    None => data.author_styles.stylesheets.append_stylesheet(
+                        None,
+                        &Default::default(),
+                        stylesheet,
+                        &guard,
+                    ),
+                }
             }
             self.note_shadow_style_change(shadow_root_id);
             return;
@@ -1975,6 +1986,46 @@ impl BaseDocument {
         } else {
             self.stylist
                 .append_stylesheet(stylesheet, &self.guard.read())
+        }
+    }
+
+    /// The sheet of the first node after `node_id`, in the shadow tree's
+    /// order, that has a sheet registered in that root's scoped set. The
+    /// walk starts at `node_id`. It visits every later node when no sheet
+    /// follows, so it is skipped when the root's set holds no anchor.
+    fn next_scoped_stylesheet(
+        &self,
+        shadow_root_id: NodeId,
+        node_id: NodeId,
+    ) -> Option<DocumentStyleSheet> {
+        let NodeData::ShadowRoot(ref data) = self.nodes.get(shadow_root_id)?.data else {
+            return None;
+        };
+        if data.author_styles.stylesheets.is_empty() {
+            return None;
+        }
+        let scoped_here = |id: NodeId| match self.nodes_to_stylesheet.get(&id) {
+            Some((sheet, Some(scope))) if *scope == shadow_root_id => Some(sheet.clone()),
+            _ => None,
+        };
+        let mut cur = self.nodes.get(node_id)?;
+        loop {
+            let next = match cur.children().first() {
+                Some(child) => child,
+                None => loop {
+                    if cur.id() == shadow_root_id {
+                        return None;
+                    }
+                    if let Some(sibling) = cur.forward(1) {
+                        break sibling.id();
+                    }
+                    cur = self.nodes.get(cur.parent_id()?)?;
+                },
+            };
+            if let Some(sheet) = scoped_here(next) {
+                return Some(sheet);
+            }
+            cur = self.nodes.get(next)?;
         }
     }
 
