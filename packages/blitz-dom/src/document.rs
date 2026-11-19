@@ -30,12 +30,12 @@ use blitz_traits::node_id::NodeId;
 use blitz_traits::shell::{DummyShellProvider, ShellProvider, Viewport};
 use cursor_icon::CursorIcon;
 use linebender_resource_handle::Blob;
-use markup5ever::{LocalName, local_name};
+use markup5ever::{LocalName, local_name, ns};
 use parley::{FontContext, PlainEditorDriver};
 use selectors::{Element, matching::QuirksMode};
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, Bound, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, Bound, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::str::FromStr;
@@ -303,7 +303,7 @@ pub struct BaseDocument {
     id: usize,
 
     // Config
-    /// Base url for resolving linked resources (stylesheets, images, fonts, etc)
+    /// The document URL. Element URLs resolve against `document_base_url` instead.
     pub(crate) url: DocumentUrl,
     /// querySelector-family selectors already parsed against `url`.
     pub(crate) selector_cache: crate::query_selector::SelectorCache,
@@ -579,6 +579,16 @@ pub struct BaseDocument {
     /// Moves whenever a connected `<base>` is added or removed or its href is written, so the
     /// embedder re-resolves the base URL only when it can have changed.
     pub base_epoch: u32,
+    /// The document base URL (HTML §document-base-url) as of the last `sync_base_url`: what
+    /// element URLs, inline sheets and style attributes resolve against.
+    pub(crate) document_base_url: DocumentUrl,
+    /// The connected `<base>` elements. With none that has an href, the base URL is `url`.
+    /// BTree, not Hash: on wasm each new RandomState shifts the keys of every later HashMap.
+    pub(crate) connected_bases: BTreeSet<NodeId>,
+    /// The URL each `<link rel=stylesheet>` was last requested with.
+    pub(crate) linked_stylesheet_urls: BTreeMap<NodeId, String>,
+    /// The `base_epoch` that `document_base_url` was last derived at.
+    pub(crate) synced_base_epoch: u32,
 
     /// Tracks in-flight image requests. When an image is being fetched, additional
     /// requests for the same URL are queued here instead of starting new fetches.
@@ -724,6 +734,7 @@ impl BaseDocument {
             author_font_registrations: Vec::new(),
             counters_seen: false,
             counters_built_once: false,
+            document_base_url: base_url.clone(),
             url: base_url,
             selector_cache: Default::default(),
             size_container_seen: false,
@@ -789,6 +800,9 @@ impl BaseDocument {
             used_codepoints: Vec::new(),
             non_latin_text_writes: 0,
             base_epoch: 0,
+            connected_bases: BTreeSet::new(),
+            linked_stylesheet_urls: BTreeMap::new(),
+            synced_base_epoch: 0,
             pending_images: HashMap::new(),
             pending_style_image_nodes: Vec::new(),
             pending_critical_resources: HashSet::new(),
@@ -853,14 +867,88 @@ impl BaseDocument {
         self.html_parser_provider = html_parser_provider;
     }
 
-    /// Set base url for resolving linked resources (stylesheets, images, fonts, etc)
+    /// Set the document URL, which is also the fallback base URL
     pub fn set_base_url(&mut self, url: &str) {
         self.url = DocumentUrl::from(Url::parse(url).unwrap());
+        self.document_base_url = self.url.clone();
+        self.apply_base_href();
     }
 
-    /// The base url used for resolving linked resources (stylesheets, images, fonts, etc)
+    /// The URL this document last requested for `node_id`'s `<link rel=stylesheet>`, which keys
+    /// the fetched sheet even after a later `<base href>` change.
+    pub fn linked_stylesheet_url(&self, node_id: NodeId) -> Option<&str> {
+        self.linked_stylesheet_urls.get(&node_id).map(String::as_str)
+    }
+
+    /// Bring `document_base_url` up to date: the first `<base href>` in tree order, resolved
+    /// against the document URL, or the document URL itself. Call it before resolving an element
+    /// URL. It recomputes only after `base_epoch` moves, and walks only with two `<base href>`s.
+    pub fn sync_base_url(&mut self) {
+        if self.synced_base_epoch != self.base_epoch {
+            self.synced_base_epoch = self.base_epoch;
+            self.apply_base_href();
+        }
+    }
+
+    fn apply_base_href(&mut self) {
+        // Chrome ignores data: and javascript: bases (vbscript: is never a usable base either),
+        // and a base that cannot resolve relative URLs (`data:,`) would fail every later fetch.
+        let base = self
+            .first_base_href()
+            .and_then(|href| self.url.resolve_relative(&href))
+            .filter(|url| !url.cannot_be_a_base())
+            .filter(|url| !matches!(url.scheme(), "data" | "javascript" | "vbscript"));
+        self.document_base_url = base.map_or_else(|| self.url.clone(), DocumentUrl::from);
+    }
+
+    /// The href of `id` if it is still a connected HTML `<base>` outside any shadow tree.
+    fn connected_base_href(&self, id: NodeId) -> Option<&str> {
+        let node = self.get_node(id)?;
+        let element = node.element_data()?;
+        let is_base =
+            *element.namespace() == ns!(html) && element.name.local == local_name!("base");
+        if !is_base || !node.flags.is_in_document() || node.containing_shadow_root_id().is_some() {
+            return None;
+        }
+        element.attr(local_name!("href"))
+    }
+
+    /// The href of the first connected HTML `<base>` with one, skipping shadow trees and
+    /// template contents. Tree order matters only with two such bases, so only then does it walk.
+    fn first_base_href(&self) -> Option<String> {
+        let mut hrefs = self
+            .connected_bases
+            .iter()
+            .filter_map(|&id| self.connected_base_href(id));
+        let first = hrefs.next()?;
+        if hrefs.next().is_none() {
+            return Some(first.to_string());
+        }
+        drop(hrefs);
+        let mut stack = vec![self.root_node_id];
+        while let Some(id) = stack.pop() {
+            let node = &self.nodes[id];
+            if id != self.root_node_id && !node.flags.is_in_document() {
+                continue;
+            }
+            if let Some(element) = node.element_data() {
+                if *element.namespace() == ns!(html) && element.name.local == local_name!("base") {
+                    if let Some(href) = element.attr(local_name!("href")) {
+                        return Some(href.to_string());
+                    }
+                }
+            }
+            let children = node.children();
+            for i in (0..children.len()).rev() {
+                stack.extend(children.get(i));
+            }
+        }
+        None
+    }
+
+    /// The document base URL that element URLs resolve against, as of the last `sync_base_url`
     pub fn base_url(&self) -> &Url {
-        &self.url
+        &self.document_base_url
     }
 
     pub fn guard(&self) -> &SharedRwLock {
@@ -1046,12 +1134,13 @@ impl BaseDocument {
     }
 
     pub fn set_style_property(&mut self, node_id: NodeId, name: &str, value: &str) {
+        self.sync_base_url();
         let node = &mut self.nodes[node_id];
         let did_change = node.element_data_mut().unwrap().set_style_property(
             name,
             value,
             &self.guard,
-            self.url.url_extra_data(),
+            self.document_base_url.url_extra_data(),
         );
         if did_change {
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
@@ -1063,7 +1152,7 @@ impl BaseDocument {
         let did_change = node.element_data_mut().unwrap().remove_style_property(
             name,
             &self.guard,
-            self.url.url_extra_data(),
+            self.document_base_url.url_extra_data(),
         );
         if did_change {
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
@@ -1655,10 +1744,10 @@ impl BaseDocument {
     }
 
     pub(crate) fn resolve_url(&self, raw: &str) -> url::Url {
-        self.url.resolve_relative(raw).unwrap_or_else(|| {
+        self.document_base_url.resolve_relative(raw).unwrap_or_else(|| {
             panic!(
                 "to be able to resolve {raw} with the base_url: {:?}",
-                *self.url
+                *self.document_base_url
             )
         })
     }
@@ -1672,6 +1761,7 @@ impl BaseDocument {
     }
 
     pub fn reload_resource_by_href(&mut self, href_to_reload: &str) {
+        self.sync_base_url();
         for &node_id in self.nodes_to_stylesheet.keys() {
             let node = &self.nodes[node_id];
             let Some(element) = node.element_data() else {
@@ -1730,6 +1820,7 @@ impl BaseDocument {
     }
 
     pub fn process_style_element(&mut self, target_id: NodeId) {
+        self.sync_base_url();
         // HTML §the-style-element: the sheet applies only while the element's
         // media attribute matches. Ignoring it applies mobile-only rules
         // unconditionally: a <style media="(max-width:767px)"> carrying an
@@ -1835,7 +1926,7 @@ impl BaseDocument {
         }
     }
 
-    /// The document's base URL
+    /// The document URL
     pub fn url(&self) -> &url::Url {
         &self.url
     }
@@ -1882,7 +1973,7 @@ impl BaseDocument {
 
         let data = Stylesheet::from_str(
             css,
-            self.url.url_extra_data(),
+            self.document_base_url.url_extra_data(),
             origin,
             ServoArc::new(self.guard.wrap(media_list)),
             self.guard.clone(),
@@ -1906,6 +1997,7 @@ impl BaseDocument {
     }
 
     pub fn upsert_stylesheet_for_node(&mut self, node_id: NodeId) {
+        self.sync_base_url();
         let raw_styles = self.nodes[node_id].text_content();
         let sheet = self.make_stylesheet(raw_styles, Origin::Author);
         self.add_stylesheet_for_node(sheet, node_id);

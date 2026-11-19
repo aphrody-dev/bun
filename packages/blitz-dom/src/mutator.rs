@@ -205,7 +205,11 @@ impl DocumentMutator<'_> {
         attrs: impl Into<crate::node::Attributes>,
     ) -> NodeId {
         let mut data = ElementData::new(name, attrs);
-        data.flush_style_attribute(self.doc.guard(), &self.doc.url.url_extra_data());
+        // A parsed `<base>` above this element decides its style attribute's url()s.
+        if data.attr(local_name!("style")).is_some() {
+            self.doc.sync_base_url();
+        }
+        data.flush_style_attribute(self.doc.guard(), &self.doc.document_base_url.url_extra_data());
 
         let id = self.doc.create_node(NodeData::Element(crate::pool::PoolBox::new(data)));
         let node = self.doc.get_node_mut(id).unwrap();
@@ -410,6 +414,9 @@ impl DocumentMutator<'_> {
     pub fn set_attribute(&mut self, node_id: NodeId, name: QualName, value: &str) {
         let node_is_in_document = self.doc.nodes[node_id].flags.is_in_document();
         self.note_base_href_write(node_id, &name, node_is_in_document);
+        if name.local == local_name!("style") {
+            self.doc.sync_base_url();
+        }
         if node_is_in_document {
             self.doc.snapshot_node_for_attr(node_id, Some(&name.local));
 
@@ -558,7 +565,8 @@ impl DocumentMutator<'_> {
         }
 
         if *attr == local_name!("style") {
-            element.flush_style_attribute(&self.doc.guard, &self.doc.url.url_extra_data());
+            let url_data = self.doc.document_base_url.url_extra_data();
+            element.flush_style_attribute(&self.doc.guard, &url_data);
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
             return;
         }
@@ -757,7 +765,8 @@ impl DocumentMutator<'_> {
         }
 
         if *attr == local_name!("style") {
-            element.flush_style_attribute(&self.doc.guard, &self.doc.url.url_extra_data());
+            let url_data = self.doc.document_base_url.url_extra_data();
+            element.flush_style_attribute(&self.doc.guard, &url_data);
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
         } else if (tag, attr) == tag_and_attr!("input", "checked") {
             element.set_checkbox_input_checked(false);
@@ -1522,7 +1531,10 @@ impl<'doc> DocumentMutator<'doc> {
                 "style" => {
                     self.style_nodes.insert(node_id);
                 }
-                "base" => doc.base_epoch = doc.base_epoch.wrapping_add(1),
+                "base" => {
+                    doc.base_epoch = doc.base_epoch.wrapping_add(1);
+                    doc.connected_bases.insert(node_id);
+                }
                 _ if has_custom_widget => {}
                 "link" => self.eager_op_queue.push(SpecialOp::LoadStylesheet(node_id)),
                 "img" => self.eager_op_queue.push(SpecialOp::LoadImage(node_id)),
@@ -1569,6 +1581,10 @@ impl<'doc> DocumentMutator<'doc> {
 
             if doc.nodes[node_id].data.is_element_with_tag_name(&local_name!("base")) {
                 doc.base_epoch = doc.base_epoch.wrapping_add(1);
+                doc.connected_bases.remove(&node_id);
+            }
+            if !doc.linked_stylesheet_urls.is_empty() {
+                doc.linked_stylesheet_urls.remove(&node_id);
             }
             let is_style = doc.nodes[node_id]
                 .data
@@ -1674,6 +1690,8 @@ impl<'doc> DocumentMutator<'doc> {
     }
 
     fn load_linked_stylesheet(&mut self, target_id: NodeId) {
+        self.doc.sync_base_url();
+        self.doc.linked_stylesheet_urls.remove(&target_id);
         let node = &self.doc.nodes[target_id];
 
         let mut is_in_head = false;
@@ -1710,6 +1728,9 @@ impl<'doc> DocumentMutator<'doc> {
         let media_attr = node.attr(local_name!("media")).map(ToString::to_string);
 
         let url = self.doc.resolve_url(href);
+        self.doc
+            .linked_stylesheet_urls
+            .insert(target_id, url.to_string());
         let handler = ResourceHandler::new(
             self.doc.tx.clone(),
             self.doc.id(),
@@ -1935,6 +1956,7 @@ impl<'doc> DocumentMutator<'doc> {
     }
 
     fn load_image(&mut self, target_id: NodeId) {
+        self.doc.sync_base_url();
         // An <img> waits on its latest request only. Changing
         // src left the node queued under the previous URL too, so
         // whichever response landed first won: a stale success painted
@@ -1961,7 +1983,7 @@ impl<'doc> DocumentMutator<'doc> {
                 // shim detects unresolvable srcs on the attribute
                 // hook and fires the error event; wasm-side we just
                 // skip the fetch.
-                let Some(src) = self.doc.url.resolve_relative(&raw_src) else {
+                let Some(src) = self.doc.document_base_url.resolve_relative(&raw_src) else {
                     return;
                 };
                 let display_dim = self.read_img_display_dim(target_id);
@@ -2030,6 +2052,7 @@ impl<'doc> DocumentMutator<'doc> {
     }
 
     fn load_iframe(&mut self, target_id: NodeId) {
+        self.doc.sync_base_url();
         if self.doc.subdocument_depth >= crate::iframe::MAX_SUBDOCUMENT_DEPTH {
             #[cfg(feature = "tracing")]
             tracing::warn!(
@@ -2057,7 +2080,7 @@ impl<'doc> DocumentMutator<'doc> {
         if raw_src.is_empty() {
             return;
         }
-        let Some(url) = self.doc.url.resolve_relative(raw_src) else {
+        let Some(url) = self.doc.document_base_url.resolve_relative(raw_src) else {
             #[cfg(feature = "tracing")]
             tracing::warn!("Not loading iframe: could not resolve url {raw_src}");
             return;
@@ -3074,6 +3097,106 @@ mod test {
         mutator.clear_attribute(base, qual_name!("href"));
         drop(mutator);
         assert_ne!(document.base_epoch, rewritten, "removing the href moves it");
+    }
+
+    #[test]
+    fn resource_url_follows_the_first_base_href() {
+        let mut document = BaseDocument::new(DocumentConfig {
+            base_url: Some("https://doc.example/a/page.html".into()),
+            ..Default::default()
+        });
+        let element = |document: &mut BaseDocument, name, href: Option<&str>| {
+            let attrs = href.map_or_else(Vec::new, |href| {
+                vec![Attribute::new(qual_name!("href"), href)]
+            });
+            document.create_node(NodeData::Element(crate::pool::PoolBox::new(ElementData::new(
+                name, attrs,
+            ))))
+        };
+        let template = element(&mut document, qual_name!("template", html), None);
+        let inert_href = Some("https://inert.example/");
+        let inert = element(&mut document, qual_name!("base", html), inert_href);
+        let empty = element(&mut document, qual_name!("base", html), None);
+        let first = element(&mut document, qual_name!("base", html), Some("/b/"));
+        let second_href = Some("https://second.example/");
+        let second = element(&mut document, qual_name!("base", html), second_href);
+        let root = document.root_node().id();
+        let resolved = |document: &mut BaseDocument| {
+            document.sync_base_url();
+            document.resolve_url("s.css").to_string()
+        };
+        assert_eq!(resolved(&mut document), "https://doc.example/a/s.css");
+
+        let mut mutator = document.mutate();
+        mutator.append_children(template, &[inert]);
+        mutator.append_children(root, &[template, empty, first, second]);
+        drop(mutator);
+        assert_eq!(resolved(&mut document), "https://doc.example/b/s.css");
+
+        assert_eq!(document.url().as_str(), "https://doc.example/a/page.html");
+
+        for href in ["data:,", "data:/c/", "javascript:/c/", "https://[::1"] {
+            let mut mutator = document.mutate();
+            mutator.set_attribute(first, qual_name!("href"), href);
+            drop(mutator);
+            let unusable = resolved(&mut document);
+            assert_eq!(unusable, "https://doc.example/a/s.css", "{href} falls back");
+        }
+
+        let mut mutator = document.mutate();
+        mutator.remove_node(first);
+        drop(mutator);
+        assert_eq!(resolved(&mut document), "https://second.example/s.css");
+
+        let mut mutator = document.mutate();
+        mutator.remove_node(second);
+        drop(mutator);
+        assert_eq!(resolved(&mut document), "https://doc.example/a/s.css");
+        assert_eq!(document.connected_bases.len(), 1, "a <base> without href stays tracked");
+
+        let mut mutator = document.mutate();
+        mutator.remove_node(empty);
+        drop(mutator);
+        assert!(document.connected_bases.is_empty(), "removed bases stop being tracked");
+        assert_eq!(resolved(&mut document), "https://doc.example/a/s.css");
+    }
+
+    #[test]
+    fn linked_stylesheet_keeps_the_url_it_was_requested_with() {
+        let mut document = BaseDocument::new(DocumentConfig {
+            base_url: Some("https://doc.example/a/page.html".into()),
+            ..Default::default()
+        });
+        let element = |document: &mut BaseDocument, name, attrs: Vec<Attribute>| {
+            document.create_node(NodeData::Element(crate::pool::PoolBox::new(ElementData::new(
+                name, attrs,
+            ))))
+        };
+        let base_attrs = vec![Attribute::new(qual_name!("href"), "/b/")];
+        let base = element(&mut document, qual_name!("base", html), base_attrs);
+        let link_attrs = vec![
+            Attribute::new(qual_name!("rel"), "stylesheet"),
+            Attribute::new(qual_name!("href"), "s.css"),
+        ];
+        let link = element(&mut document, qual_name!("link", html), link_attrs);
+        let root = document.root_node().id();
+
+        let mut mutator = document.mutate();
+        mutator.append_children(root, &[base, link]);
+        drop(mutator);
+        let requested = document.linked_stylesheet_url(link).map(str::to_string);
+        assert_eq!(requested.as_deref(), Some("https://doc.example/b/s.css"));
+
+        let mut mutator = document.mutate();
+        mutator.set_attribute(base, qual_name!("href"), "/c/");
+        drop(mutator);
+        let after_base_write = document.linked_stylesheet_url(link).map(str::to_string);
+        assert_eq!(after_base_write, requested, "a base change does not refetch the sheet");
+
+        let mut mutator = document.mutate();
+        mutator.remove_node(link);
+        drop(mutator);
+        assert_eq!(document.linked_stylesheet_url(link), None);
     }
 
     #[test]

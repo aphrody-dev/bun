@@ -734,7 +734,10 @@ pub(crate) fn handle_click(
                 }
                 local_name!("a") => {
                     if let Some(href) = el.attr(local_name!("href")).map(str::to_string) {
-                        if let Some(url) = doc.url.resolve_relative(&href) {
+                        // The href resolves against the base URL; the fragment check below
+                        // compares with the document URL.
+                        doc.sync_base_url();
+                        if let Some(url) = doc.document_base_url.resolve_relative(&href) {
                             // If the link only differs from the current document URL by its
                             // fragment (this includes links whose href is just `#fragment`),
                             // perform in-page fragment navigation (scrolling) instead of a
