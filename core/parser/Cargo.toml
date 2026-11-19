@@ -26,6 +26,9 @@ icu_properties.workspace = true
 indoc.workspace = true
 strum.workspace = true
 
+[target.'cfg(any(target_os = "linux", target_vendor = "apple"))'.dependencies]
+libc = "0.2"
+
 [features]
 annex-b = []
 
