@@ -1095,6 +1095,7 @@ impl ElementCx<'_, '_> {
                 node_id,
                 &mut draw_text_context,
                 None,
+                Some(text_layout.text(self.context.dom.tree())),
             );
 
             crate::text_box_decorations::paint_span_fragment_borders(
@@ -1173,6 +1174,7 @@ impl ElementCx<'_, '_> {
                 self.node.id(),
                 &mut draw_text_context,
                 fill_override,
+                Some(input_data.editor.raw_text()),
             );
         }
     }
@@ -1194,6 +1196,11 @@ impl ElementCx<'_, '_> {
         let transform =
             self.transform * Affine::translate((pos.x * self.scale, pos.y * self.scale));
 
+        let mut buf = [0u8; 4];
+        let marker_text = match &list_item.marker {
+            Marker::Char(char) => &*char.encode_utf8(&mut buf),
+            Marker::String(str) => str.as_str(),
+        };
         let mut draw_text_context = self.context.draw_text_context.borrow_mut();
         crate::text::stroke_text(
             scene,
@@ -1204,6 +1211,7 @@ impl ElementCx<'_, '_> {
             self.node.id(),
             &mut draw_text_context,
             None,
+            Some(marker_text),
         );
     }
 

@@ -252,6 +252,7 @@ pub(crate) struct DrawTextContext {
     path_scratch: Vec<NodeId>,
     deco_boxes: Vec<LineDecoration>,
     win_ascent_ratios: WinAscentCache,
+    glyph_text_ranges: Vec<std::ops::Range<usize>>,
 }
 
 /// Resolve the CSS `text-decoration-thickness` to a device-pixel size.
@@ -595,13 +596,17 @@ pub(crate) fn stroke_text<'a>(
     inline_root_id: NodeId,
     context: &mut DrawTextContext,
     fill_override: Option<Color>,
+    text: Option<&str>,
 ) {
     let DrawTextContext {
         stack,
         path_scratch,
         deco_boxes,
         win_ascent_ratios,
+        glyph_text_ranges,
     } = context;
+    // The text the layout was shaped from, for scenes with a text layer.
+    let text = text.filter(|_| scene.wants_glyph_text());
     stack.clear();
     path_scratch.clear();
     deco_boxes.clear();
@@ -717,6 +722,14 @@ pub(crate) fn stroke_text<'a>(
                 } else {
                     kurbo::Vec2::default()
                 };
+
+                if let Some(text) = text {
+                    glyph_text_ranges.clear();
+                    glyph_run.glyph_text_ranges(glyph_text_ranges);
+                    if glyph_text_ranges.iter().all(|range| text.get(range.clone()).is_some()) {
+                        scene.glyph_text(text, glyph_text_ranges);
+                    }
+                }
 
                 let normalized_coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
                 scene.draw_glyphs(
