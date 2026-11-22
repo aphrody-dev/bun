@@ -421,10 +421,21 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             .is_some();
         // The root element's overflow is propagated to the viewport (which is clipped by the
         // window/surface bounds), so the root element must not clip its own overflow. Nor
-        // must a body whose overflow went to the viewport in the root's place.
+        // must a body whose overflow went to the viewport in the root's place. Containment on
+        // either element keeps the body's overflow on the body.
         let is_root_element = self.root_element_id == Some(node_id);
+        let body_overflow_propagated = self.dom.propagates_overflow_to_viewport(node_id)
+            && node
+                .element_data()
+                .is_some_and(|el| &**el.namespace() == "http://www.w3.org/1999/xhtml")
+            && styles.get_box().clone_contain().is_empty()
+            && self
+                .dom
+                .try_root_element()
+                .and_then(Node::primary_styles)
+                .is_some_and(|root| root.get_box().clone_contain().is_empty());
         let should_clip = !is_root_element
-            && !self.dom.propagates_overflow_to_viewport(node_id)
+            && !body_overflow_propagated
             && (is_sub_doc
                 || is_text_input
                 || contain_paint
