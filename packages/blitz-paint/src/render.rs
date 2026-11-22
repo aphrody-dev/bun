@@ -574,32 +574,16 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         // An empty clip-path region means every pixel the subtree paints is discarded
         // by the layer that wraps it, so the whole traversal below is dead work.
-        let clipped_away = is_empty_clip_region(clip_path_shape.as_ref());
-
-        scene.begin_part(node_id.as_u64(), ScenePart::Outline);
-        cx.draw_outline(scene);
-        scene.end_part();
-        cx.draw_outset_box_shadow(scene);
-
-        // Outline and outset shadow paint outside the clip-path layer here, so they
-        // stay above the skip to keep an empty-clipped frame pixel-identical.
-        if clipped_away {
+        // The clip-path layer also clips the outline and outset shadow, so nothing is painted.
+        if is_empty_clip_region(clip_path_shape.as_ref()) {
             self.layer_manager
                 .maybe_pop_layer(scene, css_clip_layer_pushed);
             return;
         }
 
-        // Only the clip-path maybe_with_layer call below reads this, and it
-        // does nothing when its flag is false, the common case for an element.
-        let clip_path_for_layer = if has_clip_path {
-            let mut path = clip_path_shape.unwrap_or_else(|| cx.frame.border_box_path());
-            path.apply_affine(Affine::scale(self.scale));
-            path
-        } else {
-            BezPath::new()
-        };
+        let clip_path_for_layer = clip_path_shape.unwrap_or_default();
 
-        // clip-path clip ayer
+        // Apply clip-path to decorations as well as the element's content.
         self.layer_manager.maybe_with_layer(
             scene,
             has_clip_path,
@@ -612,6 +596,10 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 // If the element has a CSS `mask`, then push an isolation layer for the
                 // masked content. The mask is applied when the layer is popped below.
                 let mask_layer_pushed = cx.maybe_push_css_mask_layer(scene);
+                scene.begin_part(node_id.as_u64(), ScenePart::Outline);
+                cx.draw_outline(scene);
+                scene.end_part();
+                cx.draw_outset_box_shadow(scene);
                 // `cx.transform` is mutated to apply scroll offsets while drawing content.
                 // Save it so that the mask can be drawn untransformed by scroll offsets.
                 let unscrolled_transform = cx.transform;
