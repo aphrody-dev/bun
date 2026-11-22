@@ -194,15 +194,6 @@ impl SourceText {
         }
     }
 
-    /// Kitesurf: a text that lives no longer than the call making it (JSON.parse), which
-    /// must never cost a store write.
-    #[must_use]
-    pub(crate) fn new_transient(source_text: boa_ast::SourceText) -> Self {
-        Self {
-            source_text: Some(Inner::new(source_text, false)),
-        }
-    }
-
     fn new_empty() -> Self {
         Self { source_text: None }
     }
