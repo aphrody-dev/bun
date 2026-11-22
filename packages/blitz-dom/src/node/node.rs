@@ -606,6 +606,7 @@ mod compact_node_tests {
         assert!(root.hoisted_children().is_none());
         assert_eq!(root.oof_containing_block(), None);
         assert!(!root.placed_floats());
+        assert!(!root.laid_out_beside_floats());
         assert_eq!(root.rehomed_reach(), None);
         assert!(root.stacking_context().is_none());
         assert!(root.sc_contribution_cache().is_none());
@@ -620,6 +621,7 @@ mod compact_node_tests {
         root.set_hoisted_children(ThinVec::new());
         root.set_oof_containing_block(None);
         root.set_placed_floats(false);
+        root.set_laid_out_beside_floats(false);
         root.set_rehomed_reach(None);
         root.set_stacking_context(None);
         assert!(root.take_stacking_context().is_none());
@@ -693,6 +695,8 @@ struct NodeRare {
     hoisted_children: RefCell<ThinVec<NodeId>>,
     oof_containing_block: NodeIdCell,
     placed_floats: Cell<bool>,
+    /// The last layout ran with floats reaching below this box's top.
+    laid_out_beside_floats: Cell<bool>,
     rehomed_reach: RefCell<Option<Box<(f32, f32, f32, f32)>>>,
     stacking_context: RefCell<Option<Box<StackingContext>>>,
     sc_contribution_cache: RefCell<ThinVec<HoistedPaintChild>>,
@@ -1019,6 +1023,18 @@ impl Node {
     pub fn set_placed_floats(&self, value: bool) {
         if value || self.rare.get().is_some() {
             self.rare().placed_floats.set(value);
+        }
+    }
+
+    pub fn laid_out_beside_floats(&self) -> bool {
+        self.rare
+            .get()
+            .is_some_and(|rare| rare.laid_out_beside_floats.get())
+    }
+
+    pub fn set_laid_out_beside_floats(&self, value: bool) {
+        if value || self.rare.get().is_some() {
+            self.rare().laid_out_beside_floats.set(value);
         }
     }
 

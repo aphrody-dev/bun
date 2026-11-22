@@ -874,9 +874,45 @@ impl taffy::LayoutBlockContainer for LayoutPassState<'_> {
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::LayoutOutput {
         let inputs = self.with_inline_percentage_height(node_id, inputs);
-        compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
+        // Taffy's cache key holds no float geometry: a box beside floats now,
+        // or at its last layout, must not reuse an entry from another float
+        // layout, or its lines keep the old float bands (or none).
+        #[cfg(feature = "floats")]
+        {
+            let beside_floats = block_ctx
+                .as_ref()
+                .is_some_and(|ctx| ctx.has_active_floats(0.0));
+            let node = self.node_from_id_mut(node_id);
+            if beside_floats || node.laid_out_beside_floats() {
+                node.clear_layout_cache();
+                node.set_laid_out_beside_floats(beside_floats);
+            }
+        }
+        #[cfg(not(feature = "floats"))]
+        return compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
             tree.compute_child_layout_internal(node_id, inputs, block_ctx)
-        })
+        });
+        #[cfg(feature = "floats")]
+        {
+            let Some(block_ctx) = block_ctx else {
+                return compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
+                    tree.compute_child_layout_internal(node_id, inputs, None)
+                });
+            };
+            let run_mode = inputs.run_mode;
+            let output = compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
+                tree.compute_child_layout_internal(node_id, inputs, Some(&mut *block_ctx))
+            });
+            // A cache hit registers no floats in the BFC, so a box whose
+            // subtree placed floats keeps out of the cache (`cache_get`). A
+            // size-only pass can return before it reaches the floats, so only
+            // a full layout clears the flag.
+            let placed = block_ctx.floated_content_height_contribution() > f32::NEG_INFINITY;
+            if placed || run_mode == taffy::RunMode::PerformLayout {
+                self.node_from_id_mut(node_id).set_placed_floats(placed);
+            }
+            output
+        }
     }
 }
 
