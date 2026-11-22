@@ -282,11 +282,19 @@ pub(crate) fn font_variant_east_asian(
 /// high-level `font-variant-*` properties are applied first, and the low-level
 /// `font-feature-settings` property is applied last so that it takes precedence.
 ///
-/// Parley stably sorts the feature list by tag and HarfBuzz applies the last of any
-/// duplicate tags, so appending `font-feature-settings` after the `font-variant-*`
-/// features gives it the higher precedence required by the spec.
 pub(crate) fn font_features(font_styles: &stylo::Font) -> Vec<parley::FontFeature> {
     let mut features = Vec::new();
+
+    use style::computed_values::font_kerning::T as FontKerning;
+    let kerning = match font_styles.font_kerning {
+        FontKerning::Auto => None,
+        FontKerning::Normal => Some(1),
+        FontKerning::None => Some(0),
+    };
+    if let Some(value) = kerning {
+        features.push(feature(b"kern", value));
+        features.push(feature(b"vkrn", value));
+    }
 
     self::font_variant_ligatures(font_styles.font_variant_ligatures, &mut features);
     self::font_variant_caps(font_styles.font_variant_caps, &mut features);
