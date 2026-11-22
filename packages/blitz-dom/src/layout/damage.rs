@@ -805,7 +805,10 @@ impl BaseDocument {
 
         // The initial value is one `none` layer, so a slot per layer would allocate on almost
         // every element. Painters read slots with `get`, so empty storage means "no image".
-        if !style_images.iter().any(|image| matches!(image, StyloImage::Url(_))) {
+        if !style_images
+            .iter()
+            .any(|image| matches!(crate::resolve_style_image(image).0, StyloImage::Url(_)))
+        {
             elem.clear_image_layers(mask);
             return;
         }
@@ -815,7 +818,7 @@ impl BaseDocument {
         elem_images.resize(len, None);
 
         for idx in 0..len {
-            let style_image = &style_images[idx];
+            let (style_image, _) = crate::resolve_style_image(&style_images[idx]);
             let new_image = match style_image {
                 StyloImage::Url(ComputedUrl::Valid(new_url)) => {
                     let old_image = elem_images[idx].as_ref();
