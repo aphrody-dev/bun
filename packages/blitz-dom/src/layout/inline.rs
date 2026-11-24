@@ -441,8 +441,11 @@ impl LayoutPassState<'_> {
         let text_kind = inline_layout.text_kind(&self.nodes);
         let text_is_only_bidi_controls = text_kind.only_bidi_controls;
 
-        // Short circuit if inline context contains no text or inline boxes
+        // Empty content still contributes the box's preferred and minimum sizes.
         if !has_styles_preventing_being_collapsed_through
+            && node_size == Size::NONE
+            && node_min_size == Size::NONE
+            && aspect_ratio.is_none()
             && text_is_only_bidi_controls
             && match inline_layout.live_layout() {
                 Some(layout) => layout.inline_boxes().len() == 0,
