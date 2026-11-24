@@ -936,10 +936,11 @@ impl selectors::Element for BlitzNode<'_> {
     }
 
     fn is_empty(&self) -> bool {
-        // Per CSS Selectors Level 4 + WPT (matching Chrome/Firefox):
-        // comments do not count as content for `:empty`.
-        self.dom_children()
-            .all(|c| matches!(c.data, NodeData::Comment { .. }))
+        !self.dom_children().any(|child| match &child.data {
+            NodeData::Element(_) => true,
+            NodeData::Text(text) => !text.content.is_empty(),
+            _ => false,
+        })
     }
 
     fn is_root(&self) -> bool {
