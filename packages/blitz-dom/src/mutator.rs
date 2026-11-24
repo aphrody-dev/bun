@@ -632,6 +632,9 @@ impl DocumentMutator<'_> {
             self.load_iframe(node_id);
         } else if (tag, attr) == tag_and_attr!("link", "media") {
             self.update_link_stylesheet_media(node_id);
+        } else if name.ns == ns!() && (tag, attr) == tag_and_attr!("style", "media") {
+            // Reparsed at flush: the cached sheet's MediaList is shared, so it is not swapped in place.
+            self.style_nodes.insert(node_id);
         }
 
         self.note_possible_slot_reassignment(node_id, &name.local);
@@ -780,6 +783,11 @@ impl DocumentMutator<'_> {
             self.load_iframe(node_id);
         } else if (tag, attr) == tag_and_attr!("link", "media") {
             self.update_link_stylesheet_media(node_id);
+        } else if name.ns == ns!()
+            && (tag, attr) == tag_and_attr!("style", "media")
+            && node_is_in_document
+        {
+            self.style_nodes.insert(node_id);
         }
 
         self.note_possible_slot_reassignment(node_id, &name.local);
