@@ -275,7 +275,11 @@ impl ScopeTable {
             w.u32(self.outer_ref(scope));
             w.u32(parts.unique_id);
             w.u32(parts.index);
-            w.u8(u8::from(parts.function) | (u8::from(parts.this_escaped) << 1));
+            w.u8(
+                u8::from(parts.function)
+                    | (u8::from(parts.this_escaped) << 1)
+                    | (u8::from(parts.arrow) << 2),
+            );
             w.u32(parts.bindings.len() as u32);
             for (name, index, flags) in &parts.bindings {
                 w.u32(strings.id(name));
@@ -305,6 +309,7 @@ impl ScopeTable {
                 unique_id,
                 index,
                 function: flags & 1 != 0,
+                arrow: flags & 4 != 0,
                 this_escaped: flags & 2 != 0,
                 bindings,
             };
