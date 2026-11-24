@@ -1627,6 +1627,9 @@ impl BaseDocument {
             if let Some(after) = node.after() {
                 self.drop_node_ignoring_parent_with(after, on_drop);
             }
+            if let Some(first_letter) = node.first_letter() {
+                self.drop_node_ignoring_parent_with(first_letter, on_drop);
+            }
 
             for child in node.children() {
                 self.drop_node_ignoring_parent_with(child, on_drop);

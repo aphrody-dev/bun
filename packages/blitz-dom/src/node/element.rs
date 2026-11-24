@@ -674,6 +674,10 @@ struct ElementRare {
     /// Generated `::before` and `::after` pseudo element nodes.
     before: OptNodeId,
     after: OptNodeId,
+    /// A node holding the element's `::first-letter` style, when it has one. It has no
+    /// children: inline layout gives the first letter of the element's text this node's
+    /// style (and its id as brush, so painters read the style from it).
+    first_letter: OptNodeId,
     /// The element's parsed style attribute (used by stylo)
     style_attribute: Option<ServoArc<Locked<PropertyDeclarationBlock>>>,
     /// One slot per `background-image` / `mask-image` layer; empty when no layer is a URL.
@@ -708,6 +712,7 @@ impl ElementRare {
             && self.shadow_root.get().is_none()
             && self.before.get().is_none()
             && self.after.get().is_none()
+            && self.first_letter.get().is_none()
             && self.style_attribute.is_none()
             && self.background_images.is_empty()
             && self.mask_images.is_empty()
@@ -843,6 +848,16 @@ impl ElementData {
 
     pub fn set_after(&mut self, id: Option<NodeId>) {
         self.update_rare(|rare| rare.after.set(id));
+    }
+
+    /// The node holding the element's `::first-letter` style, if any.
+    #[inline]
+    pub fn first_letter(&self) -> Option<NodeId> {
+        self.rare.as_ref()?.first_letter.get()
+    }
+
+    pub fn set_first_letter(&mut self, id: Option<NodeId>) {
+        self.update_rare(|rare| rare.first_letter.set(id));
     }
 
     /// The element's parsed style attribute (used by stylo).
