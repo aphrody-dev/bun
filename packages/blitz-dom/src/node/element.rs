@@ -1289,13 +1289,13 @@ impl ElementData {
         let attrs: Attributes = attrs.into();
         let id_attr_atom = attrs
             .iter()
-            .find(|attr| &attr.name.local == "id")
+            .find(|attr| *attr.namespace() == ns!() && &attr.name.local == "id")
             .map(|attr| attr.value.as_ref())
             .map(|value: &str| Atom::from(value));
 
         let class_atoms = attrs
             .iter()
-            .find(|attr| &attr.name.local == "class")
+            .find(|attr| *attr.namespace() == ns!() && &attr.name.local == "class")
             .map(|attr| parse_class_list(attr.value.as_ref()))
             .unwrap_or_default();
 

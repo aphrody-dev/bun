@@ -461,7 +461,8 @@ impl DocumentMutator<'_> {
         }
 
         // Shadow-tree ids stay out of the document id map, as in process_added_subtree.
-        if name.local == local_name!("id")
+        if name.ns == ns!()
+            && name.local == local_name!("id")
             && node_is_in_document
             && self.doc.nodes[node_id].containing_shadow_root_id().is_none()
         {
@@ -538,11 +539,11 @@ impl DocumentMutator<'_> {
         let tag = &element.name.local;
         let attr = &name.local;
 
-        if *attr == local_name!("id") {
+        if name.ns == ns!() && *attr == local_name!("id") {
             element.id = Some(Atom::from(value))
         }
 
-        if *attr == local_name!("class") {
+        if name.ns == ns!() && *attr == local_name!("class") {
             element.classes = crate::node::parse_class_list(value);
         }
 
@@ -689,7 +690,7 @@ impl DocumentMutator<'_> {
             self.restyle_inherited_attr_write(node_id, &name);
         }
 
-        if name.local == local_name!("id") && node_is_in_document {
+        if name.ns == ns!() && name.local == local_name!("id") && node_is_in_document {
             if let Some(old_id) = self.doc.nodes[node_id]
                 .element_data()
                 .and_then(|element| element.id.clone())
@@ -720,7 +721,7 @@ impl DocumentMutator<'_> {
                 .attribute_changed(&name.local, old_value, None);
         }
 
-        if name.local == local_name!("id") {
+        if name.ns == ns!() && name.local == local_name!("id") {
             element.id = None;
         }
 
@@ -737,7 +738,7 @@ impl DocumentMutator<'_> {
             element.flush_link_state();
         }
 
-        if name.local == local_name!("class") {
+        if name.ns == ns!() && name.local == local_name!("class") {
             element.classes = Default::default();
         }
 
