@@ -608,6 +608,31 @@ impl<'a> TNode for BlitzNode<'a> {
     }
 }
 
+// RFC 4647 extended filtering skips unmatched subtags until a singleton.
+fn language_range_matches(range: &str, language: &str) -> bool {
+    if range.is_empty() || language.is_empty() {
+        return range.is_empty() && language.is_empty();
+    }
+    let mut range = range.split('-');
+    let mut language = language.split('-');
+    let first_range = range.next().unwrap();
+    let first_tag = language.next().unwrap();
+    if first_range != "*" && !first_range.eq_ignore_ascii_case(first_tag) {
+        return false;
+    }
+    range.filter(|part| *part != "*").all(|part| {
+        for tag in language.by_ref() {
+            if part.eq_ignore_ascii_case(tag) {
+                return true;
+            }
+            if tag.len() == 1 {
+                return false;
+            }
+        }
+        false
+    })
+}
+
 impl selectors::Element for BlitzNode<'_> {
     type Impl = SelectorImpl;
 
@@ -794,34 +819,7 @@ impl selectors::Element for BlitzNode<'_> {
             NonTSPseudoClass::Fullscreen => false,
             NonTSPseudoClass::Hover => self.element_state().contains(ElementState::HOVER),
             NonTSPseudoClass::Indeterminate => false,
-            NonTSPseudoClass::Lang(ref lang_arg) => {
-                // Walk self + ancestors looking for the nearest `lang`
-                // attribute. BCP-47 prefix-match (case-insensitive).
-                let arg = lang_arg.as_ref();
-                if arg.is_empty() {
-                    false
-                } else {
-                    let mut cur = Some(*self);
-                    let effective_lang = loop {
-                        let Some(node) = cur else { break None };
-                        if let Some(value) = node.data.attr(local_name!("lang")) {
-                            break Some(value);
-                        }
-                        cur = node.parent_node();
-                    };
-                    match effective_lang {
-                        None => false,
-                        Some(lang) => {
-                            let lang_b = lang.as_bytes();
-                            let arg_b = arg.as_bytes();
-                            lang_b.eq_ignore_ascii_case(arg_b)
-                                || (lang_b.len() > arg_b.len()
-                                    && lang_b[arg_b.len()] == b'-'
-                                    && lang_b[..arg_b.len()].eq_ignore_ascii_case(arg_b))
-                        }
-                    }
-                }
-            },
+            NonTSPseudoClass::Lang(ref range) => self.match_element_lang(None, range),
             NonTSPseudoClass::CustomState(_) => false,
             NonTSPseudoClass::Link => self.element_state().contains(ElementState::UNVISITED),
             NonTSPseudoClass::PlaceholderShown => false,
@@ -1204,15 +1202,32 @@ impl<'a> TElement for BlitzNode<'a> {
     }
 
     fn lang_attr(&self) -> Option<style::selector_parser::AttrValue> {
-        None
+        self.element_data()?
+            .declared_language()
+            .map(AtomString::from)
     }
 
     fn match_element_lang(
         &self,
-        _override_lang: Option<Option<style::selector_parser::AttrValue>>,
-        _value: &style::selector_parser::Lang,
+        override_lang: Option<Option<style::selector_parser::AttrValue>>,
+        range: &style::selector_parser::Lang,
     ) -> bool {
-        false
+        if let Some(language) = override_lang {
+            return language_range_matches(range, language.as_ref().map_or("", |value| &*value.0));
+        }
+
+        let mut current = Some(*self);
+        while let Some(node) = current {
+            if let Some(language) = node
+                .element_data()
+                .and_then(|element| element.declared_language())
+            {
+                return language_range_matches(range, language);
+            }
+            current = node.parent_node();
+        }
+
+        language_range_matches(range, "")
     }
 
     fn is_html_document_body_element(&self) -> bool {
@@ -1373,21 +1388,9 @@ impl<'a> TElement for BlitzNode<'a> {
                 attr.name.local == local_name!("type") && attr.value.eq_ignore_ascii_case("image")
             });
 
-        // https://html.spec.whatwg.org/multipage/#the-lang-and-xml:lang-attributes
-        let accepts_lang = *elem.namespace() == ns!(html) || *elem.namespace() == ns!(svg);
-        let mut lang = None;
-
         for attr in elem.attrs() {
             let name = &attr.name.local;
             let value = attr.value.as_str();
-
-            if *name == local_name!("lang") {
-                if *attr.namespace() == ns!(xml) {
-                    lang = Some(value);
-                } else if *attr.namespace() == ns!() && accepts_lang {
-                    lang = lang.or(Some(value));
-                }
-            }
 
             if *name == local_name!("align") {
                 use style::values::specified::TextAlign;
@@ -1594,7 +1597,7 @@ impl<'a> TElement for BlitzNode<'a> {
             }
         }
 
-        if let Some(lang) = lang {
+        if let Some(lang) = elem.declared_language() {
             push_style(PropertyDeclaration::XLang(XLang(Atom::from(lang))));
         }
     }

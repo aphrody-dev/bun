@@ -1364,6 +1364,26 @@ impl ElementData {
         &self.attrs
     }
 
+    /// Language declared on this element, before inheritance.
+    pub(crate) fn declared_language(&self) -> Option<&str> {
+        let mut language = None;
+        for attr in self
+            .attrs
+            .iter()
+            .filter(|attr| attr.name.local == local_name!("lang"))
+        {
+            if *attr.namespace() == ns!(xml) {
+                return Some(attr.value.as_str());
+            }
+            if *attr.namespace() == ns!()
+                && (*self.namespace() == ns!(html) || *self.namespace() == ns!(svg))
+            {
+                language = Some(attr.value.as_str());
+            }
+        }
+        language
+    }
+
     pub fn attr(&self, name: impl PartialEq<LocalName>) -> Option<&str> {
         let attr = self.attrs.iter().find(|attr| name == attr.name.local)?;
         Some(&attr.value)

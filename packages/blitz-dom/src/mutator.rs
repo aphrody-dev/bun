@@ -402,10 +402,12 @@ impl DocumentMutator<'_> {
     /// `:dir()` and `:lang()` can depend on this element's inherited state.
     /// Restyle from its parent to include descendants and later `+`/`~` siblings.
     fn restyle_inherited_attr_write(&mut self, node_id: NodeId, name: &QualName) {
-        if name.ns != ns!()
-            || (name.local != local_name!("dir") && name.local != local_name!("lang"))
-            || !self.doc.nodes[node_id].is_element()
-        {
+        let inherited = if name.ns == ns!() {
+            name.local == local_name!("dir") || name.local == local_name!("lang")
+        } else {
+            name.ns == ns!(xml) && name.local == local_name!("lang")
+        };
+        if !inherited || !self.doc.nodes[node_id].is_element() {
             return;
         }
 
