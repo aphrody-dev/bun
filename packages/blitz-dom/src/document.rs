@@ -1862,9 +1862,10 @@ impl BaseDocument {
         let (cache_key, sheet) = if let Some(cached) = cached {
             cached
         } else {
-            let decoded = html_escape::decode_html_entities(&css);
+            // The document parser already supplies the style element's text.
+            // HTML raw text and XML CDATA must retain literal entity spellings.
             let sheet =
-                self.make_stylesheet_with_media(&decoded, Origin::Author, media_attr.as_deref());
+                self.make_stylesheet_with_media(&css, Origin::Author, media_attr.as_deref());
             let css_key = lookup.map(|(css_key, _, _)| *css_key).unwrap_or(css_key);
             let media_key = media_attr.as_deref().map(Arc::<str>::from);
             let entry = self.author_sheet_cache.entry(css_key).or_default();
