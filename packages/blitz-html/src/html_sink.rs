@@ -393,6 +393,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
         if is_xhtml_document(html) {
             Self::parse_xml_into_mutator(mutr, html);
         } else {
+            mutr.set_xml_document(false);
             // Parse as HTML
             let mut sink = DocumentHtmlParser::new(mutr);
             sink.is_xml = false;
@@ -421,6 +422,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
     /// information (a `Content-Type` header or an `.xht`/`.xhtml` file extension) should use
     /// this method instead.
     pub fn parse_xml_into_mutator<'a, 'd>(mutr: &'a mut DocumentMutator<'d>, xml: &str) {
+        mutr.set_xml_document(true);
         let mut sink = DocumentHtmlParser::new(mutr);
         sink.is_xml = true;
         xml5ever::driver::parse_document(sink, Default::default())

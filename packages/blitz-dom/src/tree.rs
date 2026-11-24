@@ -19,6 +19,7 @@ const FREE: u32 = 0x8000_0000;
 /// dropped and its slot reused, ids referring to the dropped node no longer resolve
 /// ([`NodeTree::get`] returns `None`, and indexing panics) instead of aliasing the new occupant.
 pub struct NodeTree {
+    pub(crate) is_xml_document: bool,
     /// Node storage in fixed chunks, so growing never copies nodes or reserves past the next
     /// chunk. A slot is initialized exactly where its version lacks `FREE`. Slot 0 is a
     /// permanently free sentinel, so the first node lives in slot 1 as it did under slotmap;
@@ -145,6 +146,7 @@ impl NodeTree {
         inline_rebuild: crate::node::InlineRebuild,
     ) -> Self {
         Self {
+            is_xml_document: false,
             chunks: Vec::new(),
             versions: Vec::new(),
             // Slot 0 is the free sentinel: never handed out, its version always reads `FREE`.
