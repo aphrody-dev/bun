@@ -3,8 +3,6 @@
 (function makeNodeVMBinding(natives) {
   "use strict";
   const { createRealm, realmGlobal, evaluate, check, isModuleNamespaceObject } = natives;
-  const { defineProperty, getOwnPropertyDescriptor, is } = Object;
-  const { ownKeys } = Reflect;
 
   const DONT_CONTEXTIFY = Symbol("vm_dont_contextify");
   const USE_MAIN_CONTEXT_DEFAULT_LOADER = Symbol("vm_dynamic_import_main_context_default");
@@ -31,21 +29,17 @@
   }
 
   // ── contexts ──────────────────────────────────────────────────────────────
-  /** The realm of each context, and what its global held when it was made. */
+  /** The realm of each context, and its global object, which forwards to the context unless it is the context. */
   const contexts = new WeakMap();
 
-  function newRealm() {
-    const handle = createRealm();
-    const global = realmGlobal(handle);
-    const builtins = new Map();
-    for (const key of ownKeys(global)) builtins.set(key, getOwnPropertyDescriptor(global, key));
-    return { handle, global, builtins };
+  function newRealm(contextObject) {
+    const handle = createRealm(contextObject);
+    return { handle, global: realmGlobal(handle) };
   }
 
   function createContext(contextObject, options) {
     if (contextObject === DONT_CONTEXTIFY) {
       const realm = newRealm();
-      realm.isGlobal = true;
       contexts.set(realm.global, realm);
       return realm.global;
     }
@@ -58,7 +52,7 @@
       if (options.origin !== undefined && typeof options.origin !== "string")
         throw invalidArgType("options.origin", "string", options.origin);
     }
-    if (!contexts.has(contextObject)) contexts.set(contextObject, newRealm());
+    if (!contexts.has(contextObject)) contexts.set(contextObject, newRealm(contextObject));
     return contextObject;
   }
 
@@ -67,50 +61,11 @@
     return contexts.has(object);
   }
 
-  /** Runs `code` in the realm of `context`, with the context object's properties as its globals. */
+  /** Runs `code` in the realm of `context`; its global, as a script's result, is the context. */
   function runIn(context, code, filename) {
-    const realm = contexts.get(context);
-    if (realm.isGlobal) return evaluate(realm.handle, code, filename);
-    const { global, builtins } = realm;
-    const keys = ownKeys(context);
-    for (const key of keys) {
-      const desc = getOwnPropertyDescriptor(context, key);
-      try {
-        defineProperty(global, key, { ...desc, configurable: true });
-      } catch {}
-    }
-    try {
-      const result = evaluate(realm.handle, code, filename);
-      // The context's global is the contextified object, as `this` of its scripts.
-      return result === global ? context : result;
-    } finally {
-      // What the script declared or assigned on its global is the context object's; builtins it left alone stay.
-      for (const key of ownKeys(global)) {
-        const desc = getOwnPropertyDescriptor(global, key);
-        const builtin = builtins.get(key);
-        if (builtin && !keys.includes(key) && "value" in builtin && "value" in desc && is(builtin.value, desc.value)) continue;
-        if (builtin && !keys.includes(key) && !("value" in builtin)) continue;
-        const own = getOwnPropertyDescriptor(context, key);
-        if (own && "value" in own && "value" in desc && is(own.value, desc.value)) continue;
-        try {
-          if (own && own.writable === false && !own.configurable) continue;
-          defineProperty(context, key, own && !own.configurable ? { value: desc.value } : desc);
-        } catch {}
-      }
-      for (const key of keys) {
-        if (getOwnPropertyDescriptor(global, key) === undefined) {
-          try {
-            delete context[key];
-          } catch {}
-        }
-        // Put the global back as the realm made it, for the next script.
-        const builtin = builtins.get(key);
-        try {
-          if (builtin) defineProperty(global, key, builtin);
-          else delete global[key];
-        } catch {}
-      }
-    }
+    const { handle, global } = contexts.get(context);
+    const result = evaluate(handle, code, filename);
+    return result === global ? context : result;
   }
 
   // ── Script ────────────────────────────────────────────────────────────────

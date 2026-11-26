@@ -125,8 +125,11 @@ impl PushIteratorToArray {
             .iterators
             .pop()
             .js_expect("iterator stack should have at least an iterator")?;
+        let array = array.as_object().js_expect("should always be an object")?;
+        // ArrayAccumulation of a SpreadElement: CreateDataPropertyOrThrow, which no setter on a prototype sees.
         while let Some(next) = iterator.step_value(context)? {
-            Array::push(&array, &[next], context)?;
+            let len = array.length_of_array_like(context)?;
+            array.create_data_property_or_throw(len, next, context)?;
         }
         Ok(())
     }

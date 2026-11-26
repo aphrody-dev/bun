@@ -16,7 +16,7 @@ import {
   show,
   showUnquoted,
 } from "./format.ts";
-import { native, runtime } from "./state.ts";
+import { append, native, runtime } from "./state.ts";
 
 type Fn = (...args: any[]) => any;
 const colors = () => native.colors;
@@ -174,16 +174,42 @@ function makeExpect(value: unknown, message?: unknown, flags?: Partial<Flags>): 
   return e;
 }
 
-/** `Expect::promise_to_await` + `received_from_promise`. */
-async function settledValue(e: Expect, flags: Flags, name: string, params: string): Promise<unknown> {
-  let value = e[VALUE];
-  let candidate: unknown = value;
-  if (!isThenable(candidate) && typeof candidate === "function") candidate = (candidate as Fn)();
+const handled = (promise: Promise<unknown>) => Promise.prototype.then.call(promise, undefined, () => {});
+
+/**
+ * `Expect::promise_to_await`: a promise that settles the way `await value` would, or nothing if `value` is not
+ * thenable. A settled promise is itself; anything else is adopted as `await` does, which reads `then` once (a getter
+ * that throws is a rejection) and calls it in a microtask.
+ */
+function promiseToAwait(value: unknown): Promise<unknown> | undefined {
+  const state = native.promiseState(value);
+  if (state !== undefined) {
+    handled(value as Promise<unknown>);
+    if (state !== 0) return value as Promise<unknown>;
+  }
+  const adopted = new Promise(resolve => resolve(value));
+  handled(adopted);
+  return native.promiseState(adopted) === 1 ? undefined : adopted;
+}
+
+/** `Expect::received_promise`: the received thenable, or what the received function returns. */
+function receivedPromise(received: unknown): Promise<unknown> | undefined {
+  const promise = promiseToAwait(received);
+  return promise === undefined && typeof received === "function" ? promiseToAwait((received as Fn)()) : promise;
+}
+
+/**
+ * `received_from_promise`: runs `matcher` on what the received promise settled with, once it settled the way
+ * `.resolves`/`.rejects` expects. The value goes to `matcher` as it is: returned from here, a thenable would be adopted.
+ */
+async function settledValue<R>(e: Expect, flags: Flags, name: string, params: string, matcher: (received: unknown) => R): Promise<Awaited<R>> {
+  const value = e[VALUE];
+  const promise = receivedPromise(value);
   let state: "fulfilled" | "rejected" | "none" = "none";
   let settled: unknown;
-  if (isThenable(candidate)) {
+  if (promise !== undefined) {
     try {
-      settled = await candidate;
+      settled = await promise;
       state = "fulfilled";
     } catch (error) {
       settled = error;
@@ -195,9 +221,9 @@ async function settledValue(e: Expect, flags: Flags, name: string, params: strin
     throw thrown(`${sig}\n\n${pretty(`${expected}<r>\n${received}<red>`)}${show(shown, { colors: colors() })}${pretty("<r>")}\n`);
   };
   if (state === "none") fail("Expected promise", "Received: ", value);
-  if (state === "fulfilled" && flags.promise === REJECTS) fail("Expected promise that rejects", "Received promise that resolved: ", settled);
-  if (state === "rejected" && flags.promise === RESOLVES) fail("Expected promise that resolves", "Received promise that rejected: ", settled);
-  return settled;
+  if (state === "fulfilled" && flags.promise === REJECTS) fail("Expected promise that rejects", "Received promise that resolved: ", value);
+  if (state === "rejected" && flags.promise === RESOLVES) fail("Expected promise that resolves", "Received promise that rejected: ", value);
+  return await matcher(settled);
 }
 
 const isThenable = (v: unknown): v is PromiseLike<unknown> =>
@@ -246,7 +272,7 @@ function once(ask: () => unknown): unknown {
     value = error;
   }
   if (j) {
-    j.answers.push([threw, value]);
+    append(j.answers, [threw, value]);
     j.cursor++;
   }
   if (threw) throw value;
@@ -255,10 +281,11 @@ function once(ask: () => unknown): unknown {
 
 /** `Pass::wait_for`: the running matcher returns a promise, and runs again once `promise` settles. */
 function waitFor(promise: Promise<unknown>): never {
-  promise.then(
-    () => {},
-    () => {},
-  );
+  if (journal === undefined)
+    throw new Error(
+      "An async matcher only works inside an expect() matcher, which then returns a promise: await expect(received).toEqual(expected)",
+    );
+  handled(promise);
   throw new Deferred(promise);
 }
 
@@ -295,7 +322,7 @@ function runDeferring(attempt: () => unknown): unknown {
       }
     })(error);
     // The test ends once the matchers it left waiting are done (`pending_matchers`).
-    runtime.sequence?.pendingMatchers.push(settled);
+    if (runtime.sequence) append(runtime.sequence.pendingMatchers, settled);
     return settled;
   }
 }
@@ -315,7 +342,7 @@ function runMatcherOnce(e: Expect, name: string, def: MatcherDef, args: unknown[
   };
   if (flags.poll) return poll(e, flags, run);
   if (flags.promise !== NONE)
-    return settledValue(e, flags, name, def.params).then(received => {
+    return settledValue(e, flags, name, def.params, received => {
       const r = run(received);
       return r === e ? undefined : r;
     });
@@ -323,7 +350,7 @@ function runMatcherOnce(e: Expect, name: string, def: MatcherDef, args: unknown[
     try {
       return run(e[VALUE]);
     } catch (error) {
-      runtime.sequence?.softErrors.push(error);
+      if (runtime.sequence) append(runtime.sequence.softErrors, error);
       return undefined;
     }
   }
@@ -467,22 +494,22 @@ function propertyPath(path: string): string[] {
   for (let i = 0; i < path.length; i++) {
     const c = path[i];
     if (c === ".") {
-      parts.push(current);
+      append(parts, current);
       current = "";
     } else if (c === "[") {
-      if (current) parts.push(current);
+      if (current) append(parts, current);
       current = "";
       const end = path.indexOf("]", i);
       if (end < 0) {
         current = path.slice(i);
         break;
       }
-      parts.push(path.slice(i + 1, end));
+      append(parts, path.slice(i + 1, end));
       i = end;
       if (path[i + 1] === ".") i++;
     } else current += c;
   }
-  if (current || !parts.length || path.endsWith(".")) parts.push(current);
+  if (current || !parts.length || path.endsWith(".")) append(parts, current);
   return path === "" ? [""] : parts;
 }
 
@@ -1361,7 +1388,7 @@ define("toHaveReturnedWith", EXPECTED, (m, expected) => {
   for (let i = 0; i < r.count; i++) {
     const o = r.outcome(i);
     if (o.kind === "value") {
-      returned.push(o.value);
+      append(returned, o.value);
       matched = matched || deepEquals(o.value, expected);
     } else if (o.kind === "error") someThrew = true;
   }
@@ -1504,13 +1531,11 @@ interface MatcherFlags {
 /** `Expect_readFlagsAndProcessPromise`: the value a `resolvesTo`/`rejectsTo` matcher compares, or nothing. */
 function processPromise(flags: MatcherFlags, value: unknown): { value: unknown } | undefined {
   if (flags.promise === NONE) return { value };
-  if (!isPromise(value)) return undefined;
-  const state = native.promiseState(value);
-  if (state === 1 && flags.promise === RESOLVES) return { value: native.promiseResult(value) };
-  if (state === 2 && flags.promise === REJECTS) {
-    value.catch(() => {});
-    return { value: native.promiseResult(value) };
-  }
+  const promise = once(() => promiseToAwait(value)) as Promise<unknown> | undefined;
+  if (promise === undefined) return undefined;
+  const state = native.promiseState(promise);
+  if (state === 0) waitFor(promise);
+  if (state === (flags.promise === RESOLVES ? 1 : 2)) return { value: native.promiseResult(promise) };
   return undefined;
 }
 
@@ -1871,12 +1896,12 @@ function extend(definitions: unknown) {
             const r = executeCustomMatcher(labelOf(e), displayName(fn), fn, [received, ...args], flags, false);
             return isPromise(r) ? r.then(() => undefined) : e;
           };
-          if (flags.promise !== NONE) return settledValue(e, flags, name, customParams(fn)).then(run).then(() => undefined);
+          if (flags.promise !== NONE) return settledValue(e, flags, name, customParams(fn), run).then(() => undefined);
           if (flags.soft) {
             try {
               return run(e[VALUE]);
             } catch (error) {
-              runtime.sequence?.softErrors.push(error);
+              if (runtime.sequence) append(runtime.sequence.softErrors, error);
               return undefined;
             }
           }
@@ -2105,11 +2130,11 @@ Object.assign(expect, {
       throw new TypeError(`expect.addEqualityTesters: expected an array of functions, got ${show(testers)}`);
     for (const t of testers) {
       if (typeof t !== "function") throw new TypeError(`expect.addEqualityTesters: expected an array of functions, got ${show(t)}`);
-      equalityTesters.push(t);
+      append(equalityTesters, t);
     }
   },
   addSnapshotSerializer(serializer: unknown) {
-    snapshotSerializers.push(serializer);
+    append(snapshotSerializers, serializer);
   },
   assertions(expected: unknown) {
     const n = nonNegativeInteger(expected, 0xffffffff);

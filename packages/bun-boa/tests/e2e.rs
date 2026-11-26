@@ -442,6 +442,34 @@ fn test_runner_bails_mid_file_and_repeats_failures() {
     assert!(listed.contains("(fail) beforeAll throws > (unnamed)") && listed.contains("(fail) timeout"), "{stderr}");
 }
 
+/// A getter that a test puts at `Array.prototype[1]` does not reach the runner's own arrays: results, hooks, matcher
+/// messages and the error of a failure, as with Bun's native runner.
+#[test]
+fn test_runner_is_immune_to_array_prototype() {
+    let out = bun()
+        .args(["test", "prototype.test.ts"])
+        .current_dir(fixtures().join("runner"))
+        .env("AGENT", "0")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let (_, stderr) = text(&out);
+    for line in [
+        "(pass) with a getter at Array.prototype[1] > matchers",
+        "(pass) with a getter at Array.prototype[1] > a failing matcher's message",
+        "(pass) with a getter at Array.prototype[1] > each 3 4",
+        "error: reported",
+        "(fail) with a getter at Array.prototype[1] > a failure",
+        "(pass) after",
+        " 5 pass",
+        " 1 fail",
+        "Ran 6 tests across 1 file.",
+    ] {
+        assert!(stderr.contains(line), "missing {line:?} in:\n{stderr}");
+    }
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+}
+
 /// Through the loader's source maps: new inline snapshots are written into the test file where the matcher is called,
 /// and an error shows the lines of the file as it is written, at their numbers.
 #[test]

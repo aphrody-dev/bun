@@ -1,6 +1,6 @@
 // Positions in the file as it is written: Boa's stack names those of the code the loader printed, which its
 // source map (test.rs's natives) maps back, as Bun remaps a stack through its saved source maps.
-import { native } from "./state.ts";
+import { append, native } from "./state.ts";
 
 export interface Frame {
   /** `at name (path:line:column)`, with the position mapped. */
@@ -20,7 +20,7 @@ export function framesOf(stack: string): Frame[] {
     if (!line.startsWith("at ")) continue;
     const m = LOCATION.exec(line);
     if (!m) {
-      frames.push({ text: line });
+      append(frames, { text: line });
       continue;
     }
     const path = m[2];
@@ -29,7 +29,7 @@ export function framesOf(stack: string): Frame[] {
     const mapped = native.originalPosition(path, row, column);
     if (mapped) [row, column] = mapped;
     const text = line.replace(`${path}:${m[3]}:${m[4]}`, `${path}:${row}:${column}`);
-    frames.push({ text, path, line: row, column });
+    append(frames, { text, path, line: row, column });
   }
   return frames;
 }

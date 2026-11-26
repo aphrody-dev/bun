@@ -383,9 +383,9 @@ function stateOf(f: Fn): object {
   return state;
 }
 
-let promiseState: (p: Promise<unknown>) => number = () => 0;
+let promiseState: (p: Promise<unknown>) => number | undefined = () => 0;
 let promiseResult: (p: Promise<unknown>) => unknown = () => undefined;
-export function setPromiseInspector(state: (p: Promise<unknown>) => number, result: (p: Promise<unknown>) => unknown) {
+export function setPromiseInspector(state: (p: Promise<unknown>) => number | undefined, result: (p: Promise<unknown>) => unknown) {
   promiseState = state;
   promiseResult = result;
 }

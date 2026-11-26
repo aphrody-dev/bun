@@ -21,6 +21,7 @@ import {
   isWeakSet,
   typedArrayName,
 } from "./format.ts";
+import { append } from "./state.ts";
 
 export const ASYMMETRIC = Symbol.for("bun:test:asymmetric");
 
@@ -84,7 +85,7 @@ function enumerableKeys(o: object): (string | symbol)[] {
   const out: (string | symbol)[] = [];
   for (const key of [...getOwnPropertyNames(o), ...getOwnPropertySymbols(o)]) {
     const desc = getOwnPropertyDescriptor(o, key);
-    if (desc?.enumerable) out.push(key);
+    if (desc?.enumerable) append(out, key);
   }
   return out;
 }
@@ -114,7 +115,7 @@ class Equals {
       if (a === v1) return b === v2;
       if (b === v2) return false;
     }
-    if (addToStack) this.stack.push([v1, v2]);
+    if (addToStack) append(this.stack, [v1, v2]);
     try {
       return this.objects(v1, v2);
     } finally {
@@ -267,10 +268,10 @@ class Equals {
       if (!this.eq(c1.cause, c2.cause)) return false;
       const k1: (string | symbol)[] = [];
       const k2: (string | symbol)[] = [];
-      for (const k in c1) k1.push(k);
-      for (const k in c2) k2.push(k);
-      k1.push(...getOwnPropertySymbols(c1).filter(s => getOwnPropertyDescriptor(c1, s)?.enumerable));
-      k2.push(...getOwnPropertySymbols(c2).filter(s => getOwnPropertyDescriptor(c2, s)?.enumerable));
+      for (const k in c1) append(k1, k);
+      for (const k in c2) append(k2, k);
+      append(k1, ...getOwnPropertySymbols(c1).filter(s => getOwnPropertyDescriptor(c1, s)?.enumerable));
+      append(k2, ...getOwnPropertySymbols(c2).filter(s => getOwnPropertyDescriptor(c2, s)?.enumerable));
       return this.enumerated(c1, k1, c2, k2);
     }
     if (isTypedArray(c1)) {
@@ -372,8 +373,8 @@ export function deepMatch(obj: any, subset: any, isMatchingObjectContaining = fa
   }
   if (obj === subset) return true;
   const subsetProps: (string | symbol)[] = [];
-  for (const k in subset) subsetProps.push(k);
-  for (const s of getOwnPropertySymbols(subset)) if (getOwnPropertyDescriptor(subset, s)?.enumerable) subsetProps.push(s);
+  for (const k in subset) append(subsetProps, k);
+  for (const s of getOwnPropertySymbols(subset)) if (getOwnPropertyDescriptor(subset, s)?.enumerable) append(subsetProps, s);
 
   if (Array.isArray(obj) && Array.isArray(subset)) {
     if (obj.length !== subset.length) return false;
@@ -412,7 +413,7 @@ export function deepMatch(obj: any, subset: any, isMatchingObjectContaining = fa
         if (!deepEquals(prop, subsetProp)) return false;
       } else {
         if (pairs.some(([p, s]) => p === prop && s === subsetProp)) continue;
-        pairs.push([prop, subsetProp]);
+        append(pairs, [prop, subsetProp]);
         if (!deepMatch(prop, subsetProp, isMatchingObjectContaining, seen, pairs)) return false;
       }
     } else {

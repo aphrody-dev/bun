@@ -78,11 +78,22 @@ impl Realm {
     /// Create a new [`Realm`].
     #[inline]
     pub fn create(hooks: &dyn HostHooks, root_shape: &RootShape) -> JsResult<Self> {
+        Self::create_with_global(hooks, root_shape, |intrinsics| {
+            hooks.create_global_object(intrinsics)
+        })
+    }
+
+    /// Create a new [`Realm`] whose global object `create_global_object` makes from its intrinsics.
+    pub(crate) fn create_with_global(
+        hooks: &dyn HostHooks,
+        root_shape: &RootShape,
+        create_global_object: impl FnOnce(&Intrinsics) -> JsObject,
+    ) -> JsResult<Self> {
         let intrinsics = Intrinsics::uninit(root_shape).ok_or_else(|| {
             JsNativeError::typ().with_message("failed to create the realm intrinsics")
         })?;
 
-        let global_object = hooks.create_global_object(&intrinsics);
+        let global_object = create_global_object(&intrinsics);
         let global_this = hooks
             .create_global_this(&intrinsics)
             .unwrap_or_else(|| global_object.clone());
