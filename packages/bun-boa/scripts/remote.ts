@@ -16,12 +16,20 @@ if (!args.length) throw new Error("usage: bun run remote <command…>");
 const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 const ssh = (script: string) => $`ssh -o BatchMode=yes ${host} ${script}`;
 
-const head = (await $`git -C ${repo} rev-parse HEAD`.text()).trim();
-const changed = (await $`git -C ${repo} ls-files -m -o --exclude-standard`.text()).split("\n").filter(Boolean);
+// The upstream commit this branch starts from: the host's clone has it, the branch's own commits it may not.
+const head = (await $`git -C ${repo} merge-base HEAD ${process.env.BUN_BASE_BRANCH ?? "main"}`.text()).trim();
+const changed = [
+  ...new Set([
+    ...(await $`git -C ${repo} diff --name-only --diff-filter=d ${head}`.text()).split("\n"),
+    ...(await $`git -C ${repo} ls-files -o --exclude-standard`.text()).split("\n"),
+  ]),
+].filter(Boolean);
+// A worktree of the host's existing Bun clone: the base costs no download beyond the blobs that changed.
+const mirror = `${xfs}/src/bun`;
 await ssh(
-  `set -e; mkdir -p ${remoteRepo}; cd ${remoteRepo}; [ -d .git ] || git init -q; ` +
-    `git cat-file -e ${head}^{commit} 2>/dev/null || git fetch -q --filter=blob:none --depth=1 https://github.com/oven-sh/bun.git ${head}; ` +
-    `git reset -q --hard ${head}`,
+  `set -e; git -C ${mirror} cat-file -e ${head}^{commit} 2>/dev/null || git -C ${mirror} fetch -q upstream ${head}; ` +
+    `if [ -e ${remoteRepo}/.git ]; then git -C ${remoteRepo} checkout -q --detach -f ${head}; ` +
+    `else git -C ${mirror} worktree add -q --detach -f ${remoteRepo} ${head}; fi`,
 );
 const list = join(repo, "build/remote-files.txt");
 await Bun.write(list, changed.join("\n") + "\n");
