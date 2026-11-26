@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn bun() -> Command {
@@ -183,7 +183,8 @@ fn lint_runs_regular_expressions_through_yarr() {
     let (stdout, stderr) = text(&out);
     let all = format!("{stdout}{stderr}");
     assert!(all.contains("id-match") && all.contains("BadName"), "{all}");
-    assert!(!all.contains("snake_ok"), "{all}");
+    // Not `snake_ok` alone: the code frame above `BadName` shows its line.
+    assert!(!all.contains("'snake_ok'"), "{all}");
     assert_eq!(out.status.code(), Some(1), "{all}");
     let rule = r#"{"id-match":["error","^([a-z]+|[A-Z][a-zA-Z]+)(_[a-z]+)*$"]}"#;
     let out = bun().args(["lint", "--rule", rule, "ids.ts"]).current_dir(&dir).output().unwrap();

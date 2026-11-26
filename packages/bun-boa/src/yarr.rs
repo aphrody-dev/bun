@@ -233,7 +233,8 @@ mod tests {
             ("(?<name>a)", 0, 1),
             ("[(](a)", 0, 1),
             (r"[\]\(](a)", 0, 1),
-            ("[[(]](a)", UNICODE_SETS, 1),
+            (r"[[\(]](a)", UNICODE_SETS, 1),
+            (r"[[a]--[\(]](a)", UNICODE_SETS, 1),
         ] {
             let (this, size) = compile(pattern, flags).unwrap_or_else(|r| panic!("{pattern}: refusal {r}"));
             assert_eq!(size, 2 * (groups + 1), "{pattern}");
@@ -245,6 +246,8 @@ mod tests {
     #[test]
     fn refusals() {
         assert_eq!(compile("(", 0).unwrap_err(), SYNTAX);
+        // As JavaScriptCore: with `v` a `(` in a class has to be escaped.
+        assert_eq!(compile("[[(]](a)", UNICODE_SETS).unwrap_err(), SYNTAX);
         assert_eq!(compile(r"\p{NotAProperty}", UNICODE).unwrap_err(), UNKNOWN_PROPERTY);
         assert_eq!(compile(&"a*".repeat(70_000), 0).unwrap_err(), TOO_LARGE);
         assert_eq!(compile(&"(".repeat(100_000), 0).unwrap_err(), TOO_LARGE);
