@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn bun() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_bun"))
+    Command::new(std::env::var_os("NEXTEST_BIN_EXE_bun").unwrap_or(env!("CARGO_BIN_EXE_bun").into()))
 }
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or(env!("CARGO_MANIFEST_DIR").into())).join("tests/fixtures")
 }
 
 fn text(output: &Output) -> (String, String) {
@@ -70,7 +70,7 @@ fn binary_contains_no_cxx() {
     use object::{Object, ObjectSymbol};
     const GLIBC: [&str; 3] = ["__cxa_atexit", "__cxa_finalize", "__cxa_thread_atexit_impl"];
     const CXX_LIBS: [&str; 3] = ["libstdc++", "libc++", "libc++abi"];
-    let bytes = std::fs::read(env!("CARGO_BIN_EXE_bun")).unwrap();
+    let bytes = std::fs::read(std::env::var_os("NEXTEST_BIN_EXE_bun").unwrap_or(env!("CARGO_BIN_EXE_bun").into())).unwrap();
     let file = object::File::parse(&*bytes).unwrap();
 
     let object::File::Elf64(elf) = &file else { panic!("expected a 64-bit ELF") };
@@ -116,7 +116,7 @@ export const obj = { a: 1, b: [1, 2, 3] };
 
 #[test]
 fn fmt_formats_files_and_stdin() {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fmt");
+    let dir = std::env::temp_dir().join("bun-boa-e2e").join("fmt");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(fixtures().join("fmt/messy.ts"), dir.join("messy.ts")).unwrap();
@@ -140,7 +140,7 @@ fn fmt_formats_files_and_stdin() {
 
 #[test]
 fn fmt_reads_bunfig() {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fmt-bunfig");
+    let dir = std::env::temp_dir().join("bun-boa-e2e").join("fmt-bunfig");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("bunfig.toml"), "[fmt]\nsemi = false\n").unwrap();
@@ -157,7 +157,7 @@ fn fmt_reads_bunfig() {
 
 #[test]
 fn lint_reports_and_passes() {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lint");
+    let dir = std::env::temp_dir().join("bun-boa-e2e").join("lint");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("bad.ts"), "debugger;\nif (/a+b/.test(\"aab\")) console.log(1);\n").unwrap();
@@ -174,7 +174,7 @@ fn lint_reports_and_passes() {
 /// pattern ran, through `bun_yarr`'s C ABI on regress (`src/yarr.rs`).
 #[test]
 fn lint_runs_regular_expressions_through_yarr() {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lint-regex");
+    let dir = std::env::temp_dir().join("bun-boa-e2e").join("lint-regex");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("ids.ts"), "export const snake_ok = 1;\nexport const BadName = 2;\n").unwrap();
@@ -192,7 +192,7 @@ fn lint_runs_regular_expressions_through_yarr() {
 
 #[test]
 fn runs_package_json_scripts() {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("scripts");
+    let dir = std::env::temp_dir().join("bun-boa-e2e").join("scripts");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
     std::fs::write(
@@ -220,7 +220,7 @@ fn runs_package_json_scripts() {
 
 #[test]
 fn a_path_is_a_file_not_a_script() {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("script-path");
+    let dir = std::env::temp_dir().join("bun-boa-e2e").join("script-path");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("package.json"), r#"{"scripts":{"./x.js":"echo script","x.js":"echo script"}}"#).unwrap();
@@ -232,4 +232,25 @@ fn a_path_is_a_file_not_a_script() {
     // A bare name is still a script first.
     let out = bun().args(["run", "x.js"]).current_dir(&dir).output().unwrap();
     assert_eq!(text(&out).0, "script\n", "{:?}", text(&out));
+}
+
+/// `bun build` bundles TypeScript across files through Bun's bundler, and the bundle runs on Boa.
+#[cfg(feature = "build")]
+#[test]
+fn build_bundles_and_runs() {
+    let dir = std::env::temp_dir().join("bun-boa-e2e").join("build");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.ts"), "export const x: number = 2;\n").unwrap();
+    std::fs::write(dir.join("e.ts"), "import { x } from \"./a.ts\";\nconsole.log(x * 21);\n").unwrap();
+    let out = bun().args(["build", "e.ts", "--outfile", "out/e.js"]).current_dir(&dir).output().unwrap();
+    assert!(out.status.success(), "{:?}", text(&out));
+    let js = std::fs::read_to_string(dir.join("out/e.js")).unwrap();
+    assert!(!js.contains("import ") && !js.contains(": number"), "{js}");
+    let out = bun().arg("out/e.js").current_dir(&dir).output().unwrap();
+    assert_eq!(text(&out).0, "42\n", "{:?}", text(&out));
+    let out = bun().args(["build", "e.ts", "--minify"]).current_dir(&dir).output().unwrap();
+    assert!(out.status.success() && text(&out).0.len() < js.len(), "{:?}", text(&out));
+    let out = bun().args(["build", "e.ts", "a.ts"]).current_dir(&dir).output().unwrap();
+    assert!(!out.status.success(), "{:?}", text(&out));
 }

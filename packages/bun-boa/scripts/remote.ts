@@ -32,7 +32,7 @@ await ssh(
     `if [ -e ${remoteRepo}/.git ]; then git -C ${remoteRepo} checkout -q --detach -f ${head}; ` +
     `else git -C ${mirror} worktree add -q --detach -f ${remoteRepo} ${head}; fi`,
 );
-const list = join(repo, "build/remote-files.txt");
+const list = join(repo, `build/remote-files-${host}-${Bun.env.BUN_REMOTE_REPO ?? "bun-nojsc"}.txt`);
 await Bun.write(list, changed.join("\n") + "\n");
 await $`rsync -az --files-from=${list} ${`${repo}/`} ${`${host}:${remoteRepo}/`}`;
 
