@@ -268,6 +268,25 @@ describe("Bun.Transpiler", () => {
       expect(lastLine(ts.parsedMin(pre + 'export let y = Bar?.["a-b"];', false))).toBe('export let y = Bar?.["a-b"];');
     });
 
+    it("parenthesizes an inlined enum value on the left of **", () => {
+      const lastLine = out => out.trimEnd().split("\n").at(-1);
+      const neg = "enum E { X = -5 }\n";
+      const pos = "enum E { X = 5 }\n";
+      const str = "enum E { X = 'a' }\n";
+      // "-5 ** 2" is a SyntaxError.
+      expect(lastLine(ts.parsed(neg + "export let y = E.X ** z;", false))).toBe("export let y = (-5) /* X */ ** z;");
+      expect(lastLine(ts.parsed(neg + "export let y = E['X'] ** z;", false))).toBe("export let y = (-5) /* X */ ** z;");
+      expect(lastLine(ts.parsed(pos + "export let y = E.X ** z;", false))).toBe("export let y = 5 /* X */ ** z;");
+      expect(lastLine(ts.parsed(str + "export let y = E.X ** z;", false))).toBe('export let y = "a" /* X */ ** z;');
+      expect(lastLine(ts.parsed(neg + "export let y = z ** E.X;", false))).toBe("export let y = z ** -5 /* X */;");
+      for (const pre of [neg, pos, str]) {
+        for (const expr of ["E.X ** z", "E['X'] ** z", "z ** E.X"]) {
+          const out = ts.parsed(pre + `var z = 2; export let y = ${expr};`, false).replace(/^export /gm, "");
+          expect(() => new Function(out)).not.toThrow();
+        }
+      }
+    });
+
     // `B = "a" + "b"` is folded into a rope, and every inlined `A.B` pointed at
     // that rope. Folding a template literal around it used to append the
     // template's text onto the rope itself, so the member's declaration and all
@@ -3305,6 +3324,21 @@ console.log(<div {...obj} key="after" />);`),
       expectPrinted("(delete x) ** 2", "(delete x) ** 2");
       expectPrinted("(typeof x) ** 2", "(typeof x) ** 2");
       expectPrinted("undefined ** 2", "undefined ** 2");
+
+      // Only an operand that prints as a unary expression gets parentheses.
+      expectPrinted("f() ** 2", "f() ** 2");
+      expectPrinted("new Foo() ** 2", "new Foo ** 2");
+      expectPrinted("a.b ** 2", "a.b ** 2");
+      expectPrinted("a[0] ** 2", "a[0] ** 2");
+      expectPrinted("a ** b ** c", "a ** b ** c");
+      expectPrinted("(a ** b) ** c", "(a ** b) ** c");
+      expectPrinted("(a * b) ** c", "(a * b) ** c");
+      expectPrintedMin_("x = true ** y", "x = (!0) ** y");
+      expectPrintedMin_("x = undefined ** y", "x = (void 0) ** y");
+      expectPrintedMin_("x = (-1) ** y", "x = (-1) ** y");
+      expectPrintedMin_("x = (1 / 0) ** y", "x = (1 / 0) ** y");
+      expectPrintedMin_("x = (!import.meta.main) ** y", "x = (!import.meta.main) ** y");
+      expectPrintedMin_("x = import.meta.main ** y", "x = import.meta.main ** y");
 
       expectParseError("-x ** 2", "Unexpected **");
       expectParseError("+x ** 2", "Unexpected **");
@@ -6674,10 +6708,10 @@ describe("parse error flood", () => {
 
 describe("multi-line comment scanning", () => {
   // The lexer's block-comment scanner switches to a SIMD skip
-  // (bun_highway::index_of_interesting_character_in_multiline_comment) when at
+  // (bun_simd_kernels::index_of_interesting_character_in_multiline_comment) when at
   // least 512 bytes of input remain, so cover sizes on both sides of that
   // threshold and around vector-width boundaries, plus every byte class the
-  // skip has to stop at ('*', '\r', '\n', non-ASCII).
+  // skip has to stop at ('*', '\r', '\n', 0xE2).
   const transpiler = new Bun.Transpiler({ loader: "js" });
   const xPad = Buffer.alloc(8193, "x").toString();
   const pad600 = xPad.slice(0, 600);
@@ -6737,6 +6771,36 @@ describe("multi-line comment scanning", () => {
     expect(transpiler.transformSync(`/*${"é".repeat(400)}*/ pass();`)).toBe("pass();\n");
     expect(transpiler.transformSync(`/*${"🦊".repeat(200)}*/ pass();`)).toBe("pass();\n");
     expect(transpiler.transformSync(`/* ${pad600} 日本語のコメント ${pad600} */ pass();`)).toBe("pass();\n");
+  });
+
+  it("finds what ends a comment or a string behind non-ASCII text", () => {
+    for (const text of ["é", "─", "日本語", "🦊"].flatMap(it => [it, it.repeat(40) + " a", it.repeat(300)])) {
+      for (const after of ["", "\n//" + pad600]) {
+        for (const newline of ["\n", "\r", "\u2028", "\u2029"]) {
+          expect(transpiler.transformSync(`//${text}${newline}a${after}`)).toBe("a;\n");
+          expect(transpiler.transformSync(`a /*${text}${newline}${text}*/ b${after}`)).toBe("a;\nb;\n");
+        }
+        expect(() => transpiler.transformSync(`a /*${text}*/ b${after}`)).toThrow();
+        for (const end of "\r\n") expect(() => transpiler.transformSync(`a("${text}${end}")${after}`)).toThrow();
+        for (const end of "\r\n") expect(() => transpiler.transformSync(`a('${text}${end}')${after}`)).toThrow();
+        const code = `x = ["${text}\\"'", '${text}\\'"', \`${text}\\\`${text}$${text}\r\n${text}\${1}\`]${after}`;
+        let x;
+        expect(eval(transpiler.transformSync(code))).toEqual(eval(code));
+      }
+    }
+  });
+
+  it("reports where a comment is cut", () => {
+    const all = Buffer.from("/*" + pad600 + "🦊");
+    for (const cut of [1, 2, 3]) {
+      let at;
+      try {
+        transpiler.transformSync(all.subarray(0, -cut));
+      } catch (e) {
+        at = e.position.offset;
+      }
+      expect(at).toBe(602);
+    }
   });
 
   it("does not corrupt code around a large comment", () => {
