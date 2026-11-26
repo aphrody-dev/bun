@@ -6,11 +6,12 @@
 mod digests;
 mod hooks;
 mod native;
-mod signals;
-mod spawn;
 mod syscalls;
 mod uws_dispatch;
 mod wtf;
+
+// The C ABI that nothing names in Rust: `posix_spawn_bun` and spawnSync's signal forwarding.
+use bun_spawn_rs as _;
 
 use bun_core::{Global, Output};
 use bun_install::package_manager_real::{

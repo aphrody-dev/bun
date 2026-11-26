@@ -3,7 +3,7 @@
 [workspace]
 resolver = "2"
 # bun_js and the crates on it are members: Bun's root workspace does not build Boa.
-members = ["cdp", "../../src/bun_js", "../../src/http_rs", "../../src/runtime_js", "../../src/semver_js", "../../src/sqlite_js", "../../src/usockets_rs"]
+members = ["cdp", "../../src/bun_js", "../../src/http_rs", "../../src/runtime_js", "../../src/semver_js", "../../src/spawn_rs", "../../src/sqlite_js", "../../src/usockets_rs"]
 
 [package]
 name = "bun-boa"
@@ -31,6 +31,7 @@ install = [
   "dep:bun_io",
   "dep:bun_ptr",
   "dep:bun_spawn",
+  "dep:bun_spawn_rs",
   "dep:bun_usockets_rs",
   "dep:bun_uws_sys",
   "dep:bun_yarr",
@@ -67,6 +68,7 @@ bun_options_types = { path = "../../src/options_types" }
 bun_paths = { path = "../../src/paths" }
 bun_ptr = { path = "../../src/ptr", optional = true }
 bun_spawn = { path = "../../src/spawn", optional = true }
+bun_spawn_rs = { path = "../../src/spawn_rs", optional = true }
 bun_sys = { path = "../../src/sys" }
 bun_usockets_rs = { path = "../../src/usockets_rs", optional = true }
 bun_uws_sys = { path = "../../src/uws_sys", optional = true }
