@@ -17,7 +17,7 @@ blitz-dom = { version = "=0.3.0-beta.4", default-features = false, features = ["
 blitz-html = { version = "=0.3.0-beta.4", default-features = false }
 blitz-paint = { version = "=0.3.0-beta.4", default-features = false, features = ["svg"] }
 blitz-traits = { version = "=0.3.0-beta.4", default-features = false }
-blitz-vibey-script = { path = "../vendor/blitz-vibey-script-0.3.0-beta.4" }
+blitz-vibey-script = { path = "../../../src/blitz/packages/blitz-vibey-script" }
 boa_engine = { version = "0.22", features = ["annex-b"] }
 data-url = "0.3"
 jpeg-encoder = { version = "0.7", default-features = false, features = ["std"] }

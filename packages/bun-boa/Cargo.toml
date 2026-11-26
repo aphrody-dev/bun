@@ -20,9 +20,9 @@ path = "src/main.rs"
 build = ["dep:bun_bundler", "dep:bun_event_loop", "dep:bun_options_types"]
 
 [dependencies]
-boa_engine = { version = "0.22", features = ["annex-b", "intl_bundled", "experimental"] }
-boa_gc = "0.22"
-boa_runtime = "0.22"
+boa_engine = { path = "../../src/boa/core/engine", features = ["annex-b", "intl_bundled", "experimental"] }
+boa_gc = { path = "../../src/boa/core/gc" }
+boa_runtime = { path = "../../src/boa/core/runtime" }
 bun_ast = { path = "../../src/ast" }
 bun_alloc = { path = "../../src/bun_alloc" }
 bun_bundler = { path = "../../src/bundler", optional = true, features = ["test_support"] }
@@ -70,31 +70,25 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 
-# The series in patches/<crate>-<version>/, applied to the crates.io tarballs by `bun run vendor`: kitesurf's
-# (Boa and the Blitz stack) first, ours on top.
+# Crates.io users of Boa and Blitz (Blitz's workspace, kitesurf-cdp) get the in-tree copies in src/boa and src/blitz.
+# Rows into vendor/ are written by `bun run vendor`: kitesurf's series in patches/<crate>-<version>/ applied to the
+# crates.io tarballs (Stylo, Taffy, Parley, vello_cpu, anyrender, usvg).
 [patch.crates-io]
+blitz-dom = { path = "../../src/blitz/packages/blitz-dom" }
+blitz-html = { path = "../../src/blitz/packages/blitz-html" }
+blitz-paint = { path = "../../src/blitz/packages/blitz-paint" }
+blitz-traits = { path = "../../src/blitz/packages/blitz-traits" }
+boa_engine = { path = "../../src/boa/core/engine" }
+boa_gc = { path = "../../src/boa/core/gc" }
+boa_runtime = { path = "../../src/boa/core/runtime" }
 anyrender = { path = "vendor/anyrender-0.14.0" }
 anyrender_svg = { path = "vendor/anyrender_svg-0.15.0" }
 anyrender_vello_cpu = { path = "vendor/anyrender_vello_cpu-0.18.0" }
-blitz-dom = { path = "vendor/blitz-dom-0.3.0-beta.4" }
-blitz-html = { path = "vendor/blitz-html-0.3.0-beta.4" }
-blitz-paint = { path = "vendor/blitz-paint-0.3.0-beta.4" }
-blitz-traits = { path = "vendor/blitz-traits-0.3.0-beta.4" }
-blitz-vibey-script = { path = "vendor/blitz-vibey-script-0.3.0-beta.4" }
-boa_ast = { path = "vendor/boa_ast-0.22.0" }
-boa_engine = { path = "vendor/boa_engine-0.22.0" }
-boa_gc = { path = "vendor/boa_gc-0.22.0" }
-boa_interner = { path = "vendor/boa_interner-0.22.0" }
-boa_parser = { path = "vendor/boa_parser-0.22.0" }
-boa_runtime = { path = "vendor/boa_runtime-0.22.0" }
-boa_string = { path = "vendor/boa_string-0.22.0" }
-boa_wintertc = { path = "vendor/boa_wintertc-0.22.0" }
 parley = { path = "vendor/parley-0.12.0" }
 parley_engine = { path = "vendor/parley_engine-0.12.0" }
 regress = { path = "vendor/regress-0.12.0" }
 selectors = { path = "vendor/selectors-0.41.0" }
 stylo = { path = "vendor/stylo-0.22.0" }
-stylo_taffy = { path = "vendor/stylo_taffy-0.3.0-beta.4" }
 taffy = { path = "vendor/taffy-0.15.0" }
 usvg = { path = "vendor/usvg-0.48.1" }
 vello_common = { path = "vendor/vello_common-0.3.0" }
