@@ -47,8 +47,6 @@ not_linked! {
         EVP_AEAD_CTX_seal_scatter EVP_aead_aes_128_gcm EVP_aead_aes_256_gcm EVP_aead_chacha20_poly1305
         AES_encrypt AES_set_encrypt_key CRYPTO_BUFFER_POOL_new CRYPTO_chacha_20 ERR_clear_error ERR_get_error
         HKDF_expand HKDF_extract;
-    "Bun's posix_spawn (src/jsc/bindings/bun-spawn.cpp)":
-        posix_spawn_bun;
     "bun_runtime's DNS cache (src/runtime/dns_jsc/dns.rs), which uSockets' connect reads":
         Bun__addrinfo_get Bun__addrinfo_freeRequest;
     "bun_runtime's TLS over a duplex stream (src/runtime/socket/UpgradedDuplex.rs)":

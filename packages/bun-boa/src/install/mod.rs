@@ -7,6 +7,7 @@ mod digests;
 mod hooks;
 mod native;
 mod signals;
+mod spawn;
 mod wtf;
 
 use bun_core::{Global, Output};
