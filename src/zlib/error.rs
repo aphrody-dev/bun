@@ -76,12 +76,3 @@ impl From<std::collections::TryReserveError> for Error {
 }
 
 pub type Result<T, E = Error> = core::result::Result<T, E>;
-
-impl From<bun_deflate::Error> for Error {
-    fn from(error: bun_deflate::Error) -> Self {
-        match error {
-            bun_deflate::Error::Alloc(error) => Self::Alloc(error),
-            _ => Self::Internal,
-        }
-    }
-}

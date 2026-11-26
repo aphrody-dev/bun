@@ -1,17 +1,16 @@
 //! The literals section of a compressed block.
 
-use bun_highway::unzstd::{HuffmanTable, Tape};
-
-use crate::bits::{bits_below_mark, load_from};
+use crate::bits::load_from;
 use crate::error::{Error, Result};
 use crate::format::{Encoding, MIN_LITERALS_FOR_4_STREAMS};
+use crate::huffman::HuffmanTable;
 
 /// How many bytes behind its literals a quick copy may read.
 pub(crate) const LITERALS_PADDING: usize = 32;
 
 #[derive(Clone, Copy)]
 pub(crate) struct LiteralsHeader {
-    pub(crate) encoding: Encoding,
+    encoding: Encoding,
     has_4_streams: bool,
     header_len: usize,
     /// How many literals there are.
@@ -84,8 +83,17 @@ impl LiteralsHeader {
         })
     }
 
-    pub(crate) fn content<'a>(&self, block: &'a [u8]) -> Result<&'a [u8]> {
-        (block.get(self.header_len..self.section_len)).ok_or(Error::Internal)
+    pub(crate) fn has_tree(&self) -> bool {
+        self.encoding == Encoding::Compressed
+    }
+
+    /// Fills `table` if [`Self::has_tree`]. Returns where the streams start.
+    pub(crate) fn read_tree(&self, block: &[u8], table: &mut HuffmanTable) -> Result<usize> {
+        if !self.has_tree() {
+            return Ok(self.header_len);
+        }
+        let content = block.get(self.header_len..self.section_len);
+        Ok(self.header_len + table.read(content.ok_or(Error::Internal)?, self.count)?)
     }
 
     /// The literals and the padding, if they are in `block` as they are. Less padding will do if they are more than `few` with it.
@@ -96,31 +104,38 @@ impl LiteralsHeader {
         literals.filter(|_| is_usable && self.encoding == Encoding::Basic)
     }
 
-    /// From the streams in `src[start..]`, to where there is room. What is `lead` bytes ahead gets prefetched.
+    /// `room` is enough for `count`. `start` is from [`Self::read_tree`]. `next` may get prefetched meanwhile.
     pub(crate) fn decode(
         &self,
-        (src, start): (&[u8], usize),
+        block: &[u8],
+        start: usize,
         table: &HuffmanTable,
-        out: (Tape<'_>, usize),
-        lead: usize,
+        room: &mut [u8],
+        next: *const u8,
     ) -> Result<()> {
-        let is_valid = if self.has_4_streams {
-            let jumps = src.get(start..).and_then(<[u8]>::first_chunk::<6>);
-            let &[a0, a1, b0, b1, c0, c1] = jumps.ok_or(Error::CorruptionDetected)?;
-            let a = start + 6;
-            let b = a + usize::from(u16::from_le_bytes([a0, a1]));
-            let c = b + usize::from(u16::from_le_bytes([b0, b1]));
-            let d = c + usize::from(u16::from_le_bytes([c0, c1]));
-            let end = |start, end| {
-                bits_below_mark(src.get(..end).ok_or(Error::CorruptionDetected)?, start)
-            };
-            let ends = [end(a, b)?, end(b, c)?, end(c, d)?, end(d, src.len())?];
-            let bits = [[8 * a, 8 * b, 8 * c, 8 * d], ends];
-            table.decode_streams(src, bits, out, self.count, lead)
+        let section = block.get(..self.section_len).ok_or(Error::Internal)?;
+        if self.has_4_streams {
+            let lead = next.addr().wrapping_sub(room.as_ptr().addr());
+            return table.decode_4_streams(section, start, room, self.count, lead);
+        }
+        let out = room.get_mut(..self.count).ok_or(Error::Internal)?;
+        match self.encoding {
+            Encoding::Basic => {
+                let literals = section.get(start..).filter(|it| it.len() == out.len());
+                out.copy_from_slice(literals.ok_or(Error::Internal)?);
+            }
+            Encoding::Rle => out.fill(*section.last().ok_or(Error::Internal)?),
+            _ => table.decode_stream(section, start, out)?,
+        }
+        Ok(())
+    }
+
+    /// How many literals [`Self::decode`] is quicker for if it has [`AMPLE_ROOM`](crate::huffman::AMPLE_ROOM).
+    pub(crate) fn count_for_ample_room(&self, table: &HuffmanTable) -> usize {
+        if self.has_4_streams && table.has_pairs() {
+            self.count
         } else {
-            let bits = [[8 * start], [bits_below_mark(src, start)?]];
-            table.decode_streams(src, bits, out, self.count, lead)
-        };
-        is_valid.then_some(()).ok_or(Error::CorruptionDetected)
+            0
+        }
     }
 }

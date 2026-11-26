@@ -1,7 +1,5 @@
 //! Where the encoder and the decoder write to.
 
-use bun_highway::unzstd::Tape;
-
 use crate::array::resize;
 use crate::error::{Error, Result};
 
@@ -152,7 +150,7 @@ impl Target<'_> {
         debug_assert!(start <= self.bytes().len() && end <= self.capacity());
         if let Some(vec) = self.to_extend(start, bytes.len()) {
             vec.extend_from_slice(bytes);
-        } else if let Some(to) = self.bytes_mut(end).get_mut(start..end) {
+        } else if let Some(to) = self.bytes_mut(0).get_mut(start..end) {
             to.copy_from_slice(bytes);
         }
     }
@@ -161,7 +159,7 @@ impl Target<'_> {
         debug_assert!(start <= self.bytes().len() && start + len <= self.capacity());
         if let Some(vec) = self.to_extend(start, len) {
             resize(vec, start + len, byte);
-        } else if let Some(to) = self.bytes_mut(start + len).get_mut(start..start + len) {
+        } else if let Some(to) = self.bytes_mut(0).get_mut(start..start + len) {
             to.fill(byte);
         }
     }
@@ -239,7 +237,7 @@ impl<'a> Output<'a> {
         self.end - self.position
     }
 
-    /// How far [`tape`](Self::tape) can go.
+    /// How far [`lend_with_slack`](Self::lend_with_slack) can go.
     #[inline]
     pub(crate) fn room_with_slack(&self) -> usize {
         self.target.capacity() - self.position
@@ -262,10 +260,6 @@ impl<'a> Output<'a> {
     /// How many bytes it takes along if it has to move in order to grow.
     pub(crate) fn len_to_move(&self) -> usize {
         self.position
-    }
-
-    pub(crate) fn capacity(&self) -> usize {
-        self.target.capacity()
     }
 
     /// With how many bytes are missing for the next `len`.
@@ -334,7 +328,7 @@ impl<'a> Output<'a> {
             }
             return Ok(());
         }
-        let bytes = self.target.bytes_mut(end);
+        let bytes = self.target.bytes_mut(0);
         for (from, to, len) in pieces(from, start, end, PIECE_LEN) {
             let (written, room) = bytes.split_at_mut_checked(to).ok_or(Error::Internal)?;
             let piece = written.get(from..from + len).ok_or(Error::Internal)?;
@@ -357,18 +351,17 @@ impl<'a> Output<'a> {
         (self.target.bytes().get(start..self.position)).unwrap_or_default()
     }
 
-    /// The last `kept` bytes, and the memory behind them, of which `len` bytes are likely to be written.
+    /// The last `kept` bytes, and `len` more as far as there is memory, or up to `most` if that comes for free.
     #[inline]
-    pub(crate) fn tape(&mut self, kept: usize, len: usize) -> Tape<'_> {
+    pub(crate) fn lend_with_slack(&mut self, kept: usize, len: usize, most: usize) -> &mut [u8] {
         let start = self.position - kept.min(self.written());
-        let is_ring = matches!(self.target, Target::Ring(_));
-        match &mut self.target {
-            Target::Slice(slice) => Tape::slice(slice.get_mut(start..).unwrap_or_default()),
-            Target::Vec(vec) | Target::Ring(vec) => {
-                touch_pages(vec, self.position + len, is_ring);
-                Tape::vec(vec, start)
-            }
-        }
+        let (end, most) = (
+            self.position + len.min(self.room_with_slack()),
+            self.position + most,
+        );
+        let bytes = self.target.bytes_mut(end);
+        let end = bytes.len().min(most);
+        bytes.get_mut(start..end).unwrap_or_default()
     }
 
     /// What was written, and up to `len` bytes of the room behind it. These count once they are [`commit`](Self::commit)ted.

@@ -5,11 +5,10 @@
 //   workers/  on several threads
 // and the frames to decompress:
 //   stored/   of blocks, tables and sequences chosen at random, some with a field or a byte changed
-//   encoded/  what zstd 1.5.7 compresses such data to, some with a bit changed or the end cut off
+//   encoded/  what such data compresses to, some with a bit changed or the end cut off
 //
-// The results of decompressing are those of zstd 1.5.7. Such a case is here because it tells src/zstd from a version
-// with one small mistake, or takes a branch that no other takes. Those of compressing are Bun's own, the same on every
-// CPU, and zstd reads them.
+// The results are those of zstd 1.5.7. A case is here because it tells src/zstd from a version with one small mistake,
+// or takes a branch that no other takes.
 import { describe, expect, test } from "bun:test";
 import { decodeDifferences, encodeDifferences, inParts, loadCases } from "./observe";
 

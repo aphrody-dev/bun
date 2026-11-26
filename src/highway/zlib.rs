@@ -6,6 +6,13 @@ use core::mem::MaybeUninit;
 
 unsafe extern "C" {
     fn highway_repeat(from: *const u8, to: *mut u8, period: usize, len: usize);
+    fn highway_subtract_saturating(values: *mut [u16; 64], groups: usize, amount: u16);
+}
+
+#[inline]
+pub fn subtract_saturating(values: &mut [[u16; 64]], amount: u16) {
+    // SAFETY: the kernel reads and writes so many groups.
+    unsafe { highway_subtract_saturating(values.as_mut_ptr(), values.len(), amount) }
 }
 
 pub const MATCH_SPAN: usize = 320;
@@ -31,7 +38,7 @@ fn prefetch<T>(span: &Span<T>, offset: usize) {
 /// If `to` starts `distance` bytes behind the start of `from` and those are initialized, so are the first `len` of `to`
 /// afterwards, up to `MAX_LEN`: the kernel repeats them, or `len` is no more, or each chunk ends in front of its copy.
 #[inline(always)]
-pub(crate) fn copy_cells<T: Copy>(
+fn copy_cells<T: Copy>(
     from: &Span<T>,
     to: &Span<T>,
     distance: usize,

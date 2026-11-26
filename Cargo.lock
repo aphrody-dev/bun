@@ -575,6 +575,7 @@ version = "0.0.0"
 dependencies = [
  "bun_alloc",
  "bun_highway",
+ "bun_pod",
  "bun_removable_features",
  "thiserror",
 ]
@@ -745,7 +746,6 @@ name = "bun_highway"
 version = "0.0.0"
 dependencies = [
  "bstr",
- "bun_pod",
 ]
 
 [[package]]

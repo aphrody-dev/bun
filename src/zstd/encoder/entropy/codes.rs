@@ -1,7 +1,6 @@
 //! The sequences section.
 
 use bun_highway::with_bmi2;
-use bun_highway::zstd_stages::{SEQUENCES_MIN, estimate_cost};
 use bun_zstd_decoder::array::{At, get_or_allocate};
 use bun_zstd_decoder::format::{
     CodeKind, DEFAULT_LITERAL_LENGTHS, DEFAULT_MATCH_LENGTHS, DEFAULT_OFFSETS, Distribution,
@@ -67,25 +66,15 @@ type Tables = fse::Tables<2048, 256>;
 struct Alphabet {
     table_log_max: u32,
     predefined: Normalized,
-    /// In 256ths of a bit.
-    predefined_costs: [u32; SYMBOLS],
     extra_bits: [u8; SYMBOLS],
 }
 
 impl Alphabet {
-    #[expect(clippy::indexing_slicing, reason = "evaluated at compile time")]
     const fn new(table_log_max: u32, predefined: &Distribution<'_>, extra_bits: &[u8]) -> Self {
         let predefined = Normalized::predefined(predefined);
-        let (mut predefined_costs, mut symbol) = ([0; _], 0);
-        while symbol < SYMBOLS {
-            let share = predefined.counts[symbol].unsigned_abs() << (8 - predefined.table_log);
-            predefined_costs[symbol] = INVERSE_PROBABILITY_LOG[share as usize] as u32;
-            symbol += 1;
-        }
         Self {
             table_log_max,
             predefined,
-            predefined_costs,
             extra_bits: padded(extra_bits),
         }
     }
@@ -95,15 +84,19 @@ impl Alphabet {
         if counts.len() > self.predefined.max_symbol + 1 {
             return None;
         }
-        let pairs = counts.iter().zip(&self.predefined_costs);
-        let cost = pairs.map(|(&count, &cost)| count * cost);
+        let shift = 8 - self.predefined.table_log;
+        let pairs = counts.iter().zip(self.predefined.counts);
+        let cost = pairs.map(|(&count, share)| {
+            let share = usize::from(share.unsigned_abs()) << shift;
+            count * u32::from(*INVERSE_PROBABILITY_LOG.at(share))
+        });
         Some((cost.sum::<u32>() >> 8) as usize)
     }
 
     /// In bits, with the description of the table.
     fn compressed_cost(&self, counts: &[u32], total: usize) -> Result<usize> {
         let log = fse::table_log_for(self.table_log_max, total, counts.len().saturating_sub(1), 2);
-        let normalized = Normalized::new(counts, total, log, fse::allows_less_than_1(total))?;
+        let normalized = Normalized::new(counts, total, log, allows_less_than_1(total))?;
         let description_len = normalized.write(&mut [0; 128])?;
         let cost = counts.iter().map(|&count| {
             let share = (256 * count as usize / total).max(1);
@@ -164,6 +157,11 @@ static PREDEFINED: TableSet = {
     ];
     TableSet { tables, shapes }
 };
+
+/// Tables without such counts are faster to build, which small blocks notice.
+fn allows_less_than_1(sequence_count: usize) -> bool {
+    sequence_count >= 2048
+}
 
 /// How many bytes it takes to tell the number of sequences.
 pub(crate) fn count_len(count: usize) -> usize {
@@ -238,9 +236,6 @@ impl CodesPlan {
     }
 }
 
-/// The quick strategies build no tables for less.
-const FEW: usize = 16;
-
 fn select(
     alphabet: &Alphabet,
     reuse: Reuse,
@@ -258,9 +253,7 @@ fn select(
             Encoding::Rle
         });
     }
-    let is_close = strategy.is_hurried() && reuse != Reuse::Always && (FEW..1000).contains(&total);
-    let estimate = is_close.then(|| estimate_cost(&histogram.counts)).flatten();
-    if strategy < Strategy::Lazy && estimate.is_none() {
+    if strategy < Strategy::Lazy {
         if allows_predefined {
             let log = alphabet.predefined.table_log;
             if reuse == Reuse::Always && total < 1000 {
@@ -279,7 +272,7 @@ fn select(
         _ => repeated_cost(counts),
     };
     let repeated = repeated.unwrap_or(usize::MAX);
-    let compressed = estimate.map_or_else(|| alphabet.compressed_cost(counts, total), Ok)?;
+    let compressed = alphabet.compressed_cost(counts, total)?;
     Ok(if predefined <= repeated && predefined <= compressed {
         Encoding::Basic
     } else if repeated <= compressed {
@@ -366,16 +359,6 @@ impl CodeTables {
         out: &mut [u8],
     ) -> Result<Chosen> {
         let mut chosen = Chosen::PREDEFINED;
-        let (last, total) = (sequences.last().ok_or(Error::Internal)?, sequences.len());
-        if total < FEW && strategy < Strategy::Lazy && !self.reuse.contains(&Reuse::Always) {
-            let is_alone = |symbol: u8| *counts.at(symbol.into()) as usize == total;
-            let undefined = first_symbol(CodeKind::Offset) + DEFAULT_OFFSETS.counts.len();
-            if (total <= 2 || !last.symbols().into_iter().any(is_alone))
-                && counts.get(undefined..undefined + 3) == Some(&[0; 3])
-            {
-                return Ok(chosen);
-            }
-        }
         let current = self.current.as_deref().unwrap_or(&PREDEFINED);
         let [first, second, third] = CodeKind::ALL;
         let mut histograms = [
@@ -386,6 +369,7 @@ impl CodeTables {
         for (kind, histogram) in CodeKind::ALL.into_iter().zip(&histograms) {
             let (alphabet, reuse) = (ALPHABETS.at(kind as usize), *self.reuse.at(kind as usize));
             let repeated_cost = |counts: &[u32]| current.cost(kind, counts);
+            let total = sequences.len();
             *chosen.choice.0.at_mut(kind as usize) =
                 select(alphabet, reuse, repeated_cost, histogram, total, strategy)?;
         }
@@ -394,6 +378,7 @@ impl CodeTables {
         }
 
         let next = get_or_allocate(&mut self.next, || TableSet::EMPTY)?;
+        let last = sequences.last().ok_or(Error::Internal)?;
         let kinds = CodeKind::ALL.into_iter().zip(chosen.choice.0);
         for ((kind, encoding), histogram) in kinds.zip(&mut histograms) {
             let (alphabet, last) = (ALPHABETS.at(kind as usize), last.code(kind));
@@ -417,10 +402,11 @@ impl CodeTables {
                         *count -= 1;
                         total -= 1;
                     }
-                    let (index, is_hurried) = (kind as usize, strategy.is_hurried());
-                    (*next.shapes.at_mut(index), chosen.last_compressed_len) = (next.tables)
-                        .build_and_describe(index, histogram, total, log, is_hurried, out)?;
+                    let normalized =
+                        Normalized::new(histogram.used(), total, log, allows_less_than_1(total))?;
+                    chosen.last_compressed_len = normalized.write(out)?;
                     chosen.len += chosen.last_compressed_len;
+                    next.build(kind, &normalized);
                 }
             }
         }
@@ -539,14 +525,11 @@ fn encode(
         writer.flush()
     };
 
-    let (last, mut rest) = sequences.split_last()?;
-    let mut states = last.symbols().map(|symbol| tables.first_state(symbol));
-    add_extra_bits(&mut writer, last)?;
-    if rest.len() >= SEQUENCES_MIN {
-        rest = rest.get(..tables.encode_most(shapes, rest, &mut writer, &mut states))?;
-    }
+    let (last, rest) = sequences.split_last()?;
     // Or else the compiler narrows them to 16 bits, and spills one.
-    let [mut literal_state, mut offset_state, mut match_state] = core::hint::black_box(states);
+    let [mut literal_state, mut offset_state, mut match_state] =
+        core::hint::black_box(last.symbols().map(|symbol| tables.first_state(symbol)));
+    add_extra_bits(&mut writer, last)?;
 
     for sequence in rest.iter().rev() {
         let [literal_symbol, offset_symbol, match_symbol] = sequence.symbols();

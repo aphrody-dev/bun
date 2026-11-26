@@ -415,7 +415,7 @@ NEVER_INLINE JSPromise* decompressionStreamFlush(JSGlobalObject* globalObject, J
 
 // Hands an off-thread step's output to the consumer (native sink or readable). Throws on a failed
 // delivery.
-static CodecStepResult deliverAsyncOutput(JSGlobalObject* globalObject, JSTransformStream* stream, const uint8_t* out, size_t outLen, void* outOwner, bool more)
+static CodecStepResult deliverAsyncOutput(JSGlobalObject* globalObject, JSTransformStream* stream, const uint8_t* out, size_t outLen, bool more)
 {
     auto& vm = getVM(globalObject);
     auto scope = DECLARE_THROW_SCOPE(vm);
@@ -427,9 +427,14 @@ static CodecStepResult deliverAsyncOutput(JSGlobalObject* globalObject, JSTransf
         step.sinkBackpressure = nativeSinkWriteIsBackpressure(vm, wrote);
         return step;
     }
-    JSValue view = JSValue::decode(CompressionStreamCoder__takeOutput(globalObject, outOwner));
+    auto copied = JSC::ArrayBuffer::tryCreate(std::span<const uint8_t>(out, outLen));
+    if (!copied) [[unlikely]] {
+        throwOutOfMemoryError(globalObject, scope);
+        return step;
+    }
+    auto* view = JSC::JSUint8Array::create(globalObject, globalObject->typedArrayStructure(JSC::TypeUint8, false), WTF::move(copied), 0, outLen);
     RETURN_IF_EXCEPTION(scope, step);
-    transformStreamDefaultControllerEnqueue(globalObject, stream->m_controller.get(), view);
+    transformStreamDefaultControllerEnqueue(globalObject, stream->m_controller.get(), JSValue(view));
     RETURN_IF_EXCEPTION(scope, step);
     return step;
 }
@@ -438,7 +443,7 @@ static CodecStepResult deliverAsyncOutput(JSGlobalObject* globalObject, JSTransf
 // consumed BEFORE m_asyncCodecInFlight is cleared and the coder may be released or
 // re-dispatched. Entered from the event loop with no JS above it (a TopExceptionScope, and
 // atStreamsBoundary for the delivery): a failed delivery is the pending chunk's rejection.
-extern "C" void Bun__CompressionStream__deliverAsync(JSC::JSGlobalObject* globalObject, JSC::EncodedJSValue streamCell, CompressionStreamCoder* returnedCoder, const uint8_t* out, size_t outLen, void* outOwner, bool more, JSC::EncodedJSValue error)
+extern "C" void Bun__CompressionStream__deliverAsync(JSC::JSGlobalObject* globalObject, JSC::EncodedJSValue streamCell, CompressionStreamCoder* returnedCoder, const uint8_t* out, size_t outLen, bool more, JSC::EncodedJSValue error)
 {
     auto& vm = getVM(globalObject);
     auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
@@ -454,7 +459,7 @@ extern "C" void Bun__CompressionStream__deliverAsync(JSC::JSGlobalObject* global
     if (error) {
         thrown = JSValue::decode(error);
     } else if (outLen && stream->m_codecPromise) {
-        atStreamsBoundary(globalObject, [&] { step = deliverAsyncOutput(globalObject, stream, out, outLen, outOwner, more); }, [&](JSValue error) { thrown = error; });
+        atStreamsBoundary(globalObject, [&] { step = deliverAsyncOutput(globalObject, stream, out, outLen, more); }, [&](JSValue error) { thrown = error; });
         if (scope.exception()) [[unlikely]] {
             // VM termination: the chunk stays pending; teardown destroys the cell and its coder.
             Bun__VM__takeTerminationOutsideScript(globalObject);

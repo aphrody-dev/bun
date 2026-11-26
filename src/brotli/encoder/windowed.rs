@@ -1,20 +1,21 @@
-//! Qualities 10 and above collect the input in blocks, and join the commands of several blocks in a meta-block.
+//! Qualities 2 and above collect the input in blocks, and join the commands of several blocks in a meta-block.
 
 use super::bit_stream::{
-    MetaBlockKind, write_empty_last, write_full_meta_block, write_uncompressed,
+    MetaBlockKind, write_empty_last, write_full_meta_block, write_plain_meta_block,
+    write_uncompressed,
 };
 use super::bit_writer::BitWriter;
-use super::cluster::{BIT, MAX_SYMBOLS, cost_of};
 use super::command::{Command, Commands};
-use super::histogram::count_bytes;
+use super::histogram::bits_entropy;
 use super::huffman::TreeBuilder;
 use super::input_block::InputBlock;
+use super::literal_contexts;
+use super::literal_cost::is_mostly_utf8;
+use super::match_finder::MatchFinder;
 use super::meta_block::{MetaBlock, Source};
-use super::optimal::Optimal;
 use super::params::Params;
 use super::prepared_dictionary::PreparedDictionary;
 use super::ring_buffer::RingBuffer;
-use super::utf8::is_mostly_utf8;
 use super::{Operation, try_reserve_for};
 use crate::context::ContextMode;
 use crate::format::{INITIAL_DISTANCES, LITERAL_SYMBOLS};
@@ -35,11 +36,9 @@ const MAX_ALWAYS_STORED: usize = 2;
 
 pub(super) struct Windowed {
     ring: RingBuffer,
-    dictionary: Option<PreparedDictionary>,
-    /// Once there is something to compress.
-    optimal: Option<Optimal>,
+    /// Depends on the size hint, which the first block may set.
+    finder: Option<MatchFinder>,
     commands: Commands,
-    trees: TreeBuilder,
     /// As they are after the meta-blocks that were written.
     written_distances: [i32; 4],
     /// How much of the input has commands.
@@ -54,11 +53,7 @@ pub(super) struct Windowed {
 }
 
 impl Windowed {
-    pub(super) fn new(
-        params: &Params,
-        dictionary: &[u8],
-        optimal: Option<Optimal>,
-    ) -> Result<Self> {
+    pub(super) fn new(params: &Params) -> Self {
         let continues = params.stream_offset != 0;
         let distances = if continues {
             // Negative whatever a short code adds.
@@ -66,14 +61,9 @@ impl Windowed {
         } else {
             INITIAL_DISTANCES.map(u32::cast_signed)
         };
-        Ok(Self {
-            trees: TreeBuilder::new()?,
+        Self {
             ring: RingBuffer::new(params.ring_buffer_bits(), params.block_bits),
-            dictionary: match dictionary {
-                [] => None,
-                bytes => Some(PreparedDictionary::new(bytes)?),
-            },
-            optimal,
+            finder: None,
             commands: Commands::new(distances),
             written_distances: distances,
             processed: 0,
@@ -81,11 +71,7 @@ impl Windowed {
             last_written_bytes: [0; 2],
             positions_wrapped: false,
             bytes_without_context: continues.then_some(2),
-        })
-    }
-
-    pub(super) fn into_spare(self) -> Option<Optimal> {
-        self.optimal.map(Optimal::reset)
+        }
     }
 
     pub(super) fn unprocessed(&self) -> usize {
@@ -113,7 +99,9 @@ impl Windowed {
     pub(super) fn end_block(
         &mut self,
         params: &Params,
+        dictionary: Option<&PreparedDictionary>,
         operation: Operation,
+        trees: &mut TreeBuilder,
         writer: &mut BitWriter,
     ) -> Result<()> {
         let is_last = operation == Operation::Finish;
@@ -121,14 +109,14 @@ impl Windowed {
         if is_last && self.ring.received() - self.written <= MAX_ALWAYS_STORED as u64 {
             self.processed = self.ring.received();
         } else if self.unprocessed() != 0 {
-            self.add_commands(params, is_last)?;
+            self.add_commands(params, dictionary, is_last)?;
         }
         if operation == Operation::Process && !has_context_now && self.can_wait(params) {
             return Ok(());
         }
         if self.has_unwritten_input() {
             self.commands.end_with_pending_literals();
-            self.write_meta_block(params, is_last, writer)
+            self.write_meta_block(params, is_last, trees, writer)
         } else {
             if is_last {
                 write_empty_last(writer);
@@ -137,33 +125,40 @@ impl Windowed {
         }
     }
 
-    fn add_commands(&mut self, params: &Params, is_last: bool) -> Result<()> {
+    fn add_commands(
+        &mut self,
+        params: &Params,
+        dictionary: Option<&PreparedDictionary>,
+        is_last: bool,
+    ) -> Result<()> {
         let (position, length) = (wrap(self.processed), self.unprocessed());
-        let (window, dictionary) = (self.ring.window(), self.dictionary.as_ref());
+        let window = self.ring.window();
         let block = InputBlock::new(window, position, length, is_last, params, dictionary);
-        let optimal = match &mut self.optimal {
-            Some(optimal) => optimal,
-            none => none.insert(Optimal::new()?),
+        let finder = match &mut self.finder {
+            Some(finder) => finder,
+            none => none.insert(MatchFinder::new(&block)?),
         };
         let covered = self.commands.extend_last(&block, self.processed);
-        optimal.add_commands(&block, covered, self.positions_wrapped, &mut self.commands)?;
+        finder.add_commands(&block, covered, self.positions_wrapped, &mut self.commands)?;
         self.processed = self.ring.received();
         self.positions_wrapped = wrap(self.processed) < block.position;
         Ok(())
     }
 
     fn can_wait(&self, params: &Params) -> bool {
+        const MAX_SYMBOLS_WITHOUT_BLOCK_SPLITS: usize = 0x2FFF;
         let max_size = params.max_meta_block_size();
-        let literals = self.commands.literal_count + self.commands.pending_literals;
+        let (literals, commands) = (self.commands.literal_count, self.commands.list.len());
         (self.processed - self.written) as usize + params.block_size() <= max_size
-            && literals.max(self.commands.list.len())
-                < (max_size / 8).min(MAX_SYMBOLS - params.block_size())
+            && (params.quality >= 4 || literals + commands < MAX_SYMBOLS_WITHOUT_BLOCK_SPLITS)
+            && literals.max(commands) < max_size / 8
     }
 
     fn write_meta_block(
         &mut self,
         params: &Params,
         is_last: bool,
+        trees: &mut TreeBuilder,
         writer: &mut BitWriter,
     ) -> Result<()> {
         let source = Source {
@@ -178,7 +173,7 @@ impl Windowed {
         let mut compressed = is_worth_compressing(&source, &self.commands);
         if compressed {
             let commands = &mut self.commands.list;
-            write_compressed(&source, commands, params, is_last, &mut self.trees, writer)?;
+            write_compressed(&source, commands, params, is_last, trees, writer)?;
             compressed = writer.position() / 8 <= source.length + 4;
         }
         if !compressed {
@@ -205,11 +200,13 @@ impl Windowed {
 
 fn is_worth_compressing(source: &Source<'_>, commands: &Commands) -> bool {
     const SAMPLE_RATE: usize = 13;
+    const MIN_ENTROPY: f64 = 7.92;
+    let size = source.length as f64;
     if source.length <= MAX_ALWAYS_STORED {
         return false;
     }
     if commands.list.len() >= (source.length >> 8) + 2
-        || commands.literal_count * 100 <= source.length * 99
+        || commands.literal_count as f64 <= 0.99 * size
     {
         return true;
     }
@@ -217,10 +214,7 @@ fn is_worth_compressing(source: &Source<'_>, commands: &Commands) -> bool {
     for offset in (0..source.length).step_by(SAMPLE_RATE) {
         histogram[usize::from(source.window.byte(source.start + offset))] += 1;
     }
-    cost_of(&histogram, 0) <= (source.length * 792 / (100 * SAMPLE_RATE)) as i32 * BIT
-        || (source.window.parts(source.start, source.length).iter())
-            .flat_map(|part| part.as_chunks::<512>().0.iter().step_by(SAMPLE_RATE))
-            .any(|piece| cost_of(&count_bytes(piece), 100) < 512 * 7 * BIT)
+    bits_entropy(&histogram) <= size * MIN_ENTROPY * (1.0 / SAMPLE_RATE as f64)
 }
 
 fn write_compressed(
@@ -236,22 +230,31 @@ fn write_compressed(
     } else {
         MetaBlockKind::Compressed
     };
-    let context_mode = if is_mostly_utf8(source.window.parts(source.start, source.length)) {
-        ContextMode::Utf8
+    if params.quality < 4 {
+        write_plain_meta_block(source, commands, params, kind, trees, writer)?;
     } else {
-        ContextMode::Signed
-    };
-    let mut block = MetaBlock::build(source, commands, params, context_mode)?;
-    block.smooth_histograms();
-    write_full_meta_block(
-        source.length,
-        commands,
-        &block,
-        context_mode,
-        kind,
-        trees,
-        writer,
-    )?;
+        let mut context_mode = ContextMode::Utf8;
+        let mut block = if params.quality < 10 {
+            let groups =
+                literal_contexts::choose(source.window, source.start, source.length, params);
+            MetaBlock::build_greedy(source, commands, params, groups)?
+        } else {
+            if !is_mostly_utf8(source.window.parts(source.start, source.length)) {
+                context_mode = ContextMode::Signed;
+            }
+            MetaBlock::build(source, commands, params, context_mode)?
+        };
+        block.smooth_histograms();
+        write_full_meta_block(
+            source.length,
+            commands,
+            &block,
+            context_mode,
+            kind,
+            trees,
+            writer,
+        )?;
+    }
     if is_last {
         writer.align();
     }

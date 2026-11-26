@@ -606,7 +606,7 @@ mod tests {
             strategy: Strategy::DoubleFast,
         };
         let mut state = MatchState::new(tuning);
-        state.reset(tuning, dictionary.len())?;
+        state.reset(tuning, false, Owner::Dictionary, dictionary.len())?;
         let history = History {
             prefix: &dictionary,
             prefix_index: FIRST_INDEX,

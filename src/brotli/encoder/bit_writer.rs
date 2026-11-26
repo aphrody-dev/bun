@@ -80,15 +80,6 @@ pub(super) struct BitWriter {
 }
 
 impl BitWriter {
-    pub(super) fn clear(&mut self) {
-        self.buffer.clear();
-        self.position = 0;
-    }
-
-    pub(super) fn capacity(&self) -> usize {
-        self.buffer.capacity()
-    }
-
     /// Writing `bytes` more bytes will not allocate.
     pub(super) fn try_reserve(&mut self, bytes: usize) -> Result<()> {
         let needed = self.complete_count() + bytes + SPARE;
@@ -168,11 +159,6 @@ impl BitWriter {
         for &item in items {
             self.write_bits(code_of(item).bits());
         }
-    }
-
-    /// `write` returns the new position.
-    pub(super) fn write_with(&mut self, write: impl FnOnce(&mut Vec<u8>, usize) -> usize) {
-        self.position = write(&mut self.buffer, self.position as usize) as u32;
     }
 
     pub(super) fn write(&mut self, count: u32, value: u64) {

@@ -1,4 +1,7 @@
 use crate::{DecodeStatus, Decoder, Error, Result};
+use bun_core::vec::append_with;
+
+const MIN_OUTPUT_ROOM: usize = 4096;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum State {
@@ -40,7 +43,12 @@ impl StreamingDecoder {
             if out.len() >= max_output {
                 return Ok(input.len() - rest.len());
             }
-            let status = (self.decoder).decompress_appending(&mut rest, out, max_output);
+            if out.try_reserve(MIN_OUTPUT_ROOM).is_err() {
+                break Error::OutOfMemory;
+            }
+            let status = append_with(out, max_output - out.len(), |output| {
+                self.decoder.decompress(&mut rest, output)
+            });
             self.state = State::Inflating;
             match status {
                 Ok(DecodeStatus::Finished) => {

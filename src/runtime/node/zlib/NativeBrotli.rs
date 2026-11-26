@@ -19,8 +19,6 @@ pub(crate) struct Context {
     avail_out: usize,
 
     flush: Operation,
-    quality: u32,
-    has_dictionary: bool,
 
     encoded: bool,
     needs_input: bool,
@@ -40,7 +38,7 @@ mod _impl {
     use bun_jsc::{ErrorCode, JsResult};
 
     use crate::node::node_zlib_binding::{
-        CompressionContext, CompressionStreamImpl as _, Error, SpareCodecMemory, Stream, Unseen,
+        CompressionContext, CompressionStreamImpl as _, Error, Stream,
     };
     use crate::node::util::validators;
 
@@ -187,7 +185,7 @@ mod _impl {
             );
 
             let mut stream = self.borrow_idle_stream(global_this)?;
-            if let Err(err) = stream.context_to_init().init(dictionary) {
+            if let Err(err) = stream.context.init(dictionary) {
                 drop(stream);
                 self.emit_error(global_this, this_value, &err);
                 return Ok(false);
@@ -226,8 +224,6 @@ mod _impl {
                 avail_in: 0,
                 avail_out: 0,
                 flush: Operation::Process,
-                quality: 0,
-                has_dictionary: false,
                 encoded: false,
                 needs_input: false,
                 error: None,
@@ -239,8 +235,6 @@ mod _impl {
             // before building new ones. `init` is JS-reachable twice on one
             // handle, and ResetStream() lands here with no dictionary.
             self.state = None;
-            self.quality = bun_brotli::MAX_QUALITY.cast_unsigned();
-            self.has_dictionary = !dictionary.is_empty();
             let (state, message) = match self.mode {
                 NodeMode::BROTLI_ENCODE => (
                     Encoder::with_dictionary(dictionary).map(|e| State::Encoder(Box::new(e))),
@@ -258,10 +252,6 @@ mod _impl {
         }
 
         fn set_params(&mut self, key: c_uint, value: u32) -> bool {
-            const BROTLI_PARAM_QUALITY: c_uint = 1;
-            if key == BROTLI_PARAM_QUALITY {
-                self.quality = value;
-            }
             match &mut self.state {
                 Some(State::Encoder(encoder)) => encoder.set_parameter(key, value),
                 Some(State::Decoder(decoder)) => decoder.set_parameter(key, value),
@@ -271,55 +261,7 @@ mod _impl {
     }
 
     impl CompressionContext for Context {
-        fn do_all_work(
-            &mut self,
-            input: &[u8],
-            out: &mut Vec<u8>,
-            max: usize,
-        ) -> Option<Result<usize, Error>> {
-            match self.state.as_mut()? {
-                State::Encoder(encoder) => {
-                    self.encoded = encoder.compress_whole(input, out).is_ok();
-                    Some(self.write_result().map(|_| 0))
-                }
-                State::Decoder(decoder) => {
-                    let read = decoder.decompress_whole(input, out, max)?;
-                    Some(Ok(input.len() - read))
-                }
-            }
-        }
-
-        fn quick_input_len(&self) -> Option<usize> {
-            match self.quality {
-                _ if !self.is_encoder() => Some(4096),
-                _ if self.has_dictionary => None,
-                0..10 => Some(2048),
-                _ => Some(128),
-            }
-        }
-
-        fn fills_window_first(&self) -> bool {
-            !self.is_encoder()
-        }
-
-        fn is_encoder(&self) -> bool {
-            self.mode == NodeMode::BROTLI_ENCODE
-        }
-
-        fn swap_memory(&mut self, spare: &mut SpareCodecMemory) {
-            match &mut self.state {
-                None => {}
-                Some(State::Encoder(it)) => it.swap_memory(&mut spare.brotli_encoder),
-                Some(State::Decoder(it)) => it.swap_tables(&mut spare.brotli_decoder),
-            }
-        }
-
-        fn free_state(&mut self) {
-            self.state = None;
-        }
-
-        fn reset(&mut self, dropped: Unseen) -> Result<(), Error> {
-            self.error.take_if(|_| dropped.error);
+        fn reset(&mut self) -> Result<(), Error> {
             // Matches node's `BrotliContext::ResetStream()`, which calls `Init()`
             // with its default (empty) dictionary — a reset drops the dictionary.
             // `init` frees the previous state and dictionary itself.
