@@ -12,8 +12,13 @@ const root = join(import.meta.dir, "..");
 
 if (Bun.argv[2] === "--on-host") {
   // cwd: packages/bun-boa on the build host, with remote.ts's environment.
-  const env = { ...Bun.env, RUSTC_WRAPPER: "" };
   const target = Bun.env.CARGO_TARGET_DIR!;
+  // Other sessions on the host reinstall the shared rustup toolchain, deleting rustc under a running build: the
+  // bench builds with a copy of it of its own.
+  const toolchain = `${target}.toolchain`;
+  const sysroot = (await $`rustc --print sysroot`.text()).trim();
+  await $`rm -rf ${toolchain} && cp -a --reflink=auto ${sysroot} ${toolchain}`;
+  const env = { ...Bun.env, RUSTC_WRAPPER: "", RUSTUP_TOOLCHAIN: toolchain };
   const log = (s: string) => console.error(`build-bench: ${s}`);
   const cargo = async (args: string[]) => {
     const start = performance.now();
