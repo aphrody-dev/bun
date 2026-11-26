@@ -32,6 +32,7 @@ mod promise;
 mod realm;
 mod strong;
 mod value;
+mod value_ext;
 
 pub use async_context::{AsyncContextJobExecutor, carry_async_context};
 pub use bun_core::JsError;
@@ -44,7 +45,7 @@ pub use global::JSGlobalObject;
 pub use host_fn::{JSFunction, JSHostFn};
 pub use module::JSModule;
 pub use object::{JSArray, JSObject};
-pub use promise::JSPromise;
+pub use promise::{JSPromise, PendingPromise};
 pub use strong::{Strong, Weak};
 pub use value::{CoerceTo, JSValue};
 

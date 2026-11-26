@@ -1,8 +1,8 @@
-//! `JSPromise`: the promises Rust makes already settled.
+//! `JSPromise`: the promises Rust makes, settled already or later (`JSPromise::create`).
 
 use boa_engine::object::builtins::JsPromise;
 
-use crate::{JSGlobalObject, JSValue};
+use crate::{JSGlobalObject, JSValue, JsResult};
 
 pub struct JSPromise;
 
@@ -26,5 +26,36 @@ impl JSPromise {
             .reject
             .call(&boa_engine::JsValue::undefined(), &[reason.0], global.cx());
         JSValue(promise.into())
+    }
+
+    /// A pending promise, and what settles it.
+    pub fn create(global: &JSGlobalObject) -> PendingPromise {
+        let (promise, resolvers) = JsPromise::new_pending(global.cx());
+        PendingPromise {
+            promise: JSValue(promise.into()),
+            resolve: JSValue(resolvers.resolve.into()),
+            reject: JSValue(resolvers.reject.into()),
+        }
+    }
+}
+
+/// A promise that Rust settles once: `resolve` and `reject` take it by value.
+pub struct PendingPromise {
+    promise: JSValue,
+    resolve: JSValue,
+    reject: JSValue,
+}
+
+impl PendingPromise {
+    pub fn promise(&self) -> JSValue {
+        self.promise.clone()
+    }
+
+    pub fn resolve(self, global: &JSGlobalObject, value: JSValue) -> JsResult<()> {
+        self.resolve.call(global, JSValue::UNDEFINED, &[value]).map(drop)
+    }
+
+    pub fn reject(self, global: &JSGlobalObject, reason: JSValue) -> JsResult<()> {
+        self.reject.call(global, JSValue::UNDEFINED, &[reason]).map(drop)
     }
 }

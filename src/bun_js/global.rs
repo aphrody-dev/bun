@@ -28,6 +28,8 @@ pub(crate) struct State {
     /// The prototype of each `ErrorCode`'s errors, by code.
     pub(crate) error_prototypes: HashMap<crate::ErrorCode, JsObject>,
     pub(crate) modules: NativeModules,
+    /// What [`JSGlobalObject::cached`] made, by the type that names it.
+    cached: HashMap<TypeId, JsValue>,
 }
 
 /// What an uncatchable error is seen as from Rust: Boa has unwound every frame of JavaScript, as JavaScriptCore does
@@ -251,6 +253,22 @@ impl JSGlobalObject {
     }
 
     // ───────────────────────────── the realm ─────────────────────────────
+
+    /// The value `K` names in this realm, made by `make` the first time: what a `LazyProperty` of JavaScriptCore's
+    /// global object is. A `make` that throws makes nothing, and the next call tries again.
+    pub fn cached<K: 'static>(
+        &self,
+        make: impl FnOnce(&JSGlobalObject) -> JsResult<JSValue>,
+    ) -> JsResult<JSValue> {
+        if let Some(value) = self.state().cached.get(&TypeId::of::<K>()) {
+            return Ok(JSValue(value.clone()));
+        }
+        let value = make(self)?;
+        self.state()
+            .cached
+            .insert(TypeId::of::<K>(), value.0.clone());
+        Ok(value)
+    }
 
     /// `globalThis`.
     pub fn to_js_value(&self) -> JSValue {
