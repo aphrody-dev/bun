@@ -19,4 +19,10 @@ export const {
   serve,
   fetch,
   gc,
+  readableStreamToText,
+  readableStreamToBytes,
+  readableStreamToArrayBuffer,
+  readableStreamToJSON,
+  readableStreamToBlob,
+  readableStreamToArray,
 } = B;

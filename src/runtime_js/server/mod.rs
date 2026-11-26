@@ -212,6 +212,7 @@ fn request_value(state: &ServerState, incoming: &IncomingRequest, context: &mut 
         headers: JSValue::UNDEFINED,
         body: if has_body { Body::Bytes(Rc::from(incoming.body.as_slice())) } else { Body::Null },
         used: false,
+        stream: JSValue::UNDEFINED,
         signal: JSValue::UNDEFINED,
         redirect: "follow",
         keepalive: false,

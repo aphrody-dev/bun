@@ -44,6 +44,7 @@ pub fn cpp(global: &bun_js::JSGlobalObject, file: &str, symbol: &str) -> Option<
 pub fn bun_object(global: &JSGlobalObject) -> bun_js::JsResult<Vec<(&'static str, JSValue)>> {
     let mut properties = generated_bindgen::glob::exports(global)?;
     properties.extend(api::bun_object::functions(global));
+    properties.extend(web::streams::readable_stream::bun_functions(global));
     Ok(properties)
 }
 
@@ -78,5 +79,6 @@ pub(crate) fn define_global(context: &mut Context, name: &str, value: JsValue) -
 /// an [`EventLoop`].
 pub fn install(context: &mut Context) -> JsResult<()> {
     timer::install(context)?;
+    web::streams::install(context)?;
     webcore::install(context)
 }

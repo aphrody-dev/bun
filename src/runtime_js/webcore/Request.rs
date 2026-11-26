@@ -22,6 +22,8 @@ pub struct Request {
     pub body: Body,
     #[unsafe_ignore_trace]
     pub used: bool,
+    /// The `ReadableStream` that `body` answers, made the first time it is asked for.
+    pub stream: JSValue,
     /// An `AbortSignal`, made when it is first read if none was given.
     pub signal: JSValue,
     #[unsafe_ignore_trace]
@@ -45,6 +47,12 @@ impl HasBody for Request {
     }
     fn set_used(&mut self) {
         self.used = true;
+    }
+    fn stream(&self) -> &JSValue {
+        &self.stream
+    }
+    fn set_stream(&mut self, stream: JSValue) {
+        self.stream = stream;
     }
 }
 
@@ -108,6 +116,7 @@ impl Request {
             headers: JSValue::UNDEFINED,
             body: Body::Null,
             used: false,
+            stream: JSValue::UNDEFINED,
             signal: JSValue::UNDEFINED,
             redirect: "follow",
             keepalive: false,
@@ -276,6 +285,7 @@ impl JsClass for Request {
                     headers: JSValue::UNDEFINED,
                     body: payload.body.clone(),
                     used: false,
+                    stream: JSValue::UNDEFINED,
                     signal: payload.signal.clone(),
                     redirect: payload.redirect,
                     keepalive: payload.keepalive,
