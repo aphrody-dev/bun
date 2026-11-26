@@ -255,3 +255,12 @@ fn build_bundles_and_runs() {
     let out = bun().args(["build", "e.ts", "a.ts"]).current_dir(&dir).output().unwrap();
     assert!(!out.status.success(), "{:?}", text(&out));
 }
+
+/// File errors read as Bun's (bun_sys): errno name, message, syscall and path.
+#[test]
+fn file_errors_read_as_bun() {
+    let code = "try { await Bun.file('./no-such-file.txt').text() } catch (e) { console.log(String(e.message)) }";
+    let out = bun().args(["-e", code]).output().unwrap();
+    let (stdout, _) = text(&out);
+    assert!(stdout.contains("ENOENT") && stdout.contains("no-such-file.txt"), "{stdout:?}");
+}
