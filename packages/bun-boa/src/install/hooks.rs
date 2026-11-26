@@ -2,7 +2,6 @@
 //! without `bun_runtime`. The package manager runs on its `MiniEventLoop`, so what only a JavaScript VM's loop has
 //! (its timer heap, `jsc::EventLoop`, its `EventLoopCtx`) is never reached here.
 
-use core::ffi::c_void;
 use core::ptr::NonNull;
 
 use bun_core::String as BunString;
@@ -139,11 +138,6 @@ unsafe fn __bun_run_io(owner: Owner, event: IoEvent) {
         ),
     }
 }
-
-/// `bun_runtime::dns_jsc::internal::__bun_dns_prefetch` fills the DNS cache that uSockets' connect reads
-/// (`Bun__addrinfo_get`). A prefetch is only a head start, and that cache is not on this build yet.
-#[unsafe(no_mangle)]
-fn __bun_dns_prefetch(_loop: *const c_void, _hostname: &[u8], _port: u16) {}
 
 #[unsafe(no_mangle)]
 fn __bun_dns_register_quic(_pc: bun_http::H3::PendingConnect) {

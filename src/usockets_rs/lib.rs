@@ -2,16 +2,24 @@
 //! the semantics of `loop.c`, `socket.c`, `context.cpp`, `bsd.cpp` and `eventing/epoll_kqueue.c`. Events go to the
 //! `us_dispatch_*` exports of the binary that links this crate, as from the C library.
 //!
-//! What it has: the loop on epoll (wakeups, ready-poll dispatch, the timeout sweep, `Bun__internal_dispatch_ready_poll`
-//! for `bun_io`'s polls), TCP and Unix-socket clients (connect, read, write, timeouts, shutdown, close), TLS for them on
-//! rustls (`tls.rs`), and name resolution on a thread of its own. It has no listen sockets, UDP or QUIC (those entry
-//! points fail), and no kqueue.
-#![cfg(any(target_os = "linux", target_os = "android"))]
+//! What it has: the loop on epoll or kqueue (wakeups, ready-poll dispatch, the timeout sweep,
+//! `Bun__internal_dispatch_ready_poll` for `bun_io`'s polls), TCP and Unix-socket clients (connect, read, write,
+//! timeouts, shutdown, close) and listeners (`listen.rs`), sockets on an fd and IPC fd passing, adoption
+//! (`adopt.rs`), TLS on rustls for clients and servers with SNI (`tls.rs`, `sni.rs`), and name resolution through a
+//! cache of results on a thread pool (`dns.rs`, `Bun__addrinfo_*`). It has no UDP or QUIC (those entry points fail).
+#![cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "freebsd"))]
 #![allow(non_camel_case_types, clippy::missing_safety_doc)]
 
+// Defines `Bun__lock` and `Bun__unlock`, which nothing here names in Rust.
+extern crate bun_threading;
+
+mod adopt;
+mod bsd;
 mod context;
 mod dns;
+mod listen;
 mod eventing;
+mod sni;
 mod socket;
 mod tls;
 mod unsupported;
@@ -19,8 +27,14 @@ mod unsupported;
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::sync::atomic::AtomicU32;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub const LIBUS_SOCKET_READABLE: c_int = libc::EPOLLIN;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub const LIBUS_SOCKET_WRITABLE: c_int = libc::EPOLLOUT;
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub const LIBUS_SOCKET_READABLE: c_int = 1;
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub const LIBUS_SOCKET_WRITABLE: c_int = 2;
 
 pub const LIBUS_RECV_BUFFER_LENGTH: usize = 524288;
 pub const LIBUS_RECV_BUFFER_PADDING: usize = 32;
@@ -32,6 +46,12 @@ pub const LIBUS_SOCKET_CLOSE_CODE_CONNECTION_RESET: c_int = 1;
 pub const LIBUS_SOCKET_CLOSE_CODE_FAST_SHUTDOWN: c_int = 2;
 
 pub const LIBUS_SOCKET_ALLOW_HALF_OPEN: c_int = 2;
+pub const LIBUS_LISTEN_REUSE_PORT: c_int = 4;
+pub const LIBUS_SOCKET_IPV6_ONLY: c_int = 8;
+pub const LIBUS_LISTEN_REUSE_ADDR: c_int = 16;
+pub const LIBUS_LISTEN_DISALLOW_REUSE_PORT_FAILURE: c_int = 32;
+pub const LIBUS_LISTEN_DEFER_ACCEPT: c_int = 64;
+pub const LIBUS_SOCKET_OPEN_PAUSED: c_int = 256;
 
 pub const LIBUS_QUEUED_INPUT_NONE: c_int = 0;
 pub const LIBUS_QUEUED_INPUT_DATA: c_int = 1;
@@ -51,7 +71,8 @@ pub(crate) const POLL_TYPE_POLLING_IN: u8 = 16;
 pub(crate) const POLL_TYPE_KIND_MASK: u8 = 0b111;
 pub(crate) const POLL_TYPE_POLLING_MASK: u8 = 0b11000;
 
-/// `struct us_poll_t`: what every entry of the loop's epoll set points at, unless `bun_io` tagged the pointer.
+/// `struct us_poll_t`: what every entry of the loop's epoll or kqueue set points at, unless `bun_io` tagged the
+/// pointer.
 #[repr(C, align(16))]
 pub struct us_poll_t {
     pub(crate) fd: c_int,
@@ -91,7 +112,7 @@ pub struct us_internal_loop_data_t {
 }
 
 #[repr(C, align(16))]
-pub(crate) struct ReadyPolls(pub(crate) [libc::epoll_event; LIBUS_MAX_READY_POLLS]);
+pub(crate) struct ReadyPolls(pub(crate) [eventing::ReadyEvent; LIBUS_MAX_READY_POLLS]);
 
 /// `struct us_loop_t` of eventing/epoll_kqueue.h, which `bun_uws_sys::Loop` mirrors.
 #[repr(C, align(16))]
@@ -116,7 +137,7 @@ pub struct us_socket_group_t {
     pub(crate) ext: *mut c_void,
     pub(crate) head_sockets: *mut us_socket_t,
     pub(crate) head_connecting_sockets: *mut us_connecting_socket_t,
-    pub(crate) head_listen_sockets: *mut c_void,
+    pub(crate) head_listen_sockets: *mut us_listen_socket_t,
     pub(crate) iterator: *mut us_socket_t,
     pub(crate) prev: *mut us_socket_group_t,
     pub(crate) next: *mut us_socket_group_t,
@@ -142,6 +163,10 @@ pub struct us_socket_t {
     pub(crate) read_eof: bool,
     pub(crate) send_rejected: bool,
     pub(crate) unclassified_send_failures: u8,
+    /// recvmsg, so that an fd that the peer sends (SCM_RIGHTS) goes to on_fd.
+    pub(crate) is_ipc: bool,
+    /// Retired by `us_socket_adopt`, which moved it: `prev` is where to.
+    pub(crate) adopted: bool,
     pub(crate) group: *mut us_socket_group_t,
     /// Null for plain TCP.
     pub(crate) ssl: *mut tls::Ssl,
@@ -151,6 +176,26 @@ pub struct us_socket_t {
     pub(crate) connect_state: *mut us_connecting_socket_t,
     /// What `alloc` was asked for, for `dealloc`.
     pub(crate) alloc_size: usize,
+}
+
+/// `struct us_listen_socket_t`: a socket whose poll accepts, and what it stamps on the sockets it accepts.
+#[repr(C, align(16))]
+pub struct us_listen_socket_t {
+    pub(crate) s: us_socket_t,
+    /// Where accepted sockets go; usually `s.group` too.
+    pub(crate) accept_group: *mut us_socket_group_t,
+    /// The next listener of `accept_group`.
+    pub(crate) next: *mut us_listen_socket_t,
+    /// The context of accepted sockets (a ref), or null for TCP.
+    pub(crate) ssl_ctx: *mut tls::SslCtx,
+    /// SNI: the contexts by name, and a resolver for the rest.
+    pub(crate) server_names: *mut c_void,
+    pub(crate) socket_ext_size: c_uint,
+    pub(crate) accept_kind: u8,
+    pub(crate) deferred_accept: bool,
+    pub(crate) accept_paused: bool,
+    /// Another process can accept on it too.
+    pub(crate) shared: bool,
 }
 
 /// `struct us_connecting_socket_t`: a connect that waits for its name to resolve, then races up to four addresses.
@@ -177,10 +222,10 @@ pub struct us_connecting_socket_t {
     pub(crate) port: u16,
     pub(crate) error: c_int,
     /// What the resolver thread found, written before it queues this on `dns_ready_head`.
-    /// A `Box<dns::Resolved>`, erased: C sees this struct.
-    pub(crate) resolved: *mut c_void,
-    /// The addresses not tried yet, from `resolved`.
-    pub(crate) next_address: usize,
+    /// A ref on the `dns::Request` (erased: C sees this struct), or null once given back.
+    pub(crate) addrinfo_req: *const c_void,
+    /// The addresses of its result not tried yet.
+    pub(crate) addrinfo_head: *const libc::addrinfo,
     pub(crate) alloc_size: usize,
 }
 
@@ -213,6 +258,7 @@ const _: () = {
 unsafe extern "C" {
     pub(crate) fn us_dispatch_open(s: *mut us_socket_t, is_client: c_int, ip: *mut c_char, ip_length: c_int) -> *mut us_socket_t;
     pub(crate) fn us_dispatch_data(s: *mut us_socket_t, data: *mut c_char, length: c_int) -> *mut us_socket_t;
+    pub(crate) fn us_dispatch_fd(s: *mut us_socket_t, fd: c_int) -> *mut us_socket_t;
     pub(crate) fn us_dispatch_writable(s: *mut us_socket_t) -> *mut us_socket_t;
     pub(crate) fn us_dispatch_close(s: *mut us_socket_t, code: c_int, reason: *mut c_void) -> *mut us_socket_t;
     pub(crate) fn us_dispatch_timeout(s: *mut us_socket_t) -> *mut us_socket_t;
@@ -221,6 +267,9 @@ unsafe extern "C" {
     pub(crate) fn us_dispatch_connect_error(s: *mut us_socket_t, code: c_int) -> *mut us_socket_t;
     pub(crate) fn us_dispatch_connecting_error(c: *mut us_connecting_socket_t, code: c_int) -> *mut us_connecting_socket_t;
     pub(crate) fn us_dispatch_handshake(s: *mut us_socket_t, success: c_int, err: us_bun_verify_error_t);
+    /// The context for a name, for a server-side socket adopted into TLS: a ref, or null. `*abort` 1 drops the
+    /// connection, 2 waits for `us_socket_sni_resolve`.
+    pub(crate) fn us_dispatch_socket_server_name(s: *mut us_socket_t, hostname: *const c_char, abort: *mut c_int) -> *mut tls::SslCtx;
 
     /// `bun_io`'s polls, whose pointers in the epoll set are tagged.
     pub(crate) fn Bun__internal_dispatch_ready_poll(loop_: *mut us_loop_t, poll: *mut c_void);
@@ -230,14 +279,27 @@ unsafe extern "C" {
     pub(crate) fn Bun__unlock(lock: *mut u32);
 }
 
+fn errno_location() -> *mut c_int {
+    // SAFETY: the calling thread's errno.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        libc::__errno_location()
+    }
+    // SAFETY: as above.
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    unsafe {
+        libc::__error()
+    }
+}
+
 pub(crate) fn errno() -> c_int {
     // SAFETY: the calling thread's errno.
-    unsafe { *libc::__errno_location() }
+    unsafe { *errno_location() }
 }
 
 pub(crate) fn set_errno(value: c_int) {
     // SAFETY: as above.
-    unsafe { *libc::__errno_location() = value };
+    unsafe { *errno_location() = value };
 }
 
 /// `us_xcalloc`: zeroed, aligned to `LIBUS_EXT_ALIGNMENT`, or the process stops as out of memory.

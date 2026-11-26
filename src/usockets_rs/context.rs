@@ -4,6 +4,7 @@ use core::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use core::ptr;
 use std::net::SocketAddr;
 
+use crate::bsd::{connect as bsd_connect, set_nodelay, sockaddr_from_std};
 use crate::eventing::*;
 use crate::socket::*;
 use crate::*;
@@ -43,6 +44,13 @@ pub unsafe extern "C" fn us_socket_group_deinit(group: *mut us_socket_group_t) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn us_socket_group_close_all(group: *mut us_socket_group_t) {
+    // SAFETY: the caller's group.
+    unsafe { group_close_all(group, true) }
+}
+
+/// Listeners first when `also_listeners`, so that nothing new is accepted while the sockets close. Process exit
+/// leaves listeners to their owners, which close them themselves.
+pub(crate) unsafe fn group_close_all(group: *mut us_socket_group_t, also_listeners: bool) {
     // SAFETY: the caller passes an initialized group. Close handlers can close siblings, which `iterator` follows.
     unsafe {
         let loop_ = (*group).loop_;
@@ -50,6 +58,11 @@ pub unsafe extern "C" fn us_socket_group_close_all(group: *mut us_socket_group_t
             return;
         }
         (*loop_).data.tick_depth += 1;
+        if also_listeners {
+            while !(*group).head_listen_sockets.is_null() {
+                crate::listen::us_listen_socket_close((*group).head_listen_sockets);
+            }
+        }
         let mut c = (*group).head_connecting_sockets;
         while !c.is_null() {
             let next = (*c).next_pending;
@@ -149,68 +162,18 @@ unsafe fn group_unlink_connecting(group: *mut us_socket_group_t, c: *mut us_conn
     }
 }
 
-// ── connect ────────────────────────────────────────────────────────────────
-
-fn sockaddr_from_std(address: &SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
-    // SAFETY: all-zero is an empty sockaddr_storage.
-    let mut storage: libc::sockaddr_storage = unsafe { core::mem::zeroed() };
-    let len = match address {
-        SocketAddr::V4(a) => {
-            // SAFETY: sockaddr_storage has room for, and the alignment of, a sockaddr_in.
-            let sin = unsafe { &mut *(&raw mut storage).cast::<libc::sockaddr_in>() };
-            sin.sin_family = libc::AF_INET as libc::sa_family_t;
-            sin.sin_port = a.port().to_be();
-            sin.sin_addr.s_addr = u32::from_ne_bytes(a.ip().octets());
-            core::mem::size_of::<libc::sockaddr_in>()
-        }
-        SocketAddr::V6(a) => {
-            // SAFETY: as above, for a sockaddr_in6.
-            let sin6 = unsafe { &mut *(&raw mut storage).cast::<libc::sockaddr_in6>() };
-            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
-            sin6.sin6_port = a.port().to_be();
-            sin6.sin6_addr.s6_addr = a.ip().octets();
-            sin6.sin6_flowinfo = a.flowinfo();
-            sin6.sin6_scope_id = a.scope_id();
-            core::mem::size_of::<libc::sockaddr_in6>()
-        }
-    };
-    (storage, len as libc::socklen_t)
-}
-
-/// A nonblocking connect on a new fd; -1 if it failed at once (errno says why).
-fn bsd_connect(family: c_int, addr: *const libc::sockaddr, len: libc::socklen_t, local: Option<&SocketAddr>) -> c_int {
-    // SAFETY: the caller passes an address of `len` bytes.
+/// An adopted socket's pending connect follows it to `group`.
+pub(crate) unsafe fn group_move_connecting(c: *mut us_connecting_socket_t, group: *mut us_socket_group_t) {
+    // SAFETY: the caller's live connecting socket and initialized group.
     unsafe {
-        let fd = libc::socket(family, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0);
-        if fd == -1 {
-            return -1;
+        if !(*c).group.is_null() {
+            group_unlink_connecting((*c).group, c);
         }
-        if let Some(local) = local {
-            let on: c_int = 1;
-            libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, (&raw const on).cast(), 4);
-            let (storage, local_len) = sockaddr_from_std(local);
-            if libc::bind(fd, (&raw const storage).cast(), local_len) != 0 {
-                let e = errno();
-                libc::close(fd);
-                set_errno(e);
-                return -1;
-            }
-        }
-        loop {
-            if libc::connect(fd, addr, len) == 0 {
-                return fd;
-            }
-            match errno() {
-                libc::EINPROGRESS | libc::EINTR => return fd,
-                e => {
-                    libc::close(fd);
-                    set_errno(e);
-                    return -1;
-                }
-            }
-        }
+        group_link_connecting(group, c);
     }
 }
+
+// ── connect ────────────────────────────────────────────────────────────────
 
 unsafe fn new_connect_socket(group: *mut us_socket_group_t, fd: c_int, kind: u8, options: c_int, ext_size: c_int) -> *mut us_socket_t {
     // SAFETY: the caller passes an initialized group and a connecting fd it hands over.
@@ -259,7 +222,7 @@ unsafe fn connect_resolved(
 unsafe fn with_tls(s: *mut us_socket_t, ssl_ctx: *mut c_void, host: Option<&CStr>) -> *mut us_socket_t {
     if !s.is_null() && !ssl_ctx.is_null() {
         // SAFETY: a socket just made, and the caller's context.
-        unsafe { crate::tls::attach(s, ssl_ctx.cast(), host) };
+        unsafe { crate::tls::attach_client(s, ssl_ctx.cast(), host) };
     }
     s
 }
@@ -291,6 +254,22 @@ pub unsafe extern "C" fn us_socket_group_connect(
             let s = connect_resolved(group, kind, &address, local.as_ref(), options, socket_ext_size);
             return with_tls(s, ssl_ctx, Some(host)).cast();
         }
+        let mut req: *const crate::dns::Request = ptr::null();
+        if crate::dns::Bun__addrinfo_get((*group).loop_, host.as_ptr(), port, &mut req) == 0 {
+            // A cached failure goes the connecting-socket way below, to be reported as an uncached one is.
+            let result = crate::dns::Bun__addrinfo_getRequestResult(req);
+            if result.error == 0 && !result.entries.is_null() && (*result.entries.cast::<libc::addrinfo>()).ai_next.is_null() {
+                let info = &*result.entries.cast::<libc::addrinfo>();
+                let address = crate::dns::sockaddr_to_std(info.ai_addr).map(|mut a| {
+                    a.set_port(port);
+                    a
+                });
+                *has_dns_resolved = 1;
+                let s = address.map_or(ptr::null_mut(), |a| connect_resolved(group, kind, &a, local.as_ref(), options, socket_ext_size));
+                crate::dns::Bun__addrinfo_freeRequest(req, c_int::from(s.is_null()));
+                return with_tls(s, ssl_ctx, Some(host)).cast();
+            }
+        }
         *has_dns_resolved = 0;
         let loop_ = (*group).loop_;
         let size = core::mem::size_of::<us_connecting_socket_t>() + socket_ext_size.max(0) as usize;
@@ -308,9 +287,10 @@ pub unsafe extern "C" fn us_socket_group_connect(
             crate::tls::SSL_CTX_up_ref(ssl_ctx.cast());
             (*c).ssl_ctx = ssl_ctx.cast();
         }
+        (*c).addrinfo_req = req.cast();
         group_link_connecting(group, c);
         (*loop_).num_polls += 1;
-        crate::dns::resolve_for(c, host);
+        crate::dns::Bun__addrinfo_set(req, c);
         c.cast()
     }
 }
@@ -327,14 +307,14 @@ pub unsafe extern "C" fn us_socket_group_connect_unix(
 ) -> *mut us_socket_t {
     // SAFETY: the caller passes an initialized group and `pathlen` bytes at `path`.
     unsafe {
-        let mut addr: libc::sockaddr_un = core::mem::zeroed();
-        if pathlen >= addr.sun_path.len() {
-            set_errno(libc::ENAMETOOLONG);
-            return ptr::null_mut();
-        }
-        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        ptr::copy_nonoverlapping(path, addr.sun_path.as_mut_ptr(), pathlen);
-        let len = (core::mem::offset_of!(libc::sockaddr_un, sun_path) + pathlen + 1) as libc::socklen_t;
+        let path = if pathlen == 0 { &[][..] } else { core::slice::from_raw_parts(path.cast::<u8>(), pathlen) };
+        let (addr, len, _dir) = match crate::bsd::unix_address(path) {
+            Ok(address) => address,
+            Err(e) => {
+                set_errno(e);
+                return ptr::null_mut();
+            }
+        };
         let fd = bsd_connect(libc::AF_UNIX, (&raw const addr).cast(), len, None);
         if fd == -1 {
             return ptr::null_mut();
@@ -348,11 +328,12 @@ unsafe fn start_connections(c: *mut us_connecting_socket_t, count: usize) -> usi
     // SAFETY: the caller passes a live, resolved connecting socket of a live group.
     unsafe {
         let group = (*c).group;
-        let Some(Ok(addresses)) = crate::dns::resolved_of(c) else { return 0 };
         let mut opened = 0;
-        while (*c).next_address < addresses.len() && opened < count {
-            let address = addresses[(*c).next_address];
-            (*c).next_address += 1;
+        while !(*c).addrinfo_head.is_null() && opened < count {
+            let info = &*(*c).addrinfo_head;
+            (*c).addrinfo_head = info.ai_next;
+            let Some(mut address) = crate::dns::sockaddr_to_std(info.ai_addr) else { continue };
+            address.set_port((*c).port);
             let s = connect_resolved(group, (*c).kind, &address, None, (*c).options, (*c).socket_ext_size);
             if s.is_null() {
                 continue;
@@ -374,16 +355,20 @@ pub(crate) unsafe fn us_internal_socket_after_resolve(c: *mut us_connecting_sock
     unsafe {
         (*c).pending_resolve_callback = false;
         if (*c).closed {
+            give_back_request(c, 0);
             us_connecting_socket_free(c);
             return;
         }
         (*(*c).loop_).num_polls -= 1;
-        if let Some(Err(error)) = crate::dns::resolved_of(c) {
-            (*c).error = *error;
+        let result = crate::dns::Bun__addrinfo_getRequestResult((*c).addrinfo_req.cast());
+        if result.error != 0 {
+            // A getaddrinfo code, not an errno: the two overlap, so `error_is_dns` says which.
+            (*c).error = result.error;
             (*c).error_is_dns = true;
             us_connecting_socket_close(c);
             return;
         }
+        (*c).addrinfo_head = result.entries.cast();
         if start_connections(c, CONCURRENT_CONNECTIONS) == 0 {
             (*c).error = libc::ECONNREFUSED;
             us_connecting_socket_close(c);
@@ -435,13 +420,14 @@ pub(crate) unsafe fn us_internal_socket_after_open(s: *mut us_socket_t, error: c
             }
             // TLS now that the winner is known.
             with_tls(s, (*c).ssl_ctx.cast(), None);
+            give_back_request(c, 0);
             us_connecting_socket_free(c);
             (*s).connect_state = ptr::null_mut();
         }
         if (*s).ssl.is_null() {
             us_dispatch_open(s, 1, ptr::null_mut(), 0);
         } else {
-            crate::tls::on_open(s);
+            crate::tls::on_open(s, true, ptr::null_mut(), 0);
         }
     }
 }
@@ -474,11 +460,32 @@ pub(crate) unsafe fn us_connecting_socket_free(c: *mut us_connecting_socket_t) {
 
 pub(crate) unsafe fn us_connecting_socket_dealloc(c: *mut us_connecting_socket_t) {
     // SAFETY: the loop passes a connecting socket from its closed list, which nothing else holds.
+    unsafe { xfree(c.cast(), (*c).alloc_size) }
+}
+
+/// The ref on the DNS request, given back once; `err` invalidates the cache entry.
+unsafe fn give_back_request(c: *mut us_connecting_socket_t, err: c_int) {
+    // SAFETY: the caller's connecting socket.
     unsafe {
-        if !(*c).resolved.is_null() {
-            drop(Box::from_raw((*c).resolved.cast::<crate::dns::Resolved>()));
+        let req = core::mem::replace(&mut (*c).addrinfo_req, ptr::null());
+        if !req.is_null() {
+            crate::dns::Bun__addrinfo_freeRequest(req.cast(), err);
         }
-        xfree(c.cast(), (*c).alloc_size);
+    }
+}
+
+/// loop.c's: queues `c` on its loop's `dns_ready_head` and wakes the loop. Any thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn us_internal_dns_callback_threadsafe(c: *mut us_connecting_socket_t) {
+    // SAFETY: a connecting socket that waits for its result, whose loop outlives it.
+    unsafe {
+        let loop_ = (*c).loop_;
+        let mutex = &raw mut (*loop_).data.mutex;
+        Bun__lock(mutex);
+        (*c).next = (*loop_).data.dns_ready_head;
+        (*loop_).data.dns_ready_head = c;
+        Bun__unlock(mutex);
+        us_wakeup_loop(loop_);
     }
 }
 
@@ -507,12 +514,21 @@ pub unsafe extern "C" fn us_connecting_socket_close(c: *mut us_connecting_socket
             (*c).error = libc::ECANCELED;
         }
         if (*c).pending_resolve_callback {
-            // The resolver cannot be called off: its callback finds `c` closed and frees it.
             (*(*c).loop_).num_polls -= 1;
-            us_dispatch_connecting_error(c, (*c).error);
-            connecting_detach(c);
+            if crate::dns::Bun__addrinfo_cancel((*c).addrinfo_req.cast(), c) != 0 {
+                (*c).pending_resolve_callback = false;
+                give_back_request(c, 0);
+                us_dispatch_connecting_error(c, (*c).error);
+                us_connecting_socket_free(c);
+            } else {
+                // Already queued: `us_internal_socket_after_resolve` finds `c` closed and frees it.
+                us_dispatch_connecting_error(c, (*c).error);
+                connecting_detach(c);
+            }
             return;
         }
+        // A refused connect may mean stale addresses, and a failed lookup is not cached.
+        give_back_request(c, c_int::from((*c).error == libc::ECONNREFUSED || (*c).error_is_dns));
         us_dispatch_connecting_error(c, (*c).error);
         us_connecting_socket_free(c);
     }

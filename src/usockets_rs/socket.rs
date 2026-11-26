@@ -3,10 +3,11 @@
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::ptr;
 
+use crate::bsd::{SEND_FLAGS, set_nodelay};
 use crate::eventing::*;
 use crate::*;
 
-fn fd_of(s: *const us_socket_t) -> c_int {
+pub(crate) fn fd_of(s: *const us_socket_t) -> c_int {
     // SAFETY: callers pass live sockets.
     unsafe { (*s).p.fd }
 }
@@ -182,15 +183,18 @@ pub unsafe extern "C" fn us_socket_long_timeout(s: *mut us_socket_t, minutes: c_
     }
 }
 
-/// Uncorks: TCP_CORK off sends what it held back.
+/// Uncorks: TCP_CORK off sends what it held back. Only Linux corks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn us_socket_flush(s: *mut us_socket_t) {
     // SAFETY: the caller passes a live socket.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     if unsafe { us_socket_is_shut_down(s) } == 0 {
         let enabled: c_int = 0;
         // SAFETY: `enabled` is an int to read.
         unsafe { libc::setsockopt(fd_of(s), libc::IPPROTO_TCP, libc::TCP_CORK, (&raw const enabled).cast(), 4) };
     }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = s;
 }
 
 #[unsafe(no_mangle)]
@@ -201,11 +205,6 @@ pub unsafe extern "C" fn us_socket_nodelay(s: *mut us_socket_t, enabled: c_int) 
     }
 }
 
-pub(crate) fn set_nodelay(fd: c_int, enabled: c_int) {
-    // SAFETY: `enabled` is an int to read.
-    unsafe { libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, (&raw const enabled).cast(), 4) };
-}
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn us_socket_keepalive(s: *mut us_socket_t, enabled: c_int, delay: c_uint) -> c_int {
     // SAFETY: the caller passes a live socket.
@@ -213,17 +212,27 @@ pub unsafe extern "C" fn us_socket_keepalive(s: *mut us_socket_t, enabled: c_int
         return 0;
     }
     let fd = fd_of(s);
-    // SAFETY: each option reads an int.
-    unsafe {
-        if libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, (&raw const enabled).cast(), 4) != 0 {
-            return errno();
-        }
-        if enabled != 0 && delay != 0 {
-            let delay = delay as c_int;
-            if libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, (&raw const delay).cast(), 4) != 0 {
-                return errno();
-            }
-        }
+    #[cfg(not(target_os = "macos"))]
+    const TCP_KEEPIDLE: c_int = libc::TCP_KEEPIDLE;
+    // macOS's name for it.
+    #[cfg(target_os = "macos")]
+    const TCP_KEEPIDLE: c_int = libc::TCP_KEEPALIVE;
+    let set = |level: c_int, name: c_int, value: c_int| {
+        // SAFETY: `value` is an int to read.
+        unsafe { libc::setsockopt(fd, level, name, (&raw const value).cast(), 4) == 0 }
+    };
+    if !set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, enabled) {
+        return errno();
+    }
+    // A delay of 0 keeps the kernel's idle time. Probes every second, ten of them, as on Windows.
+    if enabled == 0 || delay == 0 {
+        return 0;
+    }
+    if !set(libc::IPPROTO_TCP, TCP_KEEPIDLE, delay as c_int)
+        || !set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 1)
+        || !set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 10)
+    {
+        return errno();
     }
     0
 }
@@ -239,7 +248,7 @@ pub(crate) unsafe fn rearm_writable(s: *mut us_socket_t) {
 fn send(fd: c_int, data: *const u8, length: usize) -> isize {
     loop {
         // SAFETY: the caller's pointer and length.
-        let rc = unsafe { libc::send(fd, data.cast(), length, libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) };
+        let rc = unsafe { libc::send(fd, data.cast(), length, SEND_FLAGS) };
         if rc == -1 && errno() == libc::EINTR {
             continue;
         }
@@ -330,7 +339,7 @@ pub unsafe extern "C" fn us_socket_write2(
             msg_flags: 0,
         };
         let written = loop {
-            let rc = libc::sendmsg(fd_of(s), &msg, libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT);
+            let rc = libc::sendmsg(fd_of(s), &msg, SEND_FLAGS);
             if rc == -1 && errno() == libc::EINTR {
                 continue;
             }
@@ -506,7 +515,11 @@ unsafe fn close_and_notify(s: *mut us_socket_t, code: c_int, reason: *mut c_void
         }
         let loop_ = (*(*s).group).loop_;
         group_unlink_socket((*s).group, s);
+        // kqueue drops the knotes of an fd that closes.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         us_poll_stop(&mut (*s).p, loop_);
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        us_internal_loop_update_pending_ready_polls(loop_, s.cast(), ptr::null_mut());
         if code == LIBUS_SOCKET_CLOSE_CODE_CONNECTION_RESET {
             // RST, not TIME_WAIT.
             let l = libc::linger { l_onoff: 1, l_linger: 0 };
@@ -558,20 +571,31 @@ pub unsafe extern "C" fn us_socket_close_now(s: *mut us_socket_t) -> *mut us_soc
 
 /// loop.c's POLL_TYPE_SOCKET arm, without TLS, IPC and the low-priority queue.
 pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut eof: c_int, events: c_int) {
-    // SAFETY: the caller passes a live socket of this loop; each handler can close it, which leaves it readable.
+    // SAFETY: the caller passes a live socket of this loop; each handler can close it, which leaves it readable,
+    // or adopt it, which leaves the old block pointing at the new one.
     unsafe {
+        s = follow_adopted(s);
         let loop_ = (*(*s).group).loop_;
         let hangup = eof & LIBUS_POLL_HANGUP != 0 && error == 0;
         let mut read_fin = false;
 
         if events & LIBUS_SOCKET_WRITABLE != 0 && error == 0 && !(*s).send_rejected {
             (*s).last_write_failed = false;
+            // kqueue's write filter is one-shot: it is gone now, and the poll still reads as before.
+            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+            {
+                (*s).p.poll_type = us_internal_poll_type(&(*s).p) | ((*s).p.poll_type & POLL_TYPE_POLLING_IN);
+            }
             s = if (*s).ssl.is_null() { us_dispatch_writable(s) } else { crate::tls::on_writable(s) };
+            s = follow_adopted(s);
             if s.is_null() || (*s).is_closed {
                 return;
             }
             if !(*s).last_write_failed || us_socket_is_shut_down(s) != 0 {
                 us_poll_change(&mut (*s).p, loop_, us_poll_events(&(*s).p) & LIBUS_SOCKET_READABLE);
+            } else {
+                #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+                us_poll_change(&mut (*s).p, loop_, us_poll_events(&(*s).p) | LIBUS_SOCKET_WRITABLE);
             }
         }
 
@@ -580,12 +604,23 @@ pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut 
             let mut repeat_recv_count = 0;
             loop {
                 let buf = (*loop_).data.recv_buf.add(LIBUS_RECV_BUFFER_PADDING);
-                let length = loop {
-                    let r = libc::recv(fd_of(s), buf.cast(), LIBUS_RECV_BUFFER_LENGTH, libc::MSG_DONTWAIT);
-                    if r == -1 && errno() == libc::EINTR {
-                        continue;
+                let length = if (*s).is_ipc {
+                    let (length, fd) = recv_with_fd(fd_of(s), buf);
+                    if let Some(fd) = fd {
+                        s = follow_adopted(us_dispatch_fd(s, fd));
+                        if s.is_null() || (*s).is_closed {
+                            break;
+                        }
                     }
-                    break r;
+                    length
+                } else {
+                    loop {
+                        let r = libc::recv(fd_of(s), buf.cast(), LIBUS_RECV_BUFFER_LENGTH, libc::MSG_DONTWAIT);
+                        if r == -1 && errno() == libc::EINTR {
+                            continue;
+                        }
+                        break r;
+                    }
                 };
                 if length > 0 {
                     s = if (*s).ssl.is_null() {
@@ -593,6 +628,7 @@ pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut 
                     } else {
                         crate::tls::on_data(s, core::slice::from_raw_parts(buf, length as usize))
                     };
+                    s = follow_adopted(s);
                     if s.is_null() {
                         break;
                     }
@@ -629,6 +665,7 @@ pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut 
         let eof_deferrable = eof != 0 && !s.is_null() && error == 0 && !(*s).is_closed && !(*s).read_eof;
         if eof_deferrable && (*s).is_paused {
             // EPOLLHUP cannot be masked: leave epoll while paused; resume puts the fd back.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             if hangup {
                 us_poll_stop(&mut (*s).p, loop_);
                 (*s).p.poll_type = us_internal_poll_type(&(*s).p);
@@ -657,10 +694,10 @@ pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut 
             } else if (*s).allow_half_open && !hangup {
                 (*s).read_eof = true;
                 us_poll_change(&mut (*s).p, loop_, LIBUS_SOCKET_WRITABLE);
-                s = us_dispatch_end(s);
+                s = follow_adopted(us_dispatch_end(s));
             } else {
                 if !(*s).read_eof {
-                    s = us_dispatch_end(s);
+                    s = follow_adopted(us_dispatch_end(s));
                 }
                 if !s.is_null() {
                     us_internal_socket_close_raw(s, LIBUS_SOCKET_CLOSE_CODE_CLEAN_SHUTDOWN, ptr::null_mut());
@@ -673,5 +710,116 @@ pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut 
             let socket_error = us_socket_get_error(s);
             us_internal_socket_close_raw(s, if socket_error > 2 { socket_error } else { libc::ECONNRESET }, ptr::null_mut());
         }
+    }
+}
+
+/// `us_internal_socket_follow_adopted`: a socket that `us_socket_adopt` moved, retired blocks walked to the live one.
+pub(crate) unsafe fn follow_adopted(mut s: *mut us_socket_t) -> *mut us_socket_t {
+    // SAFETY: retired blocks stay on the closed list until the outermost tick ends.
+    unsafe {
+        while !s.is_null() && (*s).adopted && !(*s).prev.is_null() {
+            s = (*s).prev;
+        }
+    }
+    s
+}
+
+/// recvmsg into `buf` with room for one fd: what it read, and the first fd the peer sent. Any other fd that came
+/// with it is closed, as the protocol is one per message.
+unsafe fn recv_with_fd(fd: c_int, buf: *mut u8) -> (isize, Option<c_int>) {
+    const SPACE: usize = 64;
+    let mut control = [0u64; SPACE / 8];
+    let mut iov = libc::iovec { iov_base: buf.cast(), iov_len: LIBUS_RECV_BUFFER_LENGTH };
+    // SAFETY: all-zero is an empty msghdr.
+    let mut msg: libc::msghdr = unsafe { core::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    // SAFETY: CMSG_SPACE is arithmetic.
+    msg.msg_controllen = unsafe { libc::CMSG_SPACE(core::mem::size_of::<c_int>() as u32) } as _;
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
+    let flags = libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC;
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
+    let flags = libc::MSG_DONTWAIT;
+    let length = loop {
+        // SAFETY: the msghdr points at `buf` and `control`.
+        let r = unsafe { libc::recvmsg(fd, &mut msg, flags) };
+        if r == -1 && errno() == libc::EINTR {
+            continue;
+        }
+        break r;
+    };
+    let mut received = None;
+    if length > 0 && msg.msg_controllen > 0 {
+        // SAFETY: the cmsg walk of what the kernel wrote into `control`.
+        unsafe {
+            let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+            while !cmsg.is_null() {
+                if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
+                    let data = libc::CMSG_DATA(cmsg);
+                    let count = ((*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / core::mem::size_of::<c_int>();
+                    for i in 0..count {
+                        let passed = data.add(i * core::mem::size_of::<c_int>()).cast::<c_int>().read_unaligned();
+                        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
+                        libc::fcntl(passed, libc::F_SETFD, libc::FD_CLOEXEC);
+                        if received.is_none() {
+                            received = Some(passed);
+                        } else {
+                            libc::close(passed);
+                        }
+                    }
+                }
+                cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+            }
+        }
+    }
+    (length, received)
+}
+
+/// Sends `data` with `fd` attached (SCM_RIGHTS): what was written, of which less than `length` means the fd did not
+/// go. -1 for an error that is not a full buffer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn us_socket_ipc_write_fd(s: *mut us_socket_t, data: *const c_char, length: c_int, fd: c_int) -> c_int {
+    // SAFETY: the caller's live socket and `length` bytes at `data`.
+    unsafe {
+        if (*s).is_closed || us_socket_is_shut_down(s) != 0 {
+            return 0;
+        }
+        let mut control = [0u64; 8];
+        let mut iov = libc::iovec { iov_base: data.cast_mut().cast(), iov_len: length.max(0) as usize };
+        let mut msg: libc::msghdr = core::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = libc::CMSG_SPACE(core::mem::size_of::<c_int>() as u32) as _;
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(core::mem::size_of::<c_int>() as u32) as _;
+        libc::CMSG_DATA(cmsg).cast::<c_int>().write_unaligned(fd);
+        let sent = loop {
+            let r = libc::sendmsg(fd_of(s), &msg, SEND_FLAGS);
+            if r == -1 && errno() == libc::EINTR {
+                continue;
+            }
+            break r;
+        };
+        if sent < 0 {
+            let full = matches!(errno(), libc::EAGAIN | libc::ENOBUFS);
+            // The fd has to fit in the buffer in one piece: macOS says EMSGSIZE where Linux says EAGAIN.
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            let full = full || errno() == libc::EMSGSIZE;
+            if full {
+                (*s).last_write_failed = true;
+                us_poll_change(&mut (*s).p, (*(*s).group).loop_, LIBUS_SOCKET_READABLE | LIBUS_SOCKET_WRITABLE);
+                return 0;
+            }
+            return -1;
+        }
+        if sent != length as isize {
+            (*s).last_write_failed = true;
+            rearm_writable(s);
+        }
+        sent as c_int
     }
 }
