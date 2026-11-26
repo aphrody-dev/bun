@@ -72,9 +72,8 @@ pub fn main(args: &[String]) -> i32 {
         let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
         outdir = Some(dir.to_string_lossy().into_owned());
     }
-    if let Some(dir) = &outdir {
-        this.options.output_dir = dir.as_bytes().into();
-    }
+    // No outdir: an empty output_dir keeps the chunks in memory, for stdout.
+    this.options.output_dir = outdir.as_deref().unwrap_or("").as_bytes().into();
     this.options.root_dir = options::default_root_dir(&this.options.entry_points).into();
     if this.configure_defines().is_err() {
         eprintln!("error: could not configure defines");
