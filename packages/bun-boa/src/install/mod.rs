@@ -3,6 +3,7 @@
 //! with the `ContextData` that `Command::create_context_data` gives these commands (they parse their own flags).
 //! Behind the `install` feature: what it reaches of uSockets, BoringSSL and Bun's C++ is still a stand-in (native.rs).
 
+mod digests;
 mod hooks;
 mod native;
 mod signals;

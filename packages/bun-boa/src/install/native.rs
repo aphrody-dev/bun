@@ -33,7 +33,7 @@ not_linked! {
         us_quic_ignore_receive_errors us_quic_is_routable us_quic_is_server_authorized us_quic_local_address
         us_quic_parse_address us_quic_read_envelope us_quic_resolved_address us_quic_send us_quic_set_dontfrag
         us_quic_stop_reading;
-    "BoringSSL (TLS, HTTP/3's QUIC crypto, SHA-1 and SHA-384/512 digests)":
+    "BoringSSL (TLS, HTTP/3's QUIC crypto)":
         SSL_CIPHER_get_protocol_id SSL_CTX_free SSL_CTX_set0_buffer_pool SSL_SESSION_free SSL_SESSION_from_bytes
         SSL_SESSION_get0_id_context SSL_do_handshake SSL_early_data_accepted SSL_free SSL_get0_alpn_selected
         SSL_get0_session_id_context SSL_get_SSL_CTX SSL_get_error SSL_get_ex_data
@@ -45,9 +45,8 @@ not_linked! {
         SSL_set_quic_use_legacy_codepoint SSL_set_renegotiate_mode SSL_set_session SSL_set_tlsext_host_name
         SSL_shutdown SSL_write EVP_AEAD_CTX_aead EVP_AEAD_CTX_free EVP_AEAD_CTX_new EVP_AEAD_CTX_open_gather
         EVP_AEAD_CTX_seal_scatter EVP_aead_aes_128_gcm EVP_aead_aes_256_gcm EVP_aead_chacha20_poly1305
-        EVP_sha1 EVP_sha384 EVP_sha512 EVP_sha512_256 AES_encrypt AES_set_encrypt_key CRYPTO_BUFFER_POOL_new
-        CRYPTO_chacha_20 ERR_clear_error ERR_get_error HKDF_expand HKDF_extract RAND_bytes SHA1_Final SHA1_Init
-        SHA1_Update;
+        AES_encrypt AES_set_encrypt_key CRYPTO_BUFFER_POOL_new CRYPTO_chacha_20 ERR_clear_error ERR_get_error
+        HKDF_expand HKDF_extract;
     "Bun's posix_spawn (src/jsc/bindings/bun-spawn.cpp)":
         posix_spawn_bun;
     "bun_runtime's DNS cache (src/runtime/dns_jsc/dns.rs), which uSockets' connect reads":

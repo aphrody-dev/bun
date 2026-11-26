@@ -22,6 +22,7 @@ build = ["dep:bun_bundler", "dep:bun_event_loop", "dep:bun_options_types"]
 # `bun install`, `bun add`, `bun remove`: Bun's package manager. It links, with stand-ins that stop the process for the
 # C/C++ it reaches (src/install/native.rs): its event loops and HTTP client are uSockets, its TLS and digests BoringSSL.
 install = [
+  "dep:bun_boringssl_sys",
   "dep:bun_crash_handler",
   "dep:bun_event_loop",
   "dep:bun_http",
@@ -32,7 +33,10 @@ install = [
   "dep:bun_ptr",
   "dep:bun_spawn",
   "dep:bun_yarr",
+  "dep:getrandom",
   "dep:libc",
+  "dep:sha1",
+  "dep:sha2",
   "dep:url",
 ]
 
@@ -42,6 +46,7 @@ boa_gc = { path = "../../src/boa/core/gc" }
 boa_runtime = { path = "../../src/boa/core/runtime" }
 bun_ast = { path = "../../src/ast" }
 bun_alloc = { path = "../../src/bun_alloc" }
+bun_boringssl_sys = { path = "../../src/boringssl_sys", optional = true }
 bun_bundler = { path = "../../src/bundler", optional = true, features = ["test_support"] }
 bun_clap = { path = "../../src/clap" }
 bun_event_loop = { path = "../../src/event_loop", optional = true }
@@ -71,10 +76,13 @@ bun_sema_standalone = { path = "../../src/sema/standalone" }
 bun_threading = { path = "../../src/threading" }
 bun_yarr = { path = "../../src/yarr", optional = true }
 bun_zstd = { path = "../../src/zstd" }
+getrandom = { version = "0.4", optional = true }
 icu_normalizer = { version = "~2.3.0", features = ["compiled_data", "utf16_iter"] }
 libc = { version = "0.2", optional = true }
 regress = { version = "0.12", features = ["utf16"] }
 serde_json = "1"
+sha1 = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
 url = { version = "2", optional = true }
 
 [build-dependencies]
