@@ -115,14 +115,12 @@ enum ValueStoreInner {
     /// the system's datetime library to be reconstructed and may diverge.
     Date(f64),
 
-    /// Allowed error types (see the structured clone algorithm page).
-    #[expect(unused)]
+    /// An error, as HTML's StructuredSerializeInternal keeps one: the constructor its name is one of (else
+    /// `Error`), its own `message`, and its stack.
     Error {
         kind: ErrorKind,
-        name: StringStore,
-        message: StringStore,
-        stack: StringStore,
-        cause: StringStore,
+        message: Option<StringStore>,
+        stack: Option<StringStore>,
     },
 
     /// Regular expression. We store the expression and its flags. Everything else
@@ -226,6 +224,21 @@ impl JsValueStore {
         context: &mut Context,
         transfer: Vec<JsValue>,
     ) -> JsResult<Self> {
+        Self::try_from_js_then(value, context, transfer, |_| Ok(()))
+    }
+
+    /// As [`try_from_js`](Self::try_from_js), with `commit` between the serialization and the transfer: an error it
+    /// returns (an embedder's transferred object that serializing made unusable) fails the clone before any
+    /// `ArrayBuffer` of `transfer` is detached.
+    ///
+    /// # Errors
+    /// Those of [`try_from_js`](Self::try_from_js), and what `commit` returns.
+    pub fn try_from_js_then(
+        value: &JsValue,
+        context: &mut Context,
+        transfer: Vec<JsValue>,
+        commit: impl FnOnce(&mut Context) -> JsResult<()>,
+    ) -> JsResult<Self> {
         let mut seen = from::SeenMap::default();
         let mut unique = FxHashSet::default();
         let mut transfers = Vec::with_capacity(transfer.len());
@@ -246,6 +259,7 @@ impl JsValueStore {
         }
 
         let v = from::try_from_js_value(value, &mut seen, context)?;
+        commit(context)?;
 
         for (buffer, mut store) in transfers {
             let data = buffer.detach(&JsValue::undefined())?;

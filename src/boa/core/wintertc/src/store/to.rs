@@ -4,12 +4,14 @@ use crate::store::{
     unsupported_type,
 };
 use boa_engine::builtins::array_buffer::{AlignedVec, SharedArrayBuffer};
+use boa_engine::builtins::error::ErrorKind;
+use boa_engine::property::PropertyDescriptor;
 use boa_engine::builtins::typed_array::TypedArrayKind;
 use boa_engine::object::builtins::{
     JsArray, JsArrayBuffer, JsDataView, JsDate, JsMap, JsRegExp, JsSet, JsSharedArrayBuffer,
     js_typed_array_from_kind,
 };
-use boa_engine::{Context, JsBigInt, JsObject, JsResult, JsString, JsValue, js_error};
+use boa_engine::{Context, JsBigInt, JsObject, JsResult, JsString, JsValue, js_string};
 use rustc_hash::FxHashMap;
 
 /// A Map of already reconstructed objects, keyed by the address of their
@@ -30,6 +32,41 @@ impl ReverseSeenMap {
         let addr = std::ptr::from_ref(original.0.as_ref()).addr();
         self.values.insert(addr, object);
     }
+}
+
+/// HTML's StructuredDeserialize for an `Error`: a new error of the constructor its kind names, with the `message`
+/// and the stack it had.
+fn try_into_js_error(
+    store: &JsValueStore,
+    kind: ErrorKind,
+    message: Option<&StringStore>,
+    stack: Option<&StringStore>,
+    seen: &mut ReverseSeenMap,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let constructors = context.intrinsics().constructors();
+    let constructor = match kind {
+        ErrorKind::Eval => constructors.eval_error(),
+        ErrorKind::Range => constructors.range_error(),
+        ErrorKind::Reference => constructors.reference_error(),
+        ErrorKind::Syntax => constructors.syntax_error(),
+        ErrorKind::Type => constructors.type_error(),
+        ErrorKind::Uri => constructors.uri_error(),
+        _ => constructors.error(),
+    }
+    .constructor();
+    let args: Vec<JsValue> = message.map(|m| m.to_js_string().into()).into_iter().collect();
+    let error = constructor.construct(&args, None, context)?;
+    if let Some(stack) = stack {
+        let descriptor = PropertyDescriptor::builder()
+            .value(stack.to_js_string())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true);
+        error.define_property_or_throw(js_string!("stack"), descriptor, context)?;
+    }
+    seen.insert(store, error.clone());
+    Ok(error.into())
 }
 
 fn try_fields_into_js_object(
@@ -230,7 +267,9 @@ fn try_value_into_js_inner(
         ValueStoreInner::Set(values) => try_into_js_set(store, values, seen, context),
         ValueStoreInner::Array(items) => try_items_into_js_array(store, items, seen, context),
         ValueStoreInner::Date(msec) => try_into_js_date(store, *msec, seen, context),
-        ValueStoreInner::Error { .. } => Err(js_error!("Not yet implemented.")),
+        ValueStoreInner::Error { kind, message, stack } => {
+            try_into_js_error(store, *kind, message.as_ref(), stack.as_ref(), seen, context)
+        }
         ValueStoreInner::RegExp { source, flags } => {
             try_into_regexp(store, source, flags, seen, context)
         }

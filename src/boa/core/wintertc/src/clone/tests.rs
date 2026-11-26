@@ -2,6 +2,38 @@ use crate::test::{TestAction, run_test_actions};
 use indoc::indoc;
 
 #[test]
+fn errors_keep_their_kind_message_and_stack() {
+    run_test_actions([TestAction::run(indoc! {r#"
+        const error = new RangeError("out of range");
+        const clone = structuredClone({ error, plain: new Error() });
+        if (!(clone.error instanceof RangeError) || clone.error.message !== "out of range" ||
+            clone.error.stack !== error.stack || clone.error === error) {
+            throw new Error("a RangeError did not come back as one");
+        }
+        if (Object.hasOwn(clone.plain, "message") || !(clone.plain instanceof Error)) {
+            throw new Error("an error without a message gained one");
+        }
+        class Custom extends Error { name = "Custom" }
+        if (structuredClone(new Custom("x")).constructor !== Error) {
+            throw new Error("an error of another name is not an Error");
+        }
+    "#})]);
+}
+
+#[test]
+fn only_enumerable_string_keys_are_cloned() {
+    run_test_actions([TestAction::run(indoc! {r#"
+        const value = { a: 1, [Symbol("s")]: 2 };
+        Object.defineProperty(value, "hidden", { value: 3, enumerable: false });
+        const clone = structuredClone(value);
+        if (JSON.stringify(Object.getOwnPropertyNames(clone)) !== '["a"]' ||
+            Object.getOwnPropertySymbols(clone).length !== 0) {
+            throw new Error("a symbol key or a non-enumerable property was cloned");
+        }
+    "#})]);
+}
+
+#[test]
 fn failed_serialization_keeps_transfer_buffer_attached() {
     run_test_actions([TestAction::run(indoc! {r#"
         const buffer = new ArrayBuffer(8);
