@@ -303,6 +303,11 @@ pub mod to_js {
     pub fn utf8<'a>(heap: &JsHeap<'a>, value: impl AsRef<[u8]>) -> Result<'a, JsLocal<'a>> {
         heap.create_utf8_string(value.as_ref())
     }
+
+    /// A new instance of a class whose payload is `value`, as JavaScriptCore's `into_js` of a `JsPayload`.
+    pub fn class<'a, T: crate::JsClass>(heap: &JsHeap<'a>, value: T) -> Result<'a, JsLocal<'a>> {
+        Ok(JsLocal::from_raw(crate::class::to_js(heap.global_object(), value)?))
+    }
 }
 
 /// Converting arguments, as C++'s conversion contexts do (see [`Context`]): a value of the wrong type throws

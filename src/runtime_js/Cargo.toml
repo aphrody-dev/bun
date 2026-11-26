@@ -1,6 +1,6 @@
 [package]
 name = "bun_runtime_js"
-description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff, Blob, File, FormData, Bun.file, Bun.write, Bun.Glob, Bun.deepEquals, the event loop, timers, fetch, Headers/Request/Response and Bun.serve."
+description = "bun_runtime's JS-visible APIs on bun_js: node:path, node:fs, bun:test's diff, Blob, File, FormData, Bun.file, Bun.write, Bun.Glob, Bun.deepEquals, the event loop, timers, fetch, Headers/Request/Response and Bun.serve."
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -12,7 +12,12 @@ path = "lib.rs"
 
 # The schemas this crate implements that are not in its directory: the JavaScriptCore build reads them too.
 [package.metadata.bun-js]
-bindings = ["../runtime/api/Glob.bind.ts", "../runtime/node/node_path.bind.ts", "../runtime/node/node_validators.bind.ts"]
+bindings = [
+  "../runtime/api/Glob.bind.ts",
+  "../runtime/node/node_fs_binding.bind.ts",
+  "../runtime/node/node_path.bind.ts",
+  "../runtime/node/node_validators.bind.ts",
+]
 
 [dependencies]
 boa_engine = { path = "../boa/core/engine", features = ["annex-b", "intl_bundled", "experimental"] }
@@ -29,6 +34,7 @@ bun_node_path = { path = "../node_path" }
 bun_paths = { path = "../paths" }
 bun_sys = { path = "../sys" }
 bun_text_diff = { path = "../text_diff" }
+bun_threading = { path = "../threading" }
 bun_usockets_rs = { path = "../usockets_rs" }
 bun_uws_sys = { path = "../uws_sys" }
 const_format = "0.2"

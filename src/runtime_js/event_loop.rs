@@ -116,6 +116,7 @@ pub struct EventLoop {
     running: Cell<Option<u32>>,
     /// The error a callback threw that nothing caught.
     uncaught: RefCell<Option<JsError>>,
+    work: crate::work_pool::WorkQueue,
 }
 
 impl EventLoop {
@@ -130,7 +131,12 @@ impl EventLoop {
             timers: RefCell::default(),
             running: Cell::new(None),
             uncaught: RefCell::default(),
+            work: crate::work_pool::WorkQueue::default(),
         }))
+    }
+
+    pub(crate) fn work_queue(&self) -> &crate::work_pool::WorkQueue {
+        &self.work
     }
 
     /// The loop of the realm.
@@ -245,6 +251,7 @@ impl EventLoop {
             .turn(Some(Duration::ZERO))
             .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
         self.reactor.take_woken();
+        self.take_completed_work();
         self.tick(context)?;
         self.run_timers(context)
     }

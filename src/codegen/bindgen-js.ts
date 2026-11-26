@@ -197,6 +197,8 @@ function toJs(type: Type, value: string): string {
   // The C++ build holds a result to the words of `.returning` for compiled code. Boa compiles none: no one reads them.
   if (type instanceof AnyType) return `bindgen::to_js::any(heap, ${value})`;
   if (type instanceof DictionaryType) return `${value}.into_js(heap)`;
+  // The body returns the payload of a new instance.
+  if (type instanceof ClassType) return `bindgen::to_js::class::<${type.rustPath}>(heap, ${value})`;
   return refuse(`a result of ${type.constructor.name} (${type.tsType})`);
 }
 
@@ -214,6 +216,8 @@ const orReturn = (expression: string) =>
 /** As C++'s `cppDeclareArgument`: `argument<i>`, the argument as the frame has it, or the rest of them, with a
  * `String` object made a string where the type says so. Every argument is declared, in order, before any is converted. */
 function declareArgument({ type }: Argument, i: number): string[] {
+  // `b.any.variadic`: the body takes the rest of the arguments as they are, `&[JSValue]`.
+  if (type instanceof VariadicType) return [`let argument${i} = frame.arguments().get(${i}..).unwrap_or_default();`];
   if (type instanceof RestType) {
     const values = `frame.arguments().get(${i}..).unwrap_or_default()`;
     if (!prepared(type.element)) return [`let argument${i} = ${values};`];
@@ -237,9 +241,7 @@ function body(
   finish: (result: string) => string = returnConverted(signature),
   beforeCall: string[] = [],
 ): string {
-  if (signature.args.some(arg => arg.type instanceof VariadicType)) refuse(".variadic");
   if (signature.rejects) refuse("rejects");
-  if (signature.replacesBoundFunction) refuse("replacesBoundFunction");
   for (const arg of signature.args)
     if (arg.expected !== undefined) refuse(`${arg.name}: expected (Node's ERR_INVALID_ARG_TYPE text)`);
   const lines: string[] = ["let heap = &cx.heap;"];
@@ -255,6 +257,10 @@ function body(
   signature.args.forEach((arg, i) => lines.push(...declareArgument(arg, i)));
   for (const i of signature.conversionOrder) {
     const arg = signature.args[i];
+    if (arg.type instanceof VariadicType) {
+      lines.push(`let ${names[i]} = argument${i};`);
+      continue;
+    }
     if (arg.type instanceof RestType) {
       lines.push(
         `let mut ${names[i]} = Vec::with_capacity(argument${i}.len());`,
@@ -321,6 +327,28 @@ ${indent(
 /// The function object of \`${fn.jsName}\`.
 pub fn create_${snakeCase(fn.name)}(global: &JSGlobalObject) -> JSValue {
     bun_js::JSFunction::${create}(global, ${rustString(fn.jsName)}, ${host}, ${fn.length})
+}
+`;
+}
+
+/** `b.value`: no function, the value the body makes, each time `$bindgen` asks for it. */
+function rustForValue(fn: FunctionDefinition, file: SchemaFile): string {
+  const signature = onlySignature(fn, fn.name);
+  if (signature.args.length) refuse(`${fn.name}: a b.value with arguments`);
+  const modulePath = file.moduleDefinition?.rustPath;
+  const target =
+    signature.rustPath ??
+    (modulePath ? `${modulePath}::${ident(snakeCase(fn.name))}` : refuse(`${fn.name}: a rustPath`));
+  return `
+/// \`$bindgen(file, ${rustString(fn.name)})\`: the value of \`${fn.name}\`.
+pub fn ${ident(snakeCase(fn.name))}(global: &JSGlobalObject) -> JsResult<JSValue> {
+${indent(
+  scoped(
+    "global",
+    body(signature, args => `${target}(${args.join(", ")})`),
+  ),
+  4,
+)}
 }
 `;
 }
@@ -708,9 +736,14 @@ function rustForFile(file: SchemaFile): string {
   }
   // As C++'s `$bindgen(file, name)`: every function by its key, those of a namespace too.
   for (const fn of file.functions) {
-    if (fn.isValue) refuse(`${fn.name}: b.value`);
     if (MODULE_ITEMS.has(snakeCase(fn.name)))
       throw new Error(`${fn.name}: the generated module has an item of that name`);
+    if (fn.isValue) {
+      items.push(rustForValue(fn, file));
+      exports.push(`(${rustString(fn.name)}, ${ident(snakeCase(fn.name))}(global)?),`);
+      natives.push(`${rustString(fn.name)} => return Some(${ident(snakeCase(fn.name))}(global)),`);
+      continue;
+    }
     items.push(rustForFunction(fn, file));
     exports.push(`(${rustString(fn.name)}, create_${snakeCase(fn.name)}(global)),`);
     natives.push(`${rustString(fn.name)} => Ok(create_${snakeCase(fn.name)}(global)),`);

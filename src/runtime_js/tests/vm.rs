@@ -2,6 +2,7 @@
 //! whose global forwards its properties to the context object.
 
 use bun_js::JSGlobalObject;
+use bun_sema_standalone as _;
 
 fn check(cases: &[(&str, &str)]) {
     JSGlobalObject::with_new(|global| {

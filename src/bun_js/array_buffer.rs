@@ -41,6 +41,77 @@ impl JSValue {
         Ok(None)
     }
 
+    /// The bytes of a view, as [`array_buffer_view_bytes`](Self::array_buffer_view_bytes), or of an `ArrayBuffer` or
+    /// a `SharedArrayBuffer` itself: what node:fs takes as data or as a path.
+    pub fn array_buffer_or_view_bytes(&self, global: &JSGlobalObject) -> JsResult<Option<Vec<u8>>> {
+        if self.is_array_buffer_view() {
+            return self.array_buffer_view_bytes(global);
+        }
+        buffer_bytes(global, self.0.as_object().as_ref())
+    }
+
+    /// How many bytes a typed array or a `DataView` views; `None` for anything else.
+    pub fn array_buffer_view_byte_length(&self, global: &JSGlobalObject) -> JsResult<Option<usize>> {
+        let Some(object) = self.0.as_object() else {
+            return Ok(None);
+        };
+        if let Ok(array) = JsTypedArray::from_object(object.clone()) {
+            let length = array.byte_length(global.cx());
+            return global.lift(length).map(Some);
+        }
+        if let Ok(view) = JsDataView::from_object(object) {
+            let length = view.byte_length(global.cx());
+            return global.lift(length).map(|n| Some(n as usize));
+        }
+        Ok(None)
+    }
+
+    /// Whether this is a `Uint8Array` (a `Buffer` is one), a `DataView` or an `ArrayBuffer`: the buffers that
+    /// node:fs takes a path in.
+    pub fn is_uint8_array_data_view_or_array_buffer(&self) -> bool {
+        self.0.as_object().is_some_and(|object| {
+            JsUint8Array::from_object(object.clone()).is_ok()
+                || JsDataView::from_object(object.clone()).is_ok()
+                || JsArrayBuffer::from_object(object).is_ok()
+        })
+    }
+
+    /// Copies `bytes` into the view at `offset`, as much as fits: how many were copied. A view of a detached or a
+    /// shared buffer takes none.
+    pub fn write_array_buffer_view(&self, global: &JSGlobalObject, offset: usize, bytes: &[u8]) -> JsResult<usize> {
+        let Some(object) = self.0.as_object() else {
+            return Ok(0);
+        };
+        let (buffer, view_offset, view_length) = if let Ok(array) = JsTypedArray::from_object(object.clone()) {
+            let buffer = array.buffer(global.cx());
+            let buffer = global.lift(buffer)?;
+            let view_offset = array.byte_offset(global.cx());
+            let view_offset = global.lift(view_offset)?;
+            let view_length = array.byte_length(global.cx());
+            (buffer, view_offset, global.lift(view_length)?)
+        } else if let Ok(view) = JsDataView::from_object(object) {
+            let buffer = view.buffer(global.cx());
+            let buffer = global.lift(buffer)?;
+            let view_offset = view.byte_offset(global.cx());
+            let view_offset = global.lift(view_offset)? as usize;
+            let view_length = view.byte_length(global.cx());
+            (buffer, view_offset, global.lift(view_length)? as usize)
+        } else {
+            return Ok(0);
+        };
+        let Some(buffer) = buffer.as_object().and_then(|b| JsArrayBuffer::from_object(b).ok()) else {
+            return Ok(0);
+        };
+        let Some(mut data) = buffer.data_mut() else {
+            return Ok(0);
+        };
+        let start = view_offset + offset.min(view_length);
+        let end = (view_offset + view_length).min(data.len());
+        let n = bytes.len().min(end.saturating_sub(start));
+        data[start..start + n].copy_from_slice(&bytes[..n]);
+        Ok(n)
+    }
+
     /// A `Buffer` of `bytes`, as `bun_jsc`'s `create_buffer`: a `Uint8Array` whose prototype is
     /// `Buffer.prototype`, where the realm has `Buffer`; a plain `Uint8Array` otherwise.
     pub fn create_buffer(global: &JSGlobalObject, bytes: &[u8]) -> JsResult<JSValue> {

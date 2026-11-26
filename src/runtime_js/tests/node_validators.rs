@@ -2,6 +2,7 @@
 //! expected error is what NodeValidatorBodies.h and ErrorCode.cpp throw for the same call.
 
 use bun_js::JSGlobalObject;
+use bun_sema_standalone as _;
 
 const NAMES: [&str; 13] = [
     "validateInteger",

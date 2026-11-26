@@ -94,3 +94,22 @@ export const Counter = b.class({
     zero: { returns: b.u32 },
   },
 });
+
+/** `b.any.variadic`: the body takes the arguments as they are; `replacesBoundFunction` is an ordinary function here. */
+export const countArguments = b.fn({
+  args: { args: b.any.variadic },
+  returns: b.u32,
+  length: 2,
+  replacesBoundFunction: true,
+});
+
+/** A class that only Rust makes, with a method of `b.any.variadic`. */
+export const Tally = b.class({
+  rustPath: "crate::fixture::Tally",
+  proto: {
+    sum: { args: { values: b.any.variadic }, returns: b.f64, capability: "js", throws: true, length: 1 },
+  },
+});
+
+/** `b.value`: the instance the body makes. */
+export const tally = b.value({ returns: Tally, capability: "js" });

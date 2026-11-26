@@ -24,6 +24,9 @@
   setAsyncContext(value: unknown): void;
   isAsyncContextTracked(): boolean;
   internalFields: WeakMap<object, unknown[]>;
+  /** `process.binding('constants').fs` and `.os` (bun_runtime_js `node_fs_constant`). */
+  fsConstants: Record<string, number>;
+  osConstants: Record<string, unknown>;
   specifiers: string[];
   native: boolean[];
   StringDecoder: new (encoding?: unknown) => object;
@@ -230,6 +233,7 @@
     ERR_INVALID_STATE: state => `Invalid state: ${state}`,
     ERR_USE_AFTER_CLOSE: what => `${what} was closed`,
     ERR_INVALID_URL_SCHEME: scheme => `The URL must be of scheme ${scheme}`,
+    ERR_DIR_CLOSED: () => "Directory handle was closed",
   };
   function makeErrorWithCode(code: number, ...args: unknown[]) {
     const format = MESSAGES[native.errorCode(code)];
@@ -300,7 +304,11 @@
     "node:process": () => G.process,
     "node:buffer": () => ({ Buffer: G.Buffer, kMaxLength: 2 ** 32, constants: { MAX_LENGTH: 2 ** 32 } }),
     "node:util/types": () => utilTypes,
-    "node:constants": () => ({ ...processBindingConstants.os, ...processBindingConstants.fs }),
+    // Node's lib/constants.js: the os constants flattened, then fs's and crypto's.
+    "node:constants": () => {
+      const { dlopen, errno, priority, signals } = processBindingConstants.os as Record<string, object>;
+      return { ...dlopen, ...errno, ...priority, ...signals, ...processBindingConstants.fs, ...processBindingConstants.crypto };
+    },
     "node:string_decoder": () => ({ StringDecoder: stringDecoder(native.StringDecoder) }),
     "bun:jsc": () => bunJSC,
     "node:module": () => nodeModule,
@@ -423,7 +431,12 @@
     isKeyObject: () => false,
     isCryptoKey: () => false,
   };
-  const processBindingConstants: Record<string, Record<string, unknown>> = { os: {}, fs: {}, crypto: {}, zlib: {} };
+  const processBindingConstants: Record<string, Record<string, unknown>> = {
+    os: native.osConstants,
+    fs: native.fsConstants,
+    crypto: {},
+    zlib: {},
+  };
 
   // ───────────────────────── bun:jsc and node:module ─────────────────────────
   // The exports of src/jsc/modules/BunJSCModule.h. What only JavaScriptCore can say (its JIT, its heap) is a stub.

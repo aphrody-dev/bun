@@ -131,6 +131,30 @@ mod fixture {
             self.count
         }
     }
+
+    pub fn count_arguments(args: &[JSValue]) -> u32 {
+        args.len() as u32
+    }
+
+    #[derive(Trace, Finalize)]
+    pub struct Tally {
+        pub base: f64,
+    }
+
+    impl Tally {
+        pub fn sum(&self, cx: &mut JsScope<'_>, values: &[JSValue]) -> JsResult<f64> {
+            let global = cx.global();
+            let mut total = self.base;
+            for value in values {
+                total += value.to_number(global)?;
+            }
+            Ok(total)
+        }
+    }
+
+    pub fn tally(_: &mut JsScope<'_>) -> Tally {
+        Tally { base: 0.5 }
+    }
 }
 
 mod generated {
@@ -675,6 +699,28 @@ impl bun_js::JsClass for Holder {
             },
         )
     }
+}
+
+#[test]
+fn variadic_arguments_and_values() {
+    realm(|global| {
+        assert_eq!(eval(global, "countArguments() + ':' + countArguments(1, 'a', {})"), "0:3");
+        assert_eq!(eval(global, "countArguments.length"), "2");
+        // `b.value`: `$bindgen` answers the instance, made each time it is asked for.
+        let tally = generated::native(global, "fixture.bind.ts", "tally").expect("tally").unwrap();
+        global.to_js_value().put(global, "t", tally);
+        assert_eq!(eval(global, "t.sum(1, 2, '3') + ':' + t.sum()"), "6.5:0.5");
+        assert_eq!(eval(global, "Object.prototype.toString.call(t)"), "[object Tally]");
+        assert_eq!(
+            thrown(global, "t.sum({ valueOf() { throw new RangeError('no') } })"),
+            "RangeError: no (undefined)"
+        );
+        // Only Rust makes one.
+        assert_eq!(
+            thrown(global, "new t.constructor()"),
+            "TypeError: Illegal constructor (ERR_ILLEGAL_CONSTRUCTOR)"
+        );
+    });
 }
 
 #[test]
