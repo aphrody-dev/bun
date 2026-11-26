@@ -3,7 +3,7 @@
 [workspace]
 resolver = "2"
 # bun_js and the crates on it are members: Bun's root workspace does not build Boa.
-members = ["cdp", "../../src/bun_js", "../../src/runtime_js", "../../src/semver_js", "../../src/sqlite_js"]
+members = ["cdp", "../../src/bun_js", "../../src/runtime_js", "../../src/semver_js", "../../src/sqlite_js", "../../src/usockets_rs"]
 
 [package]
 name = "bun-boa"
@@ -19,8 +19,8 @@ path = "src/main.rs"
 [features]
 # `bun build`: links Bun's bundler, whose graph still reaches C/C++ (uws, BoringSSL, Highway, lol-html).
 build = ["dep:bun_bundler", "dep:bun_event_loop", "dep:bun_options_types"]
-# `bun install`, `bun add`, `bun remove`: Bun's package manager. It links, with stand-ins that stop the process for the
-# C/C++ it reaches (src/install/native.rs): its event loops and HTTP client are uSockets, its TLS and digests BoringSSL.
+# `bun install`, `bun add`, `bun remove`: Bun's package manager, on Rust uSockets (src/usockets_rs) and the Rust ports
+# in src/install. What it reaches of C/C++ that has no Rust yet stops the process (src/install/native.rs).
 install = [
   "dep:bun_boringssl_sys",
   "dep:bun_crash_handler",
@@ -32,6 +32,8 @@ install = [
   "dep:bun_options_types",
   "dep:bun_ptr",
   "dep:bun_spawn",
+  "dep:bun_usockets_rs",
+  "dep:bun_uws_sys",
   "dep:bun_yarr",
   "dep:getrandom",
   "dep:libc",
@@ -67,6 +69,8 @@ bun_paths = { path = "../../src/paths" }
 bun_ptr = { path = "../../src/ptr", optional = true }
 bun_spawn = { path = "../../src/spawn", optional = true }
 bun_sys = { path = "../../src/sys" }
+bun_usockets_rs = { path = "../../src/usockets_rs", optional = true }
+bun_uws_sys = { path = "../../src/uws_sys", optional = true }
 bun_sema = { path = "../../src/sema" }
 bun_sourcemap = { path = "../../src/sourcemap" }
 bun_semver_js = { path = "../../src/semver_js" }

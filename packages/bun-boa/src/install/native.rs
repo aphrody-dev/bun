@@ -1,7 +1,6 @@
 //! The C and C++ symbols that `bun_install`'s graph links against and that no Rust in this build defines yet. Each
 //! stops the process with its name and where it lives in Bun's build. Weak, so a real definition wins wherever one is
-//! linked. Every `bun install` reaches uSockets: the HTTP thread that `PackageManager::init` starts puts its socket
-//! group on a uSockets loop (`us_socket_group_init`), and the main thread waits on one (`us_loop_run_bun_tick`).
+//! linked.
 
 macro_rules! not_linked {
     ($($from:literal: $($name:ident)*;)*) => {
@@ -16,23 +15,19 @@ macro_rules! not_linked {
 }
 
 not_linked! {
-    "uSockets (packages/bun-usockets) and uWebSockets (src/uws_sys/libuwsockets.cpp)":
-        uws_get_loop us_wakeup_loop us_loop_run_bun_tick us_internal_enable_sweep_timer us_internal_disable_sweep_timer
-        us_socket_group_init us_socket_group_deinit us_socket_group_close_all us_socket_group_connect
-        us_socket_group_connect_unix us_socket_close us_socket_ext us_socket_flush us_socket_get_error
-        us_socket_get_fd us_socket_get_native_handle us_socket_is_closed us_socket_is_established
-        us_socket_is_shut_down us_socket_long_timeout us_socket_pause us_socket_queued_input us_socket_resume
-        us_socket_sendfile_needs_more us_socket_shutdown us_socket_timeout us_socket_write
-        us_connecting_socket_close us_connecting_socket_ext us_connecting_socket_get_error
-        us_connecting_socket_get_native_handle us_connecting_socket_is_closed us_connecting_socket_is_shut_down
-        us_connecting_socket_long_timeout us_connecting_socket_shutdown us_connecting_socket_timeout
-        us_get_local_address_info us_get_remote_address_info us_ssl_ctx_from_options
-        us_ssl_socket_verify_error_from_ssl us_ssl_take_error_reason us_create_udp_socket
-        us_udp_packet_buffer_payload us_udp_packet_buffer_payload_length us_udp_socket_buffer_size
-        us_udp_socket_close us_udp_socket_user us_quic_create_client_ssl_ctx us_quic_enable_offload
-        us_quic_ignore_receive_errors us_quic_is_routable us_quic_is_server_authorized us_quic_local_address
-        us_quic_parse_address us_quic_read_envelope us_quic_resolved_address us_quic_send us_quic_set_dontfrag
-        us_quic_stop_reading;
+    "uSockets' TLS (packages/bun-usockets/src/crypto/openssl.cpp)":
+        us_ssl_ctx_from_options us_ssl_socket_verify_error_from_ssl us_ssl_take_error_reason us_socket_session_sink
+        us_socket_set_session_sink us_socket_set_inline_reject us_ssl_identity_checked us_ssl_set_wrapper
+        us_ssl_wrapper_from_verify us_internal_ssl_client_verify_defaults;
+    "BoringSSL's X.509 and BIO (the server-identity check, TLS through an HTTPS proxy)":
+        ASN1_STRING_to_UTF8 BIO_clear_retry_flags BIO_get_data BIO_get_new_index BIO_meth_new BIO_meth_set_ctrl
+        BIO_meth_set_read BIO_meth_set_write BIO_new BIO_set_data BIO_set_init BIO_set_retry_read GENERAL_NAME_free
+        OPENSSL_free SSL_CTX_up_ref SSL_clear_options SSL_enable_ocsp_stapling SSL_enable_signed_cert_timestamps
+        SSL_get_peer_cert_chain SSL_set_bio SSL_set_options SSL_set_session_id_context SSL_set_verify X509V3_EXT_d2i
+        X509V3_EXT_get X509V3_EXT_get_nid X509_NAME_ENTRY_get_data X509_NAME_get_entry X509_NAME_get_index_by_NID
+        X509_get_ext X509_get_ext_by_NID X509_get_subject_name i2d_X509 sk_num sk_pop_free_ex sk_value;
+    "UTS #46 ToASCII of the server-identity check (src/jsc/bindings/NodeURL.cpp)":
+        Bun__idnaToASCII;
     "BoringSSL (TLS, HTTP/3's QUIC crypto)":
         SSL_CIPHER_get_protocol_id SSL_CTX_free SSL_CTX_set0_buffer_pool SSL_SESSION_free SSL_SESSION_from_bytes
         SSL_SESSION_get0_id_context SSL_do_handshake SSL_early_data_accepted SSL_free SSL_get0_alpn_selected
@@ -47,11 +42,11 @@ not_linked! {
         EVP_AEAD_CTX_seal_scatter EVP_aead_aes_128_gcm EVP_aead_aes_256_gcm EVP_aead_chacha20_poly1305
         AES_encrypt AES_set_encrypt_key CRYPTO_BUFFER_POOL_new CRYPTO_chacha_20 ERR_clear_error ERR_get_error
         HKDF_expand HKDF_extract;
-    "bun_runtime's DNS cache (src/runtime/dns_jsc/dns.rs), which uSockets' connect reads":
+    "bun_runtime's DNS cache (src/runtime/dns_jsc/dns.rs), which HTTP/3's connect reads":
         Bun__addrinfo_get Bun__addrinfo_freeRequest;
     "bun_runtime's TLS over a duplex stream (src/runtime/socket/UpgradedDuplex.rs)":
         UpgradedDuplex__close UpgradedDuplex__encode_and_write UpgradedDuplex__flush UpgradedDuplex__is_closed
         UpgradedDuplex__is_established UpgradedDuplex__is_shutdown UpgradedDuplex__pause_stream
         UpgradedDuplex__resume_stream UpgradedDuplex__set_timeout UpgradedDuplex__shutdown UpgradedDuplex__ssl
-        UpgradedDuplex__ssl_error;
+        UpgradedDuplex__ssl_error UpgradedDuplex__set_inline_reject;
 }

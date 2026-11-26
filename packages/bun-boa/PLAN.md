@@ -49,8 +49,9 @@ Already Rust and reused as is: `js_parser`, `js_printer`, `ast`, `resolver`, `cs
    `console`, `process`, `Bun.file`/`Bun.write`/`Bun.env`/`Bun.version`, top-level await.
 2. **CLI reuse**: `bun fmt`, `bun lint`, `bun run <script>`, `bun build` (decouple
    `bundler`→`event_loop`→`uws` from `bun_jsc_macros`/uWS), `bun install`/`add`/`remove` (the `install` feature:
-   `bun_install` links without `bun_jsc`; it runs once uSockets' loop and client sockets, BoringSSL's SHA-1/SHA-512
-   and TLS, WTF's URL and date parser, and `posix_spawn_bun` have Rust in `src/install/native.rs`'s place).
+   `bun_install` without `bun_jsc`, on `src/usockets_rs`, which is uSockets' loop and TCP clients in Rust, and the
+   ports in `src/install`: WTF strings, URL and dates, the digests, `posix_spawn_bun`. TLS is next; what is left of
+   C/C++ on its path is listed in `src/install/native.rs`).
 3. **Web APIs**: `fetch` (Rust HTTP plus rustls), `URL`, `TextEncoder`/`TextDecoder`, streams, `Blob`,
    WebCrypto, `Bun.serve`.
 4. **Node compat**: run Bun's own `src/js/node/*` builtins on Boa by providing their `$` intrinsics in Rust.

@@ -8,7 +8,12 @@ mod hooks;
 mod native;
 mod signals;
 mod spawn;
+mod syscalls;
+mod uws_dispatch;
 mod wtf;
+
+// The `us_*` C ABI, which nothing names in Rust.
+use bun_usockets_rs as _;
 
 use bun_core::{Global, Output};
 use bun_install::package_manager_real::{
@@ -37,6 +42,8 @@ pub fn main(subcommand: Subcommand) -> ! {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
     }
+    // As `Cli::start`: the package manager wakes the main thread's loop, which it finds by this.
+    bun_crash_handler::cli_state::set_main_thread_id(bun_threading::current_thread_id());
     bun_core::set_start_time(bun_core::time::nano_timestamp());
     bun_core::output::stdio::init();
     let _flush = bun_core::output::flush_guard();
