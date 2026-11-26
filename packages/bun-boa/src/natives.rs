@@ -8,5 +8,10 @@ pub fn bindgen(global: &JSGlobalObject, file: &str, symbol: &str) -> Option<JsRe
 }
 
 pub fn cpp(global: &JSGlobalObject, file: &str, symbol: &str) -> Option<JsResult<JSValue>> {
-    bun_runtime_js::cpp(global, file, symbol)
+    match (file, symbol) {
+        ("JSSQLStatement.cpp", "createJSSQLStatementConstructor") => {
+            Some(bun_sqlite_js::create_constructor(global))
+        }
+        _ => bun_runtime_js::cpp(global, file, symbol),
+    }
 }

@@ -464,6 +464,19 @@ fn semver_is_bound_through_bun_js() {
     assert!(out.status.success(), "{all}");
 }
 
+/// bun:sqlite: src/js/bun/sqlite.ts on bun_sqlite_js, over Turso, and Bun.SQL's sqlite adapter on it.
+#[test]
+fn sqlite_runs_on_turso() {
+    let out = bun()
+        .args(["test", "sqlite.test.ts"])
+        .current_dir(fixtures().join("sqlite"))
+        .output()
+        .unwrap();
+    let all = format!("{}{}", text(&out).0, text(&out).1);
+    assert!(all.contains(" 6 pass") && all.contains(" 0 fail"), "{all}");
+    assert!(out.status.success(), "{all}");
+}
+
 /// Bun's builtin modules (src/js), `require` and `__dirname` in an ES module, CommonJS modules, tsconfig.json
 /// `paths`, and the helpers the transpiler imports from `bun:wrap` (`using`).
 #[test]

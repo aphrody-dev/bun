@@ -22,6 +22,7 @@
   asyncContext(): unknown;
   setAsyncContext(value: unknown): void;
   isAsyncContextTracked(): boolean;
+  internalFields: WeakMap<object, unknown[]>;
   specifiers: string[];
   native: boolean[];
   installed?: { require(id: number): unknown; esm(id: number): [string, unknown][] };
@@ -50,7 +51,8 @@
   member(G, "Array", Array);
 
   // ───────────────────────── internal fields ─────────────────────────
-  const fields = new WeakMap<object, unknown[]>();
+  // Rust's (bun_js `JSObject::put_internal_field`): a native like bun:sqlite's `run` writes them.
+  const fields = native.internalFields;
   const fieldsOf = (object: object) => {
     let list = fields.get(object);
     if (!list) fields.set(object, (list = []));
@@ -312,7 +314,20 @@
     "BunProcess.cpp:js2native_wrap_jsFunctionReportUncaughtException": () => (error: unknown) => console.error(error),
     "stringWidth.cpp:js2native_wrap_jsFunctionBunStringWidth": () =>
       typeof G.Bun?.stringWidth === "function" ? G.Bun.stringWidth : (s: string) => String(s).length,
+    // There is no Bun.ModuleGraph on Boa: no frame is inside one.
+    "ModuleGraph.cpp:js2native_wrap_jsFunctionModuleGraphOfFrame": () => () => undefined,
+    "ModuleGraph.cpp:js2native_wrap_jsFunctionModuleGraphFrameOfFrame": () => () => undefined,
+    // bun:sql loads every adapter. `init` hands the driver the callbacks of its queries; there is no driver of
+    // PostgreSQL or MySQL on Boa yet, so only connecting throws.
+    "postgres.bind.ts:binding": () => sqlDriverBinding("PostgreSQL"),
+    "mysql.bind.ts:binding": () => sqlDriverBinding("MySQL"),
   };
+  function sqlDriverBinding(name: string) {
+    const unported = () => {
+      throw new Error(`Bun.SQL's ${name} adapter is not implemented on Boa yet`);
+    };
+    return { init() {}, createConnection: unported, createQuery: unported };
+  }
 
   const lazyValues = new Map<number, unknown>();
   function lazy(id: number) {
@@ -593,6 +608,29 @@
     inspect.custom = Symbol.for("nodejs.util.inspect.custom");
     inspect.table = missing("Bun.inspect.table");
     G.Bun.inspect = inspect;
+  }
+
+  // Bun.SQL, Bun.sql and Bun.postgres: bun:sql's exports, loaded the first time one is read (BunObject.cpp's
+  // `createBunSQLConstructor` and `createBunSql`).
+  if (G.Bun && !("SQL" in G.Bun)) {
+    const id = native.specifiers.indexOf("bun:sql");
+    const own = (name: string, value: unknown) =>
+      defineProperty(G.Bun, name, { value, writable: true, enumerable: true, configurable: true });
+    for (const [name, key] of [
+      ["SQL", "SQL"],
+      ["sql", "default"],
+      ["postgres", "default"],
+    ])
+      defineProperty(G.Bun, name, {
+        get() {
+          const value = (createInternalModuleById(id) as any)[key];
+          own(name, value);
+          return value;
+        },
+        set: value => own(name, value),
+        enumerable: true,
+        configurable: true,
+      });
   }
 
   native.installed = {
