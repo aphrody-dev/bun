@@ -3,6 +3,19 @@ use boa_macros::js_str;
 use indoc::indoc;
 
 #[test]
+fn async_called_as_a_function() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            var async = x => x === undefined ? "none" : typeof x === "function" ? x() : x + 1;
+            var calls = [async(() => "arrow"), async(1), async(), async("a")].join();
+            var arrows = [(async () => 1)(), (async (a, b) => a + b)(1, 2), (async ({ a }) => a)({ a: 3 })];
+        "#}),
+        TestAction::assert_eq("calls", js_str!("arrow,2,none,a1")),
+        TestAction::assert_eq("arrows.every(p => p instanceof Promise)", true),
+    ]);
+}
+
+#[test]
 fn function_declaration_returns_undefined() {
     run_test_actions([TestAction::assert_eq(
         "function abc() {}",

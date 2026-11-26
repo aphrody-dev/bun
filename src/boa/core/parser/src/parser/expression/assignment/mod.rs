@@ -15,7 +15,7 @@ mod r#yield;
 
 use crate::{
     Error,
-    lexer::{Error as LexError, InputElement, TokenKind},
+    lexer::{Error as LexError, InputElement, Token, TokenKind},
     parser::{
         AllowAwait, AllowIn, AllowYield, Cursor, OrAbrupt, ParseResult, TokenParser,
         expression::{
@@ -165,10 +165,29 @@ impl AssignmentExpression {
                 };
 
                 let peek_1 = cursor.peek(1, interner).or_abrupt()?.kind().clone();
+                // CoverCallExpressionAndAsyncArrowHead: `async(` is a call where what follows cannot start the
+                // parameters of an arrow function, as in `async(() => x)` or `async(1)`, or where `async()` is
+                // not followed by `=>`.
+                let parameters_follow =
+                    matches!(peek_1, TokenKind::Punctuator(Punctuator::OpenParen))
+                        && match cursor.peek(2, interner).or_abrupt()?.kind() {
+                            TokenKind::Punctuator(Punctuator::CloseParen) => matches!(
+                                cursor.peek(3, interner)?.map(Token::kind),
+                                Some(TokenKind::Punctuator(Punctuator::Arrow))
+                            ),
+                            TokenKind::IdentifierName(_)
+                            | TokenKind::Keyword(_)
+                            | TokenKind::Punctuator(
+                                Punctuator::OpenBracket
+                                | Punctuator::OpenBlock
+                                | Punctuator::Spread,
+                            ) => true,
+                            _ => false,
+                        };
                 if !cursor
                     .peek_is_line_terminator(skip_n, interner)
                     .or_abrupt()?
-                    && (matches!(peek_1, TokenKind::Punctuator(Punctuator::OpenParen))
+                    && (parameters_follow
                         || (matches!(
                             peek_1,
                             TokenKind::IdentifierName(_)
