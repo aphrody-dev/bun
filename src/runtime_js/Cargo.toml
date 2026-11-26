@@ -1,6 +1,6 @@
 [package]
 name = "bun_runtime_js"
-description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff, Blob, File, Bun.file, Bun.write, Bun.Glob."
+description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff, Blob, File, Bun.file, Bun.write, Bun.Glob, Bun.deepEquals."
 version = "0.0.0"
 edition = "2024"
 publish = false

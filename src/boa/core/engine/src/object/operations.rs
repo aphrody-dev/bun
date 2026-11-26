@@ -414,6 +414,18 @@ impl JsObject {
         self.__own_property_keys__(context)
     }
 
+    /// `O.[[GetOwnProperty]](P)`: the descriptor of an own property, which a proxy's trap answers for it.
+    pub fn get_own_property<K>(
+        &self,
+        key: K,
+        context: &mut Context,
+    ) -> JsResult<Option<PropertyDescriptor>>
+    where
+        K: Into<PropertyKey>,
+    {
+        self.__get_own_property__(&key.into(), &mut InternalMethodPropertyContext::new(context))
+    }
+
     /// `Call ( F, V [ , argumentsList ] )`
     ///
     /// # Panics

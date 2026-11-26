@@ -18,6 +18,7 @@ const OPS = "__bun_native_ops__";
   stderr: Blob;
   // bun_runtime_js::bun_object
   Glob: new (pattern: string) => unknown;
+  deepEquals(a: unknown, b: unknown, strict?: boolean, skipPrototype?: boolean): boolean;
   env: Record<string, string>;
   argv: string[];
   main: string;
@@ -43,6 +44,7 @@ const OPS = "__bun_native_ops__";
     cwd: native.cwd,
     semver: native.semver,
     Glob: native.Glob,
+    deepEquals: native.deepEquals,
     fileURLToPath(url: unknown): string {
       const parsed = url instanceof URL ? url : new URL(String(url));
       if (parsed.protocol !== "file:") throw new TypeError("The URL must be of scheme file");

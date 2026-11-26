@@ -15,10 +15,12 @@
 
 #![warn(unused_must_use)]
 
+mod array_buffer;
 mod async_context;
 pub mod bindgen;
 mod call_frame;
 pub mod class;
+mod deep_equals;
 mod error_code;
 mod exception;
 mod global;
@@ -35,6 +37,7 @@ pub use async_context::AsyncContextJobExecutor;
 pub use bun_core::JsError;
 pub use call_frame::CallFrame;
 pub use class::{ClassRef, JsClass};
+pub use deep_equals::DeepEqualsMode;
 pub use error_code::{ErrorCode, ErrorKind};
 pub use exception::TopExceptionScope;
 pub use global::JSGlobalObject;

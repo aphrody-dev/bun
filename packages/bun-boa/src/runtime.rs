@@ -118,7 +118,7 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
         bun_runtime_js::webcore::blob::exports(global)
             .map_err(|error| global.into_engine_error(error))?,
     );
-    // And what else of `Bun` bun_runtime_js implements (`Bun.Glob`).
+    // And what else of `Bun` bun_runtime_js implements (`Bun.Glob`, `Bun.deepEquals`).
     bound.extend(
         bun_runtime_js::bun_object(global).map_err(|error| global.into_engine_error(error))?,
     );

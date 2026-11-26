@@ -28,7 +28,9 @@ pub fn cpp(global: &bun_js::JSGlobalObject, file: &str, symbol: &str) -> Option<
     }
 }
 
-/// The properties of `Bun` this crate implements besides Blob's, by name: `Bun.Glob`.
+/// The properties of `Bun` this crate implements besides Blob's, by name: `Bun.Glob`, `Bun.deepEquals`.
 pub fn bun_object(global: &JSGlobalObject) -> JsResult<Vec<(&'static str, JSValue)>> {
-    generated_bindgen::glob::exports(global)
+    let mut properties = generated_bindgen::glob::exports(global)?;
+    properties.extend(api::bun_object::functions(global));
+    Ok(properties)
 }
