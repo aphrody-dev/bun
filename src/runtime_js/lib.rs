@@ -5,10 +5,13 @@
 //! [`generated_bindgen::native`] is what `$bindgen(file, symbol)` answers, [`cpp`] what `$cpp(file, symbol)` and
 //! `$newCppFunction(file, symbol, length)` do.
 
+mod engine;
 pub mod generated_bindgen;
 pub mod node;
+pub mod sys_js;
 pub mod test_runner;
 pub mod web;
+pub mod webcore;
 
 /// The natives that the JavaScriptCore build has in C++ (`src/jsc/bindings/<file>`), ported: `None` for one that
 /// is not.

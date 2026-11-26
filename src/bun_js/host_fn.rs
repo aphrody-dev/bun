@@ -72,4 +72,21 @@ impl JSFunction {
         );
         function
     }
+
+    /// As [`create`](Self::create), as a function that `new` can call too: `frame.this()` is then the `new.target`, as for a class's
+    /// constructor.
+    pub fn create_constructor(
+        global: &JSGlobalObject,
+        name: &str,
+        f: JSHostFn,
+        length: usize,
+    ) -> JSValue {
+        let context = global.cx();
+        let function = FunctionObjectBuilder::new(context.realm(), native_function(f))
+            .name(JsString::from(name))
+            .length(length)
+            .constructor(true)
+            .build();
+        JSValue(function.into())
+    }
 }

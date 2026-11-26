@@ -109,8 +109,8 @@ impl JSGlobalObject {
         JsError::Thrown
     }
 
-    /// Lifts a Boa result into a `JsResult`.
-    pub(crate) fn lift<T>(&self, result: boa_engine::JsResult<T>) -> JsResult<T> {
+    /// Lifts a Boa result into a `JsResult`: for an embedder that calls Boa for what this crate does not wrap.
+    pub fn lift<T>(&self, result: boa_engine::JsResult<T>) -> JsResult<T> {
         result.map_err(|error| self.throw_engine_error(error))
     }
 

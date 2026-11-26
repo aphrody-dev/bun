@@ -7,7 +7,6 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use boa_engine::object::ObjectInitializer;
-use boa_engine::object::builtins::JsUint8Array;
 use boa_engine::property::Attribute;
 use boa_engine::{
     Context, JsArgs, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source, js_string,
@@ -27,60 +26,6 @@ fn string(args: &[JsValue], i: usize, context: &mut Context) -> JsResult<String>
         .get_or_undefined(i)
         .to_string(context)?
         .to_std_string_escaped())
-}
-
-fn sys_error(err: bun_sys::Error) -> boa_engine::JsError {
-    // bun_sys::Error prints as Bun does: "ENOENT: no such file or directory, open 'path'".
-    JsNativeError::error().with_message(err.to_string()).into()
-}
-
-fn read_text(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let path = string(args, 0, context)?;
-    let bytes = bun_sys::File::read_from(bun_sys::Fd::cwd(), path.as_bytes()).map_err(sys_error)?;
-    Ok(JsString::from(String::from_utf8_lossy(&bytes).as_ref()).into())
-}
-
-fn read_bytes(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let path = string(args, 0, context)?;
-    let bytes = bun_sys::File::read_from(bun_sys::Fd::cwd(), path.as_bytes()).map_err(sys_error)?;
-    Ok(JsUint8Array::from_iter(bytes, context)?.into())
-}
-
-fn exists(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    Ok(bun_sys::exists(string(args, 0, context)?.as_bytes()).into())
-}
-
-fn size(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let path = string(args, 0, context)?;
-    let size = bun_sys::File::openat(bun_sys::Fd::cwd(), path.as_bytes(), bun_sys::O::RDONLY, 0)
-        .and_then(|f| f.stat())
-        .map(|st| st.st_size.max(0) as u64)
-        .unwrap_or(0);
-    Ok((size as f64).into())
-}
-
-fn write(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let path = string(args, 0, context)?;
-    let data = args.get_or_undefined(1);
-    let bytes = match data
-        .as_object()
-        .and_then(|o| JsUint8Array::from_object(o.clone()).ok())
-    {
-        Some(array) => array.iter(context).collect::<Vec<u8>>(),
-        None => data
-            .to_string(context)?
-            .to_std_string_escaped()
-            .into_bytes(),
-    };
-    // make_open creates the parent directories, as Bun.write does.
-    let file = bun_sys::File::make_open(
-        path.as_bytes(),
-        bun_sys::O::WRONLY | bun_sys::O::CREAT | bun_sys::O::TRUNC,
-        0o664,
-    )
-    .map_err(sys_error)?;
-    file.write_all(&bytes).map_err(sys_error)?;
-    Ok((bytes.len() as f64).into())
 }
 
 fn print(args: &[JsValue], context: &mut Context, out: &mut dyn Write) -> JsResult<JsValue> {
@@ -151,28 +96,28 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
     let mut ops = ObjectInitializer::new(context);
     for (name, f, len) in [
         (
-            "readText",
-            read_text as fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>,
+            "printStdout",
+            stdout as fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>,
             1,
         ),
-        ("readBytes", read_bytes, 1),
-        ("exists", exists, 1),
-        ("size", size, 1),
-        ("write", write, 2),
-        ("stdout", stdout, 1),
-        ("stderr", stderr, 1),
+        ("printStderr", stderr, 1),
         ("exit", exit, 1),
         ("cwd", cwd, 0),
         ("nanoseconds", nanoseconds, 0),
     ] {
         ops.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);
     }
-    // The crates on bun_js: the namespaces of each `.bind.ts` (`Bun.semver`).
+    // The crates on bun_js: the namespaces of each `.bind.ts` (`Bun.semver`), and Blob, File, Bun.file, Bun.write
+    // and the standard files.
     let global = bun_js::JSGlobalObject::from_context(ops.context());
-    let bound = bun_semver_js::generated_bindgen::semver_object::namespaces(global)
+    let mut bound = bun_semver_js::generated_bindgen::semver_object::namespaces(global)
         .map_err(|error| global.into_engine_error(error))?;
     let clock = bun_runtime_js::generated_bindgen::performance::namespaces(global)
         .map_err(|error| global.into_engine_error(error))?;
+    bound.extend(
+        bun_runtime_js::webcore::blob::exports(global)
+            .map_err(|error| global.into_engine_error(error))?,
+    );
     for (name, value) in bound.into_iter().chain(clock) {
         ops.property(JsString::from(name), value.into_engine(), Attribute::all());
     }

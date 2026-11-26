@@ -288,6 +288,31 @@ fn file_errors_read_as_bun() {
     assert!(stdout.contains("ENOENT") && stdout.contains("no-such-file.txt"), "{stdout:?}");
 }
 
+/// Blob, File, Bun.file and Bun.write from bun_runtime_js, through `bun test`.
+#[test]
+fn blob_file_and_write_are_bound_through_bun_js() {
+    let dir = fixtures().join("blob");
+    let out = bun().args(["test", "blob.test.ts"]).current_dir(&dir).output().unwrap();
+    let all = format!("{}{}", text(&out).0, text(&out).1);
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        if entry.file_name().to_string_lossy().starts_with(".out-") {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    assert!(all.contains(" 4 pass") && all.contains(" 0 fail"), "{all}");
+    assert!(out.status.success(), "{all}");
+}
+
+/// `Bun.stdout` is a file of descriptor 1, which `Bun.write` writes to as it is.
+#[test]
+fn bun_write_to_stdout() {
+    let code = "const n = await Bun.write(Bun.stdout, 'to stdout\\n'); console.log(n, Bun.stdout.type, Bun.file(1) instanceof Blob)";
+    let out = bun().args(["-e", code]).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    assert_eq!(stdout, "to stdout\n10 application/octet-stream true\n", "stderr: {stderr}");
+    assert!(out.status.success(), "stderr: {stderr}");
+}
+
 /// `bun test` on Boa: discovery, `bun:test` imports and globals, hooks, async and `done` tests, mocks, `test.each`,
 /// skip/todo, a failing test that sets the exit code, `-t`, and Bun's summary.
 #[test]
