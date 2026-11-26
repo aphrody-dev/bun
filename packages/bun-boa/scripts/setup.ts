@@ -5,6 +5,7 @@ import { $ } from "bun";
 import { join } from "node:path";
 import { lolhtml } from "../../../scripts/build/deps/lolhtml.ts";
 import { rustArgon2 } from "../../../scripts/build/deps/rust-argon2.ts";
+import { WEBKIT_VERSION } from "../../../scripts/build/deps/webkit.ts";
 import type { Dependency } from "../../../scripts/build/source.ts";
 
 const repo = join(import.meta.dir, "../../..");
@@ -25,8 +26,22 @@ async function generated() {
   const commands = (await $`ninja -C build/debug -t commands`.cwd(repo).quiet().text())
     .split("\n")
     .filter(line => GENERATORS.some(g => line.includes(g)));
-  await Promise.all(commands.map(c => $`sh -c ${c}`.cwd(join(repo, "build/debug")).quiet()));
-  return `codegen: ${commands.length} generators`;
+  await Promise.all([...commands.map(c => $`sh -c ${c}`.cwd(join(repo, "build/debug")).quiet()), aotSchema()]);
+  return `codegen: ${commands.length + 1} generators`;
+}
+
+// `bun_aot_interface` includes the Rust half of WebKit's AOT schema. Its generator is TypeScript in WebKit's tree:
+// only `JavaScriptCore/aot/ir`'s schema and generator are fetched, at the pinned commit, nothing native.
+async function aotSchema() {
+  if (await Bun.file(join(codegen, "aot_schema_interface.rs")).exists()) return;
+  const dir = join(repo, `build/vendor-cache/webkit-aot-${WEBKIT_VERSION}`);
+  const tree = `repos/oven-sh/WebKit/git/trees/${WEBKIT_VERSION}:Source/JavaScriptCore/aot/ir?recursive=1`;
+  const files = ((await $`gh api ${tree}`.json()) as { tree: { type: string; path: string }[] }).tree
+    .filter(e => e.type === "blob" && /^(generator\/|schema\/|AOTSchema\.def$)/.test(e.path))
+    .map(e => e.path);
+  const raw = `https://raw.githubusercontent.com/oven-sh/WebKit/${WEBKIT_VERSION}/Source/JavaScriptCore/aot/ir`;
+  await Promise.all(files.map(async f => Bun.write(join(dir, f), await fetch(`${raw}/${f}`).then(r => (r.ok ? r : Promise.reject(new Error(`${f}: ${r.status}`)))))));
+  await $`bun run ${join(dir, "generator/index.ts")} --schema ${join(dir, "AOTSchema.def")} --rust-out ${codegen}`.cwd(repo).quiet();
 }
 
 // The OFL faces kitesurf-cdp embeds (no system fonts), from kitesurf's font set.
