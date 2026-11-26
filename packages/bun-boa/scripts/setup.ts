@@ -1,7 +1,8 @@
 // Prepares a checkout for `cargo` on the build host, every step concurrently: Bun's Rust vendor deps (from
-// scripts/build/deps/*.ts), this package's patched crates (vendor.ts), and the generated Rust sources that Bun's
-// crates `include!` (the codegen commands of build/debug/build.ninja, run without building anything native).
-import { $ } from "bun";
+// scripts/build/deps/*.ts), this package's patched crates (vendor.ts), the generated Rust sources that Bun's
+// crates `include!` (the codegen commands of build/debug/build.ninja, run without building anything native), and
+// the bindings of the workspace's crates on bun_js (src/codegen/bindgen-js.ts).
+import { $, Glob } from "bun";
 import { join } from "node:path";
 import { lolhtml } from "../../../scripts/build/deps/lolhtml.ts";
 import { rustArgon2 } from "../../../scripts/build/deps/rust-argon2.ts";
@@ -19,17 +20,37 @@ async function rustDep(dep: Dependency, dir: string) {
   const source = dep.source(undefined as never);
   if (source.kind !== "github-archive") throw new Error(`${dep.name}: unsupported source ${source.kind}`);
   const cache = join(repo, "build/vendor-cache");
-  await $`bun scripts/build/fetch-cli.ts dep ${dep.name} ${source.repo} ${source.commit} vendor/${dir} ${cache} ${dep.patches ?? []}`.cwd(repo).quiet();
+  await $`bun scripts/build/fetch-cli.ts dep ${dep.name} ${source.repo} ${source.commit} vendor/${dir} ${cache} ${dep.patches ?? []}`
+    .cwd(repo)
+    .quiet();
   return `vendor/${dir}: fetched`;
 }
 
 async function generated() {
-  if (!(await Bun.file(join(codegen, "build_options.rs")).exists())) await $`bun run build --configure-only`.cwd(repo).quiet();
+  // build.ninja, which a configure that failed half-way has not written (build_options.rs it may have).
+  if (!(await Bun.file(join(repo, "build/debug/build.ninja")).exists()))
+    await $`bun run build --configure-only`.cwd(repo).quiet();
   const commands = (await $`ninja -C build/debug -t commands`.cwd(repo).quiet().text())
     .split("\n")
     .filter(line => GENERATORS.some(g => line.includes(g)));
   await Promise.all([...commands.map(c => $`sh -c ${c}`.cwd(join(repo, "build/debug")).quiet()), aotSchema()]);
   return `codegen: ${commands.length + 1} generators`;
+}
+
+// Every `.bind.ts` of a member of this workspace, as Rust against bun_js. The crate is the member's package.
+async function bunJsBindings() {
+  const root = join(import.meta.dir, "..");
+  const toml = async (path: string) => Bun.TOML.parse(await Bun.file(path).text()) as Record<string, any>;
+  const sources: string[] = [];
+  for (const member of (await toml(join(root, "Cargo.toml"))).workspace.members as string[]) {
+    const dir = join(root, member);
+    const crate = (await toml(join(dir, "Cargo.toml"))).package.name as string;
+    for await (const file of new Glob("**/*.bind.ts").scan({ cwd: dir })) sources.push(`${crate}=${join(dir, file)}`);
+  }
+  await $`bun src/codegen/bindgen-js.ts --sources=${sources.sort().join(",")} --codegen-path=${codegen}`
+    .cwd(repo)
+    .quiet();
+  return `codegen: bun_js bindings of ${sources.length} schemas`;
 }
 
 // `bun_aot_interface` includes the Rust half of WebKit's AOT schema. Its generator is TypeScript in WebKit's tree:
@@ -42,13 +63,33 @@ async function aotSchema() {
     .filter(e => e.type === "blob" && /^(generator\/|schema\/|AOTSchema\.def$)/.test(e.path))
     .map(e => e.path);
   const raw = `https://raw.githubusercontent.com/oven-sh/WebKit/${WEBKIT_VERSION}/Source/JavaScriptCore/aot/ir`;
-  await Promise.all(files.map(async f => Bun.write(join(dir, f), await fetch(`${raw}/${f}`).then(r => (r.ok ? r : Promise.reject(new Error(`${f}: ${r.status}`)))))));
-  await $`bun run ${join(dir, "generator/index.ts")} --schema ${join(dir, "AOTSchema.def")} --rust-out ${codegen}`.cwd(repo).quiet();
+  await Promise.all(
+    files.map(async f =>
+      Bun.write(
+        join(dir, f),
+        await fetch(`${raw}/${f}`).then(r => (r.ok ? r : Promise.reject(new Error(`${f}: ${r.status}`)))),
+      ),
+    ),
+  );
+  await $`bun run ${join(dir, "generator/index.ts")} --schema ${join(dir, "AOTSchema.def")} --rust-out ${codegen}`
+    .cwd(repo)
+    .quiet();
 }
 
 // The OFL faces kitesurf-cdp embeds (no system fonts), from kitesurf's font set.
-const FONTS_BASE = "https://raw.githubusercontent.com/cloudflare/kitesurf/0affe70c9202b80396e3c5bf147018cb760af633/packages/engine/public/fonts";
-const FONTS = ["Arimo.ttf", "Arimo-Italic.ttf", "Tinos-Regular.ttf", "Tinos-Bold.ttf", "Tinos-Italic.ttf", "NotoSansMono.ttf", "NotoSans.ttf", "NotoSansSymbols2.ttf", "OFL.txt"];
+const FONTS_BASE =
+  "https://raw.githubusercontent.com/cloudflare/kitesurf/0affe70c9202b80396e3c5bf147018cb760af633/packages/engine/public/fonts";
+const FONTS = [
+  "Arimo.ttf",
+  "Arimo-Italic.ttf",
+  "Tinos-Regular.ttf",
+  "Tinos-Bold.ttf",
+  "Tinos-Italic.ttf",
+  "NotoSansMono.ttf",
+  "NotoSans.ttf",
+  "NotoSansSymbols2.ttf",
+  "OFL.txt",
+];
 
 async function fonts() {
   const dir = join(import.meta.dir, "../vendor/fonts");
@@ -64,5 +105,21 @@ async function fonts() {
   return `vendor/fonts: ${missing.length} fetched`;
 }
 
-const steps = [rustDep(lolhtml, "lolhtml"), rustDep(rustArgon2, "rust-argon2"), $`bun scripts/vendor.ts`.cwd(join(import.meta.dir, "..")).text(), generated(), fonts()];
-for (const r of await Promise.allSettled(steps)) console.log(r.status === "fulfilled" ? String(r.value).trim() : `error: ${r.reason}`);
+const steps = [
+  rustDep(lolhtml, "lolhtml"),
+  rustDep(rustArgon2, "rust-argon2"),
+  $`bun scripts/vendor.ts`.cwd(join(import.meta.dir, "..")).text(),
+  generated(),
+  bunJsBindings(),
+  fonts(),
+];
+// Every step runs to its end; one that failed fails the setup, so that cargo does not build what it left stale.
+let failed = 0;
+for (const r of await Promise.allSettled(steps)) {
+  if (r.status === "rejected") failed++;
+  console.log(r.status === "fulfilled" ? String(r.value).trim() : `error: ${r.reason}`);
+}
+if (failed) {
+  console.error(`setup: ${failed} of ${steps.length} steps failed`);
+  process.exit(1);
+}

@@ -2,7 +2,8 @@
 # keep inheriting their settings from the root `Cargo.toml`.
 [workspace]
 resolver = "2"
-members = ["cdp"]
+# bun_js and the crates on it are members: Bun's root workspace does not build Boa.
+members = ["cdp", "../../src/bun_js", "../../src/semver_js"]
 
 [package]
 name = "bun-boa"
@@ -29,6 +30,7 @@ bun_bundler = { path = "../../src/bundler", optional = true, features = ["test_s
 bun_clap = { path = "../../src/clap" }
 bun_event_loop = { path = "../../src/event_loop", optional = true }
 bun_core = { path = "../../src/bun_core" }
+bun_js = { path = "../../src/bun_js" }
 bun_js_parser = { path = "../../src/js_parser" }
 bun_js_printer = { path = "../../src/js_printer" }
 bun_lint_driver = { path = "../../src/lint/driver" }
@@ -37,6 +39,7 @@ bun_options_types = { path = "../../src/options_types", optional = true }
 bun_paths = { path = "../../src/paths" }
 bun_sys = { path = "../../src/sys" }
 bun_sema = { path = "../../src/sema" }
+bun_semver_js = { path = "../../src/semver_js" }
 bun_sema_driver = { path = "../../src/sema/driver" }
 bun_sema_standalone = { path = "../../src/sema/standalone" }
 bun_threading = { path = "../../src/threading" }

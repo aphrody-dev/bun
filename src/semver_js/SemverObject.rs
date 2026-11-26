@@ -3,7 +3,7 @@
 use core::cmp::Ordering;
 
 use bun_core::strings;
-use bun_jsc::bindgen::{self, JsHeap};
+use crate::js::bindgen::{self, JsHeap};
 use bun_semver::{SlicedString, Version, query};
 
 pub(crate) fn order<'a>(

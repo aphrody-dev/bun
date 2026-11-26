@@ -21,10 +21,10 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|_| repo.join("build/debug/codegen"));
 
-    let generated = codegen_dir.join("generated_bindgen_bun_semver_jsc.rs");
+    let generated = codegen_dir.join("generated_bindgen_bun_semver_js.rs");
     if !generated.exists() {
         panic!(
-            "generated_bindgen_bun_semver_jsc.rs not found at {} — run `bun bd` first",
+            "generated_bindgen_bun_semver_js.rs not found at {} — run `bun bd` first",
             generated.display()
         );
     }

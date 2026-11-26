@@ -86,6 +86,8 @@ const patterns = {
   /** bindgen input */
   bindgen: {
     paths: ["src/**/*.bind.ts"],
+    // bun_js's tests: what src/codegen/bindgen-js.ts emits for Boa, which this build has none of.
+    exclude: ["src/bun_js/**"],
   },
   /** bindgen generator code */
   bindgenCodegen: {

@@ -167,6 +167,13 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
     ] {
         ops.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);
     }
+    // The crates on bun_js: the namespaces of each `.bind.ts` (`Bun.semver`).
+    let global = bun_js::JSGlobalObject::from_context(ops.context());
+    let bound = bun_semver_js::generated_bindgen::semver_object::namespaces(global)
+        .map_err(|error| global.into_engine_error(error))?;
+    for (name, value) in bound {
+        ops.property(JsString::from(name), value.into_engine(), Attribute::all());
+    }
     ops.property(js_string!("env"), env, Attribute::all())
         .property(js_string!("argv"), argv, Attribute::all())
         .property(js_string!("main"), main, Attribute::all())
