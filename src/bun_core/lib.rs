@@ -491,6 +491,19 @@ impl OutputSink {
     };
 }
 
+// The `Sys` arm for this crate's own tests, which do not link `bun_sys`.
+#[cfg(test)]
+link_impl_OutputSink! {
+    Sys for extern () => |_this| {
+        stderr() => output::File(Fd::stderr()),
+        create_file(_cwd, _path) => Err(Error::Unexpected),
+        write_all_quiet(_fd, bytes) => std::io::Write::write_all(&mut std::io::stderr(), bytes).is_ok(),
+        tty_winsize(_fd) => None,
+        is_terminal(_fd) => false,
+        read(_fd, _buf) => Err(Error::Unexpected),
+    }
+}
+
 // `bun_core` (T0) cannot name `bun_errno` (cycle). Single-variant link-interface
 // (owner is unused / null); `bun_errno` provides the `Sys` arm. Gives `result.rs`
 // access to the per-OS `SystemErrno` strum table without duplicating it here.
