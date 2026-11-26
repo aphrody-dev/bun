@@ -8,7 +8,8 @@ use bun_options_types::schema::api;
 
 pub fn main(args: &[String]) -> i32 {
     bun_core::output::stdio::init();
-    let (mut entries, mut outdir, mut outfile, mut minify): (_, Option<String>, Option<String>, _) = (Vec::new(), None, None, false);
+    let (mut entries, mut outdir, mut outfile, mut minify): (_, Option<String>, Option<String>, _) =
+        (Vec::new(), None, None, false);
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -17,11 +18,19 @@ pub fn main(args: &[String]) -> i32 {
                     eprintln!("error: {arg} needs a value");
                     return 1;
                 };
-                *(if arg == "--outdir" { &mut outdir } else { &mut outfile }) = Some(value.clone());
+                *(if arg == "--outdir" {
+                    &mut outdir
+                } else {
+                    &mut outfile
+                }) = Some(value.clone());
             }
             "--minify" => minify = true,
-            flag if flag.starts_with("--outdir=") => outdir = Some(flag["--outdir=".len()..].into()),
-            flag if flag.starts_with("--outfile=") => outfile = Some(flag["--outfile=".len()..].into()),
+            flag if flag.starts_with("--outdir=") => {
+                outdir = Some(flag["--outdir=".len()..].into())
+            }
+            flag if flag.starts_with("--outfile=") => {
+                outfile = Some(flag["--outfile=".len()..].into())
+            }
             flag if flag.starts_with('-') => {
                 eprintln!("error: this bun's `bun build` does not support {flag} yet");
                 return 2;
@@ -67,9 +76,15 @@ pub fn main(args: &[String]) -> i32 {
     // (sourcemaps, assets), so no output is dropped or sent to stdout.
     if let Some(file) = &outfile {
         let path = std::path::Path::new(file);
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| file.clone());
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.clone());
         this.options.entry_naming = format!("./{name}").into_bytes().into();
-        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        let dir = path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
         outdir = Some(dir.to_string_lossy().into_owned());
     }
     // No outdir: an empty output_dir keeps the chunks in memory, for stdout.
@@ -107,20 +122,26 @@ pub fn main(args: &[String]) -> i32 {
         }
     };
     for file in output.iter() {
-        let options::OutputFileValue::Buffer { bytes } = &file.value else { continue };
+        let options::OutputFileValue::Buffer { bytes } = &file.value else {
+            continue;
+        };
         let dest = match &outdir {
-            Some(dir) => std::path::Path::new(dir).join(String::from_utf8_lossy(&file.dest_path).as_ref()),
+            Some(dir) => {
+                std::path::Path::new(dir).join(String::from_utf8_lossy(&file.dest_path).as_ref())
+            }
             None => {
                 use std::io::Write;
                 let _ = std::io::stdout().write_all(bytes);
                 continue;
             }
         };
-        if let Some(parent) = dest.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(err) = std::fs::write(&dest, bytes) {
-            eprintln!("error: could not write {}: {err}", dest.display());
+        // make_open creates the parent directories.
+        let flags = bun_sys::O::WRONLY | bun_sys::O::CREAT | bun_sys::O::TRUNC;
+        if let Err(err) =
+            bun_sys::File::make_open(dest.as_os_str().as_encoded_bytes(), flags, 0o664)
+                .and_then(|f| f.write_all(bytes))
+        {
+            eprintln!("error: {err}");
             return 1;
         }
     }

@@ -64,7 +64,14 @@ pub fn transpile(path: &[u8], contents: &[u8]) -> Result<Vec<u8>, String> {
         import_meta_ref: ast.import_meta_ref,
         ..Default::default()
     };
-    bun_js_printer::print_ast::<false, false>(&mut printer, &arena, &ast, symbols, &source, options)
-        .map_err(|err| format!("{}: {err}", String::from_utf8_lossy(path)))?;
+    bun_js_printer::print_ast::<false, false>(
+        &mut printer,
+        &arena,
+        &ast,
+        symbols,
+        &source,
+        options,
+    )
+    .map_err(|err| format!("{}: {err}", String::from_utf8_lossy(path)))?;
     Ok(printer.ctx.buffer.list)
 }

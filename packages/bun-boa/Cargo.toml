@@ -35,6 +35,7 @@ bun_lint_driver = { path = "../../src/lint/driver" }
 bun_parsers = { path = "../../src/parsers" }
 bun_options_types = { path = "../../src/options_types", optional = true }
 bun_paths = { path = "../../src/paths" }
+bun_sys = { path = "../../src/sys" }
 bun_sema = { path = "../../src/sema" }
 bun_sema_driver = { path = "../../src/sema/driver" }
 bun_sema_standalone = { path = "../../src/sema/standalone" }

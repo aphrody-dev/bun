@@ -25,8 +25,11 @@ const SYNTAX: u8 = 3;
 /// regress's messages (`parse.rs` of regress 0.12) for what Yarr calls `PatternTooLarge`, `QuantifierTooLarge` and
 /// `TooManyDisjunctions`, and for `InvalidUnicodePropertyExpression`. regress has no error kinds, only text: each
 /// message is matched whole, and anything else is a syntax error.
-const TOO_LARGE_MESSAGES: &[&str] =
-    &["Regular expression is too deeply nested", "Capture group count limit exceeded", "Loop count limit exceeded"];
+const TOO_LARGE_MESSAGES: &[&str] = &[
+    "Regular expression is too deeply nested",
+    "Capture group count limit exceeded",
+    "Loop count limit exceeded",
+];
 const UNKNOWN_PROPERTY_MESSAGES: &[&str] = &["Invalid property name"];
 
 /// `WTF::String::MaxLength`, Yarr's `PatternTooLarge` for the pattern itself.
@@ -52,17 +55,24 @@ struct Expression {
 
 /// # Safety
 /// `characters` has `length` characters, of one byte if `is_8_bit`, of two otherwise.
-unsafe fn units<'a>(characters: *const c_void, length: u32, is_8_bit: bool) -> std::borrow::Cow<'a, [u16]> {
+unsafe fn units<'a>(
+    characters: *const c_void,
+    length: u32,
+    is_8_bit: bool,
+) -> std::borrow::Cow<'a, [u16]> {
     if length == 0 {
         return std::borrow::Cow::Borrowed(&[]);
     }
     if is_8_bit {
         // SAFETY: the caller's.
-        let bytes = unsafe { core::slice::from_raw_parts(characters.cast::<u8>(), length as usize) };
+        let bytes =
+            unsafe { core::slice::from_raw_parts(characters.cast::<u8>(), length as usize) };
         std::borrow::Cow::Owned(bytes.iter().map(|&b| u16::from(b)).collect())
     } else {
         // SAFETY: the caller's.
-        std::borrow::Cow::Borrowed(unsafe { core::slice::from_raw_parts(characters.cast::<u16>(), length as usize) })
+        std::borrow::Cow::Borrowed(unsafe {
+            core::slice::from_raw_parts(characters.cast::<u16>(), length as usize)
+        })
     }
 }
 
@@ -71,7 +81,9 @@ fn code_points(units: &[u16], unicode: bool) -> Vec<u32> {
     if !unicode {
         return units.iter().map(|&u| u32::from(u)).collect();
     }
-    char::decode_utf16(units.iter().copied()).map(|it| it.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from)).collect()
+    char::decode_utf16(units.iter().copied())
+        .map(|it| it.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from))
+        .collect()
 }
 
 /// The capturing groups of a pattern that compiled, as Yarr's `m_numSubpatterns` counts them: a `(` that is not
@@ -131,7 +143,13 @@ pub unsafe extern "C" fn Yarr__RegularExpression__compile(
             let size = 2 * (capturing_groups(&points, flags & UNICODE_SETS != 0) + 1);
             *offsets_size = size;
             let sticky = flags & STICKY != 0;
-            Box::into_raw(Box::new(Expression { regex, unicode, sticky, offsets_size: size as usize })).cast()
+            Box::into_raw(Box::new(Expression {
+                regex,
+                unicode,
+                sticky,
+                offsets_size: size as usize,
+            }))
+            .cast()
         }
         Err(err) => {
             *refusal_out = refusal(&err.text);
@@ -177,7 +195,10 @@ pub unsafe extern "C" fn Yarr__RegularExpression__exec(
     // SAFETY: the caller's: room for the `offsets_size` that compile gave.
     let offsets = unsafe { core::slice::from_raw_parts_mut(offsets, this.offsets_size) };
     let ranges = core::iter::once(Some(found.range.clone())).chain(found.captures.iter().cloned());
-    for (slot, range) in offsets.chunks_exact_mut(2).zip(ranges.chain(core::iter::repeat(None))) {
+    for (slot, range) in offsets
+        .chunks_exact_mut(2)
+        .zip(ranges.chain(core::iter::repeat(None)))
+    {
         match range {
             Some(range) => {
                 slot[0] = range.start as u32;
@@ -212,15 +233,35 @@ mod tests {
         let (mut size, mut refusal) = (0, 0);
         // SAFETY: `units` has that many.
         let this = unsafe {
-            Yarr__RegularExpression__compile(units.as_ptr().cast(), units.len() as u32, false, flags, &mut size, &mut refusal)
+            Yarr__RegularExpression__compile(
+                units.as_ptr().cast(),
+                units.len() as u32,
+                false,
+                flags,
+                &mut size,
+                &mut refusal,
+            )
         };
-        if this.is_null() { Err(refusal) } else { Ok((this, size)) }
+        if this.is_null() {
+            Err(refusal)
+        } else {
+            Ok((this, size))
+        }
     }
 
     fn exec(this: *mut c_void, text: &str, start: u32, offsets: &mut [u32]) -> bool {
         let units: Vec<u16> = text.encode_utf16().collect();
         // SAFETY: `units` has that many, `offsets` has room.
-        unsafe { Yarr__RegularExpression__exec(this, units.as_ptr().cast(), units.len() as u32, false, start, offsets.as_mut_ptr()) }
+        unsafe {
+            Yarr__RegularExpression__exec(
+                this,
+                units.as_ptr().cast(),
+                units.len() as u32,
+                false,
+                start,
+                offsets.as_mut_ptr(),
+            )
+        }
     }
 
     #[test]
@@ -236,7 +277,8 @@ mod tests {
             (r"[[\(]](a)", UNICODE_SETS, 1),
             (r"[[a]--[\(]](a)", UNICODE_SETS, 1),
         ] {
-            let (this, size) = compile(pattern, flags).unwrap_or_else(|r| panic!("{pattern}: refusal {r}"));
+            let (this, size) =
+                compile(pattern, flags).unwrap_or_else(|r| panic!("{pattern}: refusal {r}"));
             assert_eq!(size, 2 * (groups + 1), "{pattern}");
             // SAFETY: from compile.
             unsafe { Yarr__RegularExpression__deinit(this) };
@@ -248,7 +290,10 @@ mod tests {
         assert_eq!(compile("(", 0).unwrap_err(), SYNTAX);
         // As JavaScriptCore: with `v` a `(` in a class has to be escaped.
         assert_eq!(compile("[[(]](a)", UNICODE_SETS).unwrap_err(), SYNTAX);
-        assert_eq!(compile(r"\p{NotAProperty}", UNICODE).unwrap_err(), UNKNOWN_PROPERTY);
+        assert_eq!(
+            compile(r"\p{NotAProperty}", UNICODE).unwrap_err(),
+            UNKNOWN_PROPERTY
+        );
         assert_eq!(compile(&"a*".repeat(70_000), 0).unwrap_err(), TOO_LARGE);
         assert_eq!(compile(&"(".repeat(100_000), 0).unwrap_err(), TOO_LARGE);
     }

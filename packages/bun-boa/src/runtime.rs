@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use boa_engine::object::builtins::JsUint8Array;
 use boa_engine::object::ObjectInitializer;
+use boa_engine::object::builtins::JsUint8Array;
 use boa_engine::property::Attribute;
-use boa_engine::{Context, JsArgs, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source, js_string};
+use boa_engine::{
+    Context, JsArgs, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source, js_string,
+};
 
 use crate::loader::BunModuleLoader;
 
@@ -21,45 +23,63 @@ pub fn main_path() -> Option<&'static Path> {
 }
 
 fn string(args: &[JsValue], i: usize, context: &mut Context) -> JsResult<String> {
-    Ok(args.get_or_undefined(i).to_string(context)?.to_std_string_escaped())
+    Ok(args
+        .get_or_undefined(i)
+        .to_string(context)?
+        .to_std_string_escaped())
 }
 
-fn io_error(err: std::io::Error, path: &str) -> boa_engine::JsError {
-    JsNativeError::error().with_message(format!("{err}: {path}")).into()
+fn sys_error(err: bun_sys::Error) -> boa_engine::JsError {
+    // bun_sys::Error prints as Bun does: "ENOENT: no such file or directory, open 'path'".
+    JsNativeError::error().with_message(err.to_string()).into()
 }
 
 fn read_text(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = string(args, 0, context)?;
-    let text = std::fs::read_to_string(&path).map_err(|e| io_error(e, &path))?;
-    Ok(JsString::from(text.as_str()).into())
+    let bytes = bun_sys::File::read_from(bun_sys::Fd::cwd(), path.as_bytes()).map_err(sys_error)?;
+    Ok(JsString::from(String::from_utf8_lossy(&bytes).as_ref()).into())
 }
 
 fn read_bytes(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = string(args, 0, context)?;
-    let bytes = std::fs::read(&path).map_err(|e| io_error(e, &path))?;
+    let bytes = bun_sys::File::read_from(bun_sys::Fd::cwd(), path.as_bytes()).map_err(sys_error)?;
     Ok(JsUint8Array::from_iter(bytes, context)?.into())
 }
 
 fn exists(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    Ok(Path::new(&string(args, 0, context)?).exists().into())
+    Ok(bun_sys::exists(string(args, 0, context)?.as_bytes()).into())
 }
 
 fn size(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = string(args, 0, context)?;
-    Ok(std::fs::metadata(&path).map(|m| m.len() as f64).unwrap_or(0.0).into())
+    let size = bun_sys::File::openat(bun_sys::Fd::cwd(), path.as_bytes(), bun_sys::O::RDONLY, 0)
+        .and_then(|f| f.stat())
+        .map(|st| st.st_size.max(0) as u64)
+        .unwrap_or(0);
+    Ok((size as f64).into())
 }
 
 fn write(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = string(args, 0, context)?;
     let data = args.get_or_undefined(1);
-    let bytes = match data.as_object().and_then(|o| JsUint8Array::from_object(o.clone()).ok()) {
+    let bytes = match data
+        .as_object()
+        .and_then(|o| JsUint8Array::from_object(o.clone()).ok())
+    {
         Some(array) => array.iter(context).collect::<Vec<u8>>(),
-        None => data.to_string(context)?.to_std_string_escaped().into_bytes(),
+        None => data
+            .to_string(context)?
+            .to_std_string_escaped()
+            .into_bytes(),
     };
-    if let Some(parent) = Path::new(&path).parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|e| io_error(e, &path))?;
-    }
-    std::fs::write(&path, &bytes).map_err(|e| io_error(e, &path))?;
+    // make_open creates the parent directories, as Bun.write does.
+    let file = bun_sys::File::make_open(
+        path.as_bytes(),
+        bun_sys::O::WRONLY | bun_sys::O::CREAT | bun_sys::O::TRUNC,
+        0o664,
+    )
+    .map_err(sys_error)?;
+    file.write_all(&bytes).map_err(sys_error)?;
     Ok((bytes.len() as f64).into())
 }
 
@@ -90,27 +110,51 @@ fn cwd(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
 
 fn nanoseconds(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     static START: OnceLock<std::time::Instant> = OnceLock::new();
-    Ok((START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as f64).into())
+    Ok((START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_nanos() as f64)
+        .into())
 }
 
 fn strings(values: impl IntoIterator<Item = String>, context: &mut Context) -> JsValue {
-    let values: Vec<JsValue> = values.into_iter().map(|s| JsString::from(s.as_str()).into()).collect();
+    let values: Vec<JsValue> = values
+        .into_iter()
+        .map(|s| JsString::from(s.as_str()).into())
+        .collect();
     boa_engine::object::builtins::JsArray::from_iter(values, context).into()
 }
 
 fn native(context: &mut Context) -> JsResult<JsValue> {
     let env = ObjectInitializer::new(context).build();
     for (key, value) in std::env::vars_os() {
-        let (key, value) = (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned());
-        env.set(JsString::from(key.as_str()), JsString::from(value.as_str()), false, context)?;
+        let (key, value) = (
+            key.to_string_lossy().into_owned(),
+            value.to_string_lossy().into_owned(),
+        );
+        env.set(
+            JsString::from(key.as_str()),
+            JsString::from(value.as_str()),
+            false,
+            context,
+        )?;
     }
     let argv = strings(ARGV.get().cloned().unwrap_or_default(), context);
-    let main = JsString::from(main_path().map(|p| p.display().to_string()).unwrap_or_default().as_str());
+    let main = JsString::from(
+        main_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+            .as_str(),
+    );
     let version = JsString::from(bun_core::package_json_version);
     let revision = JsString::from(bun_core::env::GIT_SHA);
     let mut ops = ObjectInitializer::new(context);
     for (name, f, len) in [
-        ("readText", read_text as fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>, 1),
+        (
+            "readText",
+            read_text as fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>,
+            1,
+        ),
         ("readBytes", read_bytes, 1),
         ("exists", exists, 1),
         ("size", size, 1),
@@ -128,7 +172,11 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
         .property(js_string!("main"), main, Attribute::all())
         .property(js_string!("version"), version, Attribute::all())
         .property(js_string!("revision"), revision, Attribute::all())
-        .property(js_string!("platform"), JsString::from(std::env::consts::OS), Attribute::all())
+        .property(
+            js_string!("platform"),
+            JsString::from(std::env::consts::OS),
+            Attribute::all(),
+        )
         .property(js_string!("arch"), JsString::from(arch()), Attribute::all())
         .property(js_string!("pid"), std::process::id(), Attribute::all());
     Ok(ops.build().into())
@@ -143,7 +191,11 @@ fn arch() -> &'static str {
 }
 
 /// A realm with Bun's globals; `main` is the entry point and `argv` is `process.argv`.
-pub fn context(loader: Rc<BunModuleLoader>, main: Option<PathBuf>, argv: Vec<String>) -> JsResult<Context> {
+pub fn context(
+    loader: Rc<BunModuleLoader>,
+    main: Option<PathBuf>,
+    argv: Vec<String>,
+) -> JsResult<Context> {
     if let Some(main) = main {
         let _ = MAIN.set(main);
     }

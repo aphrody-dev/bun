@@ -22,7 +22,10 @@ Commands:
 ";
 
 fn report(err: &JsError, context: &mut Context) {
-    let value = err.clone().into_opaque(context).unwrap_or_else(|e| JsValue::from(js_string!(e.to_string())));
+    let value = err
+        .clone()
+        .into_opaque(context)
+        .unwrap_or_else(|e| JsValue::from(js_string!(e.to_string())));
     let stack = value
         .as_object()
         .and_then(|o| o.get(js_string!("stack"), context).ok())
@@ -35,9 +38,15 @@ fn report(err: &JsError, context: &mut Context) {
 }
 
 fn exit_code(context: &mut Context) -> i32 {
-    let process = context.global_object().get(js_string!("process"), context).ok();
+    let process = context
+        .global_object()
+        .get(js_string!("process"), context)
+        .ok();
     process
-        .and_then(|p| p.as_object().and_then(|o| o.get(js_string!("exitCode"), context).ok()))
+        .and_then(|p| {
+            p.as_object()
+                .and_then(|o| o.get(js_string!("exitCode"), context).ok())
+        })
         .and_then(|code| code.as_number())
         .map_or(0, |code| code as i32)
 }
@@ -68,10 +77,13 @@ fn run_file(file: &str, rest: &[String]) -> i32 {
         eprintln!("error: Module not found \"{file}\"");
         return 1;
     };
-    let argv = [std::env::args().next().unwrap_or_else(|| "bun".into()), path.display().to_string()]
-        .into_iter()
-        .chain(rest.iter().cloned())
-        .collect();
+    let argv = [
+        std::env::args().next().unwrap_or_else(|| "bun".into()),
+        path.display().to_string(),
+    ]
+    .into_iter()
+    .chain(rest.iter().cloned())
+    .collect();
     let loader = Rc::new(BunModuleLoader::default());
     let mut context = match crate::runtime::context(loader.clone(), Some(path.clone()), argv) {
         Ok(context) => context,
@@ -90,7 +102,10 @@ fn run_file(file: &str, rest: &[String]) -> i32 {
 }
 
 fn eval(code: &str, rest: &[String]) -> i32 {
-    let argv = [std::env::args().next().unwrap_or_else(|| "bun".into())].into_iter().chain(rest.iter().cloned()).collect();
+    let argv = [std::env::args().next().unwrap_or_else(|| "bun".into())]
+        .into_iter()
+        .chain(rest.iter().cloned())
+        .collect();
     let cwd = std::env::current_dir().unwrap_or_default();
     let path: PathBuf = cwd.join("[eval].ts");
     let loader = Rc::new(BunModuleLoader::default());
@@ -101,7 +116,8 @@ fn eval(code: &str, rest: &[String]) -> i32 {
             return 1;
         }
     };
-    let js = match crate::transpile::transpile(path.as_os_str().as_encoded_bytes(), code.as_bytes()) {
+    let js = match crate::transpile::transpile(path.as_os_str().as_encoded_bytes(), code.as_bytes())
+    {
         Ok(js) => js,
         Err(err) => {
             eprint!("{err}");

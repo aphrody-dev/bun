@@ -63,12 +63,23 @@ fn exponential(number: f64, digits: &[u8], exponent: i32) -> Vec<u8> {
         out.push(b'.');
         out.extend_from_slice(&digits[1..]);
     }
-    out.extend_from_slice(format!("e{}{}", if exponent < 0 { '-' } else { '+' }, exponent.abs()).as_bytes());
+    out.extend_from_slice(
+        format!(
+            "e{}{}",
+            if exponent < 0 { '-' } else { '+' },
+            exponent.abs()
+        )
+        .as_bytes(),
+    );
     out
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn WTF__numberToFixed(buf: &mut [u8; 124], number: f64, fraction_digits: u32) -> usize {
+pub extern "C" fn WTF__numberToFixed(
+    buf: &mut [u8; 124],
+    number: f64,
+    fraction_digits: u32,
+) -> usize {
     let f = fraction_digits as i32;
     let (digits, exponent) = exact(number.abs());
     let keep = exponent + 1 + f;
@@ -102,10 +113,18 @@ pub extern "C" fn WTF__numberToFixed(buf: &mut [u8; 124], number: f64, fraction_
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn WTF__numberToPrecision(buf: &mut [u8; 124], number: f64, precision: u32) -> usize {
+pub extern "C" fn WTF__numberToPrecision(
+    buf: &mut [u8; 124],
+    number: f64,
+    precision: u32,
+) -> usize {
     let p = precision as usize;
     let (digits, exponent) = exact(number.abs());
-    let (digits, exponent) = if digits.is_empty() { (vec![b'0'; p], 0) } else { round(&digits, exponent, p) };
+    let (digits, exponent) = if digits.is_empty() {
+        (vec![b'0'; p], 0)
+    } else {
+        round(&digits, exponent, p)
+    };
     if exponent < -6 || exponent >= p as i32 {
         return write(buf, &exponential(number, &digits, exponent));
     }
@@ -126,16 +145,27 @@ pub extern "C" fn WTF__numberToPrecision(buf: &mut [u8; 124], number: f64, preci
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn WTF__numberToExponential(buf: &mut [u8; 124], number: f64, fraction_digits: i32) -> usize {
+pub extern "C" fn WTF__numberToExponential(
+    buf: &mut [u8; 124],
+    number: f64,
+    fraction_digits: i32,
+) -> usize {
     let (digits, exponent) = if fraction_digits < 0 {
         // As many as it takes: the shortest that reads back, which `{:e}` prints.
         let text = format!("{:e}", number.abs());
         let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
-        (mantissa.bytes().filter(|&b| b != b'.').collect(), exponent.parse().unwrap_or(0))
+        (
+            mantissa.bytes().filter(|&b| b != b'.').collect(),
+            exponent.parse().unwrap_or(0),
+        )
     } else {
         let n = fraction_digits as usize + 1;
         let (digits, exponent) = exact(number.abs());
-        if digits.is_empty() { (vec![b'0'; n], 0) } else { round(&digits, exponent, n) }
+        if digits.is_empty() {
+            (vec![b'0'; n], 0)
+        } else {
+            round(&digits, exponent, n)
+        }
     };
     write(buf, &exponential(number, &digits, exponent))
 }
@@ -143,10 +173,20 @@ pub extern "C" fn WTF__numberToExponential(buf: &mut [u8; 124], number: f64, fra
 /// # Safety
 /// `text` has `length` units and `out` room for `capacity`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Bun__normalizeUTF16(form: u8, text: *const u16, length: usize, out: *mut u16, capacity: usize) -> i32 {
+pub unsafe extern "C" fn Bun__normalizeUTF16(
+    form: u8,
+    text: *const u16,
+    length: usize,
+    out: *mut u16,
+    capacity: usize,
+) -> i32 {
     use icu_normalizer::{ComposingNormalizerBorrowed as C, DecomposingNormalizerBorrowed as D};
     // SAFETY: the caller's.
-    let text = if length == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(text, length) } };
+    let text = if length == 0 {
+        &[][..]
+    } else {
+        unsafe { core::slice::from_raw_parts(text, length) }
+    };
     let normalize = |run: &[u16]| -> Vec<u16> {
         match form {
             0 => C::new_nfc().normalize_utf16(run).into_owned(),
@@ -164,7 +204,9 @@ pub unsafe extern "C" fn Bun__normalizeUTF16(form: u8, text: *const u16, length:
     while i < text.len() {
         let unit = text[i];
         let paired = match unit {
-            0xD800..=0xDBFF => text.get(i + 1).is_some_and(|&next| (0xDC00..=0xDFFF).contains(&next)),
+            0xD800..=0xDBFF => text
+                .get(i + 1)
+                .is_some_and(|&next| (0xDC00..=0xDFFF).contains(&next)),
             0xDC00..=0xDFFF => false,
             _ => {
                 i += 1;
@@ -199,7 +241,9 @@ mod tests {
     fn normalize(form: u8, text: &[u16]) -> Vec<u16> {
         let mut out = vec![0u16; 64];
         // SAFETY: `text` and `out` have those lengths.
-        let n = unsafe { super::Bun__normalizeUTF16(form, text.as_ptr(), text.len(), out.as_mut_ptr(), out.len()) };
+        let n = unsafe {
+            super::Bun__normalizeUTF16(form, text.as_ptr(), text.len(), out.as_mut_ptr(), out.len())
+        };
         out.truncate(n as usize);
         out
     }
@@ -220,13 +264,19 @@ mod tests {
             assert_eq!(normalize(form, &[0xD800]), [0xD800]);
             assert_eq!(normalize(form, &[0xDC00, 0x61]), [0xDC00, 0x61]);
         }
-        assert_eq!(normalize(0, &[0x65, 0x301, 0xD800, 0x65, 0x301, 0xDFFF]), [0xE9, 0xD800, 0xE9, 0xDFFF]);
+        assert_eq!(
+            normalize(0, &[0x65, 0x301, 0xD800, 0x65, 0x301, 0xDFFF]),
+            [0xE9, 0xD800, 0xE9, 0xDFFF]
+        );
         assert_eq!(normalize(1, &[0xD83D, 0xE9]), [0xD83D, 0x65, 0x301]);
         // Too little room: the length it needs, nothing written.
         let mut out = [0u16; 1];
         let text = u("\u{e9}");
         // SAFETY: as above.
-        assert_eq!(unsafe { super::Bun__normalizeUTF16(1, text.as_ptr(), 1, out.as_mut_ptr(), 1) }, 2);
+        assert_eq!(
+            unsafe { super::Bun__normalizeUTF16(1, text.as_ptr(), 1, out.as_mut_ptr(), 1) },
+            2
+        );
     }
 
     #[test]
