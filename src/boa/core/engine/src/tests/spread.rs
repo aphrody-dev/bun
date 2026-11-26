@@ -16,6 +16,23 @@ fn object_spread() {
 }
 
 #[test]
+fn spread_defines_elements_past_a_prototype_accessor() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+                Object.defineProperty(Array.prototype, 1, { get() { return "intercepted"; }, configurable: true });
+                function args() { return [...arguments].join(); }
+                var spreadCall = args(...[1, 2, 3]);
+                var spreadArray = [..."abc"].join();
+                var spreadTail = [0, ...new Set([1, 2])].join();
+                delete Array.prototype[1];
+            "#}),
+        TestAction::assert_eq("spreadCall", js_str!("1,2,3")),
+        TestAction::assert_eq("spreadArray", js_str!("a,b,c")),
+        TestAction::assert_eq("spreadTail", js_str!("0,1,2")),
+    ]);
+}
+
+#[test]
 fn spread_with_arguments() {
     run_test_actions([
         TestAction::run(indoc! {r#"
