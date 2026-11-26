@@ -86,29 +86,6 @@ fn code_points(units: &[u16], unicode: bool) -> Vec<u32> {
         .collect()
 }
 
-/// The capturing groups of a pattern that compiled, as Yarr's `m_numSubpatterns` counts them: a `(` that is not
-/// escaped, not in a class, and starts neither `(?:`, `(?=`, `(?!`, `(?<=`, `(?<!` nor a modifier `(?i:`. With the
-/// `v` flag classes nest.
-fn capturing_groups(points: &[u32], unicode_sets: bool) -> u32 {
-    let at = |i: usize| points.get(i).copied().and_then(char::from_u32);
-    let (mut groups, mut class_depth, mut i) = (0u32, 0usize, 0usize);
-    while i < points.len() {
-        match at(i) {
-            Some('\\') => i += 1,
-            Some('[') if class_depth == 0 || unicode_sets => class_depth += 1,
-            Some(']') if class_depth > 0 => class_depth -= 1,
-            Some('(') if class_depth == 0 => match (at(i + 1), at(i + 2), at(i + 3)) {
-                (Some('?'), Some('<'), Some(c)) if c != '=' && c != '!' => groups += 1,
-                (Some('?'), _, _) => {}
-                _ => groups += 1,
-            },
-            _ => {}
-        }
-        i += 1;
-    }
-    groups
-}
-
 /// # Safety
 /// As `Yarr__RegularExpression__compile` in RegularExpression.cpp.
 #[unsafe(no_mangle)]
@@ -137,17 +114,18 @@ pub unsafe extern "C" fn Yarr__RegularExpression__compile(
         no_opt: false,
     };
     let points = code_points(&pattern, unicode);
-    match regress::Regex::from_unicode(points.iter().copied(), options) {
+    match regress::Regex::from_unicode(points.into_iter(), options) {
         Ok(regex) => {
-            // Two for the match and two for each group, as Yarr's `m_offsetsSize`.
-            let size = 2 * (capturing_groups(&points, flags & UNICODE_SETS != 0) + 1);
-            *offsets_size = size;
+            // Two for the match and two for each group the parser counted, as Yarr's `m_offsetsSize`. regress
+            // refuses more than 65535 groups, so this fits.
+            let size = 2 * (regex.captures_len() + 1);
+            *offsets_size = size as u32;
             let sticky = flags & STICKY != 0;
             Box::into_raw(Box::new(Expression {
                 regex,
                 unicode,
                 sticky,
-                offsets_size: size as usize,
+                offsets_size: size,
             }))
             .cast()
         }
@@ -192,13 +170,10 @@ pub unsafe extern "C" fn Yarr__RegularExpression__exec(
     let Some(found) = found.filter(|m| !this.sticky || m.range.start == start as usize) else {
         return false;
     };
-    // SAFETY: the caller's: room for the `offsets_size` that compile gave.
+    // SAFETY: the caller's: room for the `offsets_size` that compile gave, a pair for the match and each capture.
     let offsets = unsafe { core::slice::from_raw_parts_mut(offsets, this.offsets_size) };
     let ranges = core::iter::once(Some(found.range.clone())).chain(found.captures.iter().cloned());
-    for (slot, range) in offsets
-        .chunks_exact_mut(2)
-        .zip(ranges.chain(core::iter::repeat(None)))
-    {
+    for (slot, range) in offsets.chunks_exact_mut(2).zip(ranges) {
         match range {
             Some(range) => {
                 slot[0] = range.start as u32;
