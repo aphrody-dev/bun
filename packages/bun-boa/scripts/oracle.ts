@@ -248,6 +248,12 @@ async function coordinate() {
   });
   const boaBinary = `/srv/xbuild/target/bun-boa-${remoteRepo}/debug/bun`;
   const tree = `/srv/xbuild/src/${remoteRepo}`;
+  // The revision a binary was built from stays next to it, so --no-build reports that one and not HEAD.
+  if (!values["no-build"]) {
+    const dirty = (await $`git -C ${repo} status --porcelain`.text()).trim() ? "-dirty" : "";
+    const built = (await $`git -C ${repo} rev-parse HEAD`.text()).trim() + dirty;
+    await ssh(builder, `echo ${built} > ${boaBinary}.rev`);
+  }
 
   // Binaries on n1: the upstream one is the host's own Bun, so every host compares against the same build.
   await ssh(
@@ -255,11 +261,12 @@ async function coordinate() {
     `set -e; mkdir -p ${DIR}/bin ${DIR}/corpus/npm; ` +
       // A rename, not a copy over, so a binary still running from an earlier run does not block it.
       `cp -f ${boaBinary} ${DIR}/bin/.bun-boa && mv -f ${DIR}/bin/.bun-boa ${DIR}/bin/bun-boa; ` +
+      `cp -f ${boaBinary}.rev ${DIR}/bin/bun-boa.rev 2>/dev/null || echo unknown > ${DIR}/bin/bun-boa.rev; ` +
       `cp -fL "$(command -v bun)" ${DIR}/bin/.bun-jsc && mv -f ${DIR}/bin/.bun-jsc ${DIR}/bin/bun-jsc`,
   );
   const revisions = {
     upstream: (await ssh(builder, `${DIR}/bin/bun-jsc --revision`).text()).trim(),
-    boa: (await $`git -C ${repo} rev-parse HEAD`.text()).trim(),
+    boa: (await ssh(builder, `cat ${DIR}/bin/bun-boa.rev`).text()).trim(),
   };
 
   // The most downloaded npm packages, from ecosyste.ms (npm's own search has no download ranking).
@@ -395,7 +402,6 @@ async function coordinate() {
         meta: {
           date: new Date().toISOString(),
           ...revisions,
-          // --no-build compares the binary of an earlier build, which may predate `boa`.
           rebuilt: !values["no-build"],
           hosts,
           down,

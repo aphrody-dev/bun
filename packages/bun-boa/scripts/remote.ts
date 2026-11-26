@@ -35,9 +35,16 @@ await ssh(
 const list = join(repo, `build/remote-files-${host}-${Bun.env.BUN_REMOTE_REPO ?? "bun-nojsc"}.txt`);
 await Bun.write(list, changed.join("\n") + "\n");
 await $`rsync -az --files-from=${list} ${`${repo}/`} ${`${host}:${remoteRepo}/`}`;
+// A checkout keeps the files an earlier sync added that the branch no longer has (a series in patches/ that
+// moved elsewhere still gets its vendor/ row): remove the untracked files this sync did not send.
+await $`ssh -o BatchMode=yes ${host} ${
+  `set -e; cd ${remoteRepo}; keep=$(mktemp); sort > "$keep"; ` +
+  `git ls-files -o --exclude-standard | sort | comm -23 - "$keep" | xargs -rd '\\n' rm -f --; rm -f "$keep"`
+} < ${Buffer.from(changed.join("\n") + "\n")}`;
 // Files the branch deleted still exist at the base commit the host checked out: delete them there too.
 const deleted = (await $`git -C ${repo} diff --name-only --diff-filter=D ${head}`.text()).split("\n").filter(Boolean);
-if (deleted.length) await $`ssh -o BatchMode=yes ${host} ${`cd ${remoteRepo} && xargs -0 rm -f`} < ${Buffer.from(deleted.join("\0"))}`;
+if (deleted.length)
+  await $`ssh -o BatchMode=yes ${host} ${`cd ${remoteRepo} && xargs -0 rm -f`} < ${Buffer.from(deleted.join("\0"))}`;
 
 // A pinned RUSTUP_TOOLCHAIN makes rustup skip the rust-toolchain.toml component sync, which otherwise reinstalls
 // the sysroot under concurrent builds on the same host and breaks their links (missing libstd-*.rlib).
@@ -52,7 +59,9 @@ const env = {
   RUSTC_WRAPPER: "sccache",
   SCCACHE_CONF: `${xfs}/sccache-dist-client.toml`,
 };
-const exports = Object.entries(env).map(([k, v]) => `${k}=${quote(v)}`).join(" ");
+const exports = Object.entries(env)
+  .map(([k, v]) => `${k}=${quote(v)}`)
+  .join(" ");
 const script = `cd ${remoteRepo}/packages/bun-boa && RUSTUP_TOOLCHAIN=${quote(env.RUSTUP_TOOLCHAIN)} bun scripts/setup.ts && env ${exports} ${args.map(quote).join(" ")}`;
 const proc = Bun.spawn(["ssh", "-o", "BatchMode=yes", host, script], { stdio: ["inherit", "inherit", "inherit"] });
 process.exit(await proc.exited);
