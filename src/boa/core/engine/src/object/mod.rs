@@ -31,6 +31,8 @@ mod tests;
 
 pub(crate) mod internal_methods;
 
+mod contextified_global;
+
 pub mod builtins;
 mod datatypes;
 mod jsobject;

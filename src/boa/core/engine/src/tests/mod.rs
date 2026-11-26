@@ -5,6 +5,7 @@ use indoc::indoc;
 
 mod async_generator;
 mod class;
+mod contextified_global;
 mod control_flow;
 mod env;
 mod function;
