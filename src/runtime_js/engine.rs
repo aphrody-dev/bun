@@ -218,6 +218,56 @@ pub(crate) fn define_iterator(global: &JSGlobalObject, target: &JSValue, iterato
     define_symbol_value(global, target, boa_engine::JsSymbol::iterator(), iterator, true)
 }
 
+/// `target[Symbol.asyncIterator] = iterator`, as WebIDL's async iterable declarations make it.
+pub(crate) fn define_async_iterator(global: &JSGlobalObject, target: &JSValue, iterator: JSValue) -> JsResult<()> {
+    define_symbol_value(global, target, boa_engine::JsSymbol::async_iterator(), iterator, true)
+}
+
+/// Makes `%AsyncIteratorPrototype%` the prototype of `prototype`, as WebIDL does for an async iterator's.
+pub(crate) fn inherit_async_iterator_prototype(global: &JSGlobalObject, prototype: &JSValue) {
+    let async_iterator = cx(global)
+        .intrinsics()
+        .objects()
+        .iterator_prototypes()
+        .async_iterator();
+    if let Some(prototype) = prototype.as_engine().as_object() {
+        prototype.set_prototype(Some(async_iterator));
+    }
+}
+
+/// `new constructor(...args)`.
+pub(crate) fn construct(global: &JSGlobalObject, constructor: &JSValue, args: &[JSValue]) -> JsResult<JSValue> {
+    let Some(constructor) = constructor.as_engine().as_object() else {
+        return Err(global.throw_type_error(format_args!("not a constructor")));
+    };
+    let args: Vec<boa_engine::JsValue> = args.iter().map(|arg| arg.as_engine().clone()).collect();
+    let result = constructor.construct(&args, None, cx(global));
+    global.lift(result).map(|object| JSValue::from_engine(object.into()))
+}
+
+/// `Promise.all(promises)` with the realm's own `Promise.all`.
+pub(crate) fn promise_all(global: &JSGlobalObject, promises: &[JSValue]) -> JsResult<JSValue> {
+    let promise = cx(global).intrinsics().constructors().promise().constructor();
+    let all = promise.get(js_string!("all"), cx(global));
+    let all = JSValue::from_engine(global.lift(all)?);
+    let array = bun_js::JSArray::create(global, promises).to_js();
+    all.call(global, JSValue::from_engine(promise.into()), &[array])
+}
+
+/// Whether `promise` is a promise that has not settled.
+pub(crate) fn is_pending(promise: &JSValue) -> bool {
+    promise
+        .as_engine()
+        .as_object()
+        .and_then(|object| JsPromise::from_object(object.clone()).ok())
+        .is_some_and(|promise| matches!(promise.state(), boa_engine::builtins::promise::PromiseState::Pending))
+}
+
+/// UTF-8 as `TextDecoder` decodes it for `text()`: without a BOM, invalid sequences as U+FFFD.
+pub(crate) fn decode_utf8_without_bom(bytes: &[u8]) -> JSValue {
+    JSValue::from_utf8(bun_core::strings::without_utf8_bom(bytes))
+}
+
 /// A string of UTF-16 code units in little-endian bytes; an odd last byte is dropped.
 pub(crate) fn string_from_utf16le(bytes: &[u8]) -> JSValue {
     let units: Vec<u16> = bytes

@@ -25,6 +25,12 @@ const OPS = "__bun_native_ops__";
   // bun_runtime_js::bun_object
   Glob: new (pattern: string) => unknown;
   deepEquals(a: unknown, b: unknown, strict?: boolean, skipPrototype?: boolean): boolean;
+  readableStreamToText(stream: unknown): Promise<string>;
+  readableStreamToBytes(stream: unknown): Promise<Uint8Array>;
+  readableStreamToArrayBuffer(stream: unknown): Promise<ArrayBuffer>;
+  readableStreamToJSON(stream: unknown): Promise<unknown>;
+  readableStreamToBlob(stream: unknown): Promise<Blob>;
+  readableStreamToArray(stream: unknown): Promise<unknown[]>;
   env: Record<string, string>;
   argv: string[];
   main: string;
@@ -51,6 +57,12 @@ const OPS = "__bun_native_ops__";
     semver: native.semver,
     Glob: native.Glob,
     deepEquals: native.deepEquals,
+    readableStreamToText: native.readableStreamToText,
+    readableStreamToBytes: native.readableStreamToBytes,
+    readableStreamToArrayBuffer: native.readableStreamToArrayBuffer,
+    readableStreamToJSON: native.readableStreamToJSON,
+    readableStreamToBlob: native.readableStreamToBlob,
+    readableStreamToArray: native.readableStreamToArray,
     fileURLToPath(url: unknown): string {
       const parsed = url instanceof URL ? url : new URL(String(url));
       if (parsed.protocol !== "file:") throw new TypeError("The URL must be of scheme file");

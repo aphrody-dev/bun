@@ -598,3 +598,53 @@ fn settled_promises() {
         );
     });
 }
+
+/// A class whose constructor finishes on the instance: `initialize` sees the object that `new` returns.
+#[derive(boa_gc::Trace, boa_gc::Finalize)]
+struct SelfAware {
+    me: JSValue,
+}
+
+impl bun_js::JsClass for SelfAware {
+    const NAME: &'static str = "SelfAware";
+
+    fn construct(_: &JSGlobalObject, _: &CallFrame<'_>) -> JsResult<SelfAware> {
+        Ok(SelfAware {
+            me: JSValue::UNDEFINED,
+        })
+    }
+
+    fn initialize(
+        this: &bun_js::ClassRef<SelfAware>,
+        global: &JSGlobalObject,
+        frame: &CallFrame<'_>,
+    ) -> JsResult<()> {
+        if frame.argument(0).is_truthy() {
+            return Err(global.throw_type_error(format_args!("initialize threw")));
+        }
+        this.borrow_mut(global)?.me = this.to_js();
+        Ok(())
+    }
+
+    fn define(class: &mut bun_js::class::ClassBuilder<'_, Self>) -> JsResult<()> {
+        class.getter("me", bun_js::class::Attributes::DEFAULT, |this, global| {
+            Ok(this.borrow(global)?.me.clone())
+        })
+    }
+}
+
+#[test]
+fn initialize_sees_the_instance() {
+    JSGlobalObject::with_new(|global| {
+        let constructor = bun_js::class::constructor::<SelfAware>(global).unwrap();
+        global.to_js_value().put(global, "SelfAware", constructor);
+        assert_eq!(
+            eval(global, "const s = new SelfAware(); String(s.me === s)").as_string().as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            eval(global, "try { new SelfAware(1); 'no' } catch (e) { e.message }").as_string().as_deref(),
+            Some("initialize threw")
+        );
+    });
+}

@@ -982,8 +982,17 @@ impl JsClass for Blob {
         })?;
         class.method("slice", 2, attributes, slice)?;
         class.method("stat", 0, attributes, stat)?;
-        class.method("stream", 1, attributes, |_, global, _| {
-            Err(not_implemented(global, "Blob.stream()"))
+        class.method("stream", 1, attributes, |this, global, _| {
+            // The bytes are read now and are the stream's one chunk.
+            let bytes = this
+                .borrow(global)?
+                .read_bytes()
+                .map_err(|error| throw_system_error(global, &error))?;
+            let chunks = match bytes.is_empty() {
+                true => Vec::new(),
+                false => vec![engine::uint8_array(global, &bytes)?],
+            };
+            crate::web::streams::readable_stream::of_chunks(global, &chunks)
         })?;
         class.method("text", 0, attributes, |this, global, _| {
             read_then(this, global, |_, bytes| Ok(decode_text(&bytes)))

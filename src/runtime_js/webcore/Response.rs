@@ -27,6 +27,8 @@ pub struct Response {
     pub body: Body,
     #[unsafe_ignore_trace]
     pub used: bool,
+    /// The `ReadableStream` that `body` answers, made the first time it is asked for.
+    pub stream: JSValue,
 }
 
 /// `ResponseInit`: status, status text and fields.
@@ -108,6 +110,7 @@ pub fn create(
             redirected,
             body,
             used: false,
+            stream: JSValue::UNDEFINED,
         },
     )
 }
@@ -128,14 +131,51 @@ fn content_type(global: &JSGlobalObject, headers: &JSValue) -> bun_js::JsResult<
 pub fn take_body<T: HasBody>(this: &ClassRef<T>, global: &JSGlobalObject) -> bun_js::JsResult<(Body, String)> {
     let headers = this.borrow(global)?.headers().clone();
     let content_type = content_type(global, &headers)?;
-    let mut payload = this.borrow_mut(global)?;
-    if payload.used() {
+    if body_used(this, global)? {
         return Err(global.throw_type_error(format_args!("Body already used")));
     }
+    // A read through the Response leaves the body's stream locked, as a reader that is never released would.
+    let stream = this.borrow(global)?.stream().clone();
+    if !stream.is_undefined() {
+        crate::web::streams::readable_stream_default_reader::acquire(global, &stream)?;
+        crate::web::streams::readable_stream::stream_of(&stream).borrow_mut(global)?.disturbed = true;
+    }
+    let mut payload = this.borrow_mut(global)?;
     if !payload.body().is_null() {
         payload.set_used();
     }
     Ok((payload.body().clone(), content_type))
+}
+
+/// `bodyUsed`, as Bun answers it: read, or its stream read or locked.
+fn body_used<T: HasBody>(this: &ClassRef<T>, global: &JSGlobalObject) -> bun_js::JsResult<bool> {
+    let (used, stream) = {
+        let payload = this.borrow(global)?;
+        (payload.used(), payload.stream().clone())
+    };
+    if used || stream.is_undefined() {
+        return Ok(used);
+    }
+    let stream = crate::web::streams::readable_stream::stream_of(&stream);
+    let stream = stream.borrow(global)?;
+    Ok(stream.disturbed || !stream.reader.is_undefined())
+}
+
+/// `body`: `null` without one, else its `ReadableStream`, the same one each time.
+fn body_stream<T: HasBody>(this: &ClassRef<T>, global: &JSGlobalObject) -> bun_js::JsResult<JSValue> {
+    let (body, stream) = {
+        let payload = this.borrow(global)?;
+        (payload.body().clone(), payload.stream().clone())
+    };
+    if !stream.is_undefined() {
+        return Ok(stream);
+    }
+    if body.is_null() {
+        return Ok(JSValue::NULL);
+    }
+    let stream = body::to_stream(global, &body)?;
+    this.borrow_mut(global)?.set_stream(stream.clone());
+    Ok(stream)
 }
 
 /// What `Request` and `Response` share: the Body mixin.
@@ -144,6 +184,9 @@ pub trait HasBody: JsClass {
     fn headers(&self) -> &JSValue;
     fn used(&self) -> bool;
     fn set_used(&mut self);
+    /// The `ReadableStream` of `body`, `undefined` until it is asked for.
+    fn stream(&self) -> &JSValue;
+    fn set_stream(&mut self, stream: JSValue);
 }
 
 impl HasBody for Response {
@@ -158,6 +201,12 @@ impl HasBody for Response {
     }
     fn set_used(&mut self) {
         self.used = true;
+    }
+    fn stream(&self) -> &JSValue {
+        &self.stream
+    }
+    fn set_stream(&mut self, stream: JSValue) {
+        self.stream = stream;
     }
 }
 
@@ -199,8 +248,8 @@ pub fn define_body<T: HasBody>(class: &mut ClassBuilder<'_, T>) -> bun_js::JsRes
     class.method("formData", 0, METHOD, |_, global, _| {
         Err(global.throw(format_args!("formData() is not implemented on Boa yet")))
     })?;
-    class.getter("bodyUsed", GETTER, |this, global| Ok(JSValue::js_boolean(this.borrow(global)?.used())))?;
-    class.getter("body", GETTER, |_, _| Ok(JSValue::NULL))?;
+    class.getter("bodyUsed", GETTER, |this, global| Ok(JSValue::js_boolean(body_used(this, global)?)))?;
+    class.getter("body", GETTER, body_stream)?;
     class.getter("headers", GETTER, |this, global| Ok(this.borrow(global)?.headers().clone()))?;
     Ok(())
 }
@@ -247,6 +296,7 @@ impl JsClass for Response {
             redirected: false,
             body,
             used: false,
+            stream: JSValue::UNDEFINED,
         })
     }
 
