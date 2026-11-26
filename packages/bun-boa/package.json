@@ -10,6 +10,7 @@
     "test": "bun scripts/remote.ts cargo nextest run",
     "build:cdp": "bun scripts/remote.ts env RUSTC_WRAPPER= cargo build --release -p kitesurf-cdp",
     "test:cdp": "bun scripts/remote.ts env RUSTC_WRAPPER= cargo test --release -p kitesurf-cdp",
-    "test:cluster": "bun scripts/test-cluster.ts"
+    "test:cluster": "bun scripts/test-cluster.ts",
+    "oracle": "bun scripts/oracle.ts"
   }
 }

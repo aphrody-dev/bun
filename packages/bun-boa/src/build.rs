@@ -1,4 +1,4 @@
-//! `bun build <entry…> [--outdir dir | --outfile file] [--minify]`: Bun's bundler (`BundleV2::generate_from_cli`)
+//! `bun build <entry…> [--outdir dir | --outfile file] [--minify] [--no-bundle]`: Bun's bundler (`BundleV2::generate_from_cli`)
 //! driven the way `src/runtime/cli/build_command.rs` drives it, without `bun_runtime`'s CLI context.
 //! Behind the `build` feature until the bundler's graph links without C/C++.
 
@@ -10,6 +10,7 @@ pub fn main(args: &[String]) -> i32 {
     bun_core::output::stdio::init();
     let (mut entries, mut outdir, mut outfile, mut minify): (_, Option<String>, Option<String>, _) =
         (Vec::new(), None, None, false);
+    let mut no_bundle = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -25,6 +26,7 @@ pub fn main(args: &[String]) -> i32 {
                 }) = Some(value.clone());
             }
             "--minify" => minify = true,
+            "--no-bundle" => no_bundle = true,
             flag if flag.starts_with("--outdir=") => {
                 outdir = Some(flag["--outdir=".len()..].into())
             }
@@ -95,7 +97,33 @@ pub fn main(args: &[String]) -> i32 {
         return 1;
     }
     this.configure_linker();
+    this.options.transform_only = no_bundle;
     this.sync_resolver_opts();
+    // As build_command.rs: --no-bundle transpiles each entry without linking, through Transpiler::transform.
+    if no_bundle {
+        this.options.import_path_format = options::ImportPathFormat::Relative;
+        this.options.allow_runtime = false;
+        this.resolver.opts.allow_runtime = false;
+        let result = this.transform(log, api::TransformOptions::default());
+        // SAFETY: leaked above, and the transform is done with it.
+        let log = unsafe { &*log };
+        if log.has_errors() {
+            let mut text = String::new();
+            let _ = log.print(&mut text);
+            eprint!("{text}");
+        }
+        let output = match result {
+            Ok(result) if result.errors.is_empty() && !result.output_files.is_empty() => {
+                result.output_files
+            }
+            Ok(_) => return 1,
+            Err(err) => {
+                eprintln!("error: {}", err.name());
+                return 1;
+            }
+        };
+        return write_outputs(&output, outdir.as_deref());
+    }
     let event_loop = bun_event_loop::AnyEventLoop::init();
     let (mut files, mut minify_ns, mut size) = (0usize, 0u64, 0u64);
     let result = BundleV2::generate_from_cli(
@@ -121,11 +149,15 @@ pub fn main(args: &[String]) -> i32 {
             return 1;
         }
     };
+    write_outputs(&output, outdir.as_deref())
+}
+
+fn write_outputs(output: &[options::OutputFile], outdir: Option<&str>) -> i32 {
     for file in output.iter() {
         let options::OutputFileValue::Buffer { bytes } = &file.value else {
             continue;
         };
-        let dest = match &outdir {
+        let dest = match outdir {
             Some(dir) => {
                 std::path::Path::new(dir).join(String::from_utf8_lossy(&file.dest_path).as_ref())
             }
