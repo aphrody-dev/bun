@@ -379,6 +379,21 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         true,
         context,
     )?;
+    let global = bun_js::JSGlobalObject::from_context(context);
+    let fs_constants = bun_runtime_js::node::node_fs_constant::create(global);
+    let os_constants = bun_runtime_js::node::node_fs_constant::create_os(global);
+    ops.set(
+        js_string!("fsConstants"),
+        fs_constants.into_engine(),
+        true,
+        context,
+    )?;
+    ops.set(
+        js_string!("osConstants"),
+        os_constants.into_engine(),
+        true,
+        context,
+    )?;
     context.register_global_property(JsString::from(OPS), ops.clone(), Attribute::all())?;
     let source =
         crate::transpile::transpile(b"bun:intrinsics.ts", include_bytes!("js/intrinsics.ts"))
