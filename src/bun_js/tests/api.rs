@@ -1,8 +1,8 @@
 //! The engine boundary on Boa: values, objects, host functions, exceptions, roots, modules.
 
 use bun_js::{
-    CallFrame, ErrorCode, JSArray, JSFunction, JSGlobalObject, JSModule, JSObject, JSValue,
-    JsError, JsResult, Strong, TopExceptionScope, Weak,
+    CallFrame, ErrorCode, JSArray, JSFunction, JSGlobalObject, JSModule, JSObject, JSPromise,
+    JSValue, JsError, JsResult, Strong, TopExceptionScope, Weak,
 };
 
 fn eval(global: &JSGlobalObject, source: &str) -> JSValue {
@@ -570,5 +570,31 @@ fn internal_fields() {
         let seen = eval(global, "fields.get(object)[1]");
         assert_eq!(seen.get_number(), Some(7.0));
         assert!(eval(global, "fields.get({})").is_undefined());
+    });
+}
+
+#[test]
+fn settled_promises() {
+    JSGlobalObject::with_new(|global| {
+        let this = global.to_js_value();
+        this.put(
+            global,
+            "resolved",
+            JSPromise::resolved_promise_value(global, JSValue::js_number(1.0)),
+        );
+        this.put(
+            global,
+            "rejected",
+            JSPromise::rejected_promise_value(global, JSValue::from_utf8(b"no")),
+        );
+        eval(
+            global,
+            "globalThis.out = []; resolved.then(v => out.push(v)); rejected.catch(e => out.push(e));",
+        );
+        global.drain_microtasks().unwrap();
+        assert_eq!(
+            eval(global, "out.join()").as_string().as_deref(),
+            Some("1,no")
+        );
     });
 }

@@ -15,10 +15,12 @@
 
 #![warn(unused_must_use)]
 
+mod array_buffer;
 mod async_context;
 pub mod bindgen;
 mod call_frame;
 pub mod class;
+mod deep_equals;
 mod error_code;
 mod exception;
 mod global;
@@ -26,6 +28,7 @@ mod host_fn;
 mod internal_field;
 pub mod module;
 mod object;
+mod promise;
 mod realm;
 mod strong;
 mod value;
@@ -34,12 +37,14 @@ pub use async_context::AsyncContextJobExecutor;
 pub use bun_core::JsError;
 pub use call_frame::CallFrame;
 pub use class::{ClassRef, JsClass};
+pub use deep_equals::DeepEqualsMode;
 pub use error_code::{ErrorCode, ErrorKind};
 pub use exception::TopExceptionScope;
 pub use global::JSGlobalObject;
 pub use host_fn::{JSFunction, JSHostFn};
 pub use module::JSModule;
 pub use object::{JSArray, JSObject};
+pub use promise::JSPromise;
 pub use strong::{Strong, Weak};
 pub use value::{CoerceTo, JSValue};
 

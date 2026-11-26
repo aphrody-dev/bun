@@ -1,6 +1,6 @@
 [package]
 name = "bun_runtime_js"
-description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff, Blob, File, Bun.file, Bun.write."
+description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff, Blob, File, Bun.file, Bun.write, Bun.Glob, Bun.deepEquals."
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -12,13 +12,14 @@ path = "lib.rs"
 
 # The schemas this crate implements that are not in its directory: the JavaScriptCore build reads them too.
 [package.metadata.bun-js]
-bindings = ["../runtime/node/node_path.bind.ts", "../runtime/node/node_validators.bind.ts"]
+bindings = ["../runtime/api/Glob.bind.ts", "../runtime/node/node_path.bind.ts", "../runtime/node/node_validators.bind.ts"]
 
 [dependencies]
 boa_engine = { path = "../boa/core/engine", features = ["annex-b", "intl_bundled", "experimental"] }
 boa_gc = { path = "../boa/core/gc" }
 bstr = { version = "1", default-features = false, features = ["alloc"] }
 bun_core = { path = "../bun_core" }
+bun_glob = { path = "../glob" }
 bun_http_types = { path = "../http_types" }
 bun_js = { path = "../bun_js" }
 bun_node_path = { path = "../node_path" }
@@ -27,3 +28,7 @@ bun_sys = { path = "../sys" }
 bun_text_diff = { path = "../text_diff" }
 const_format = "0.2"
 libc = "0.2"
+
+[dev-dependencies]
+# The C and C++ symbols that bun_core and bun_sys link against (WTF), in Rust, as the bun binary has them.
+bun_sema_standalone = { path = "../sema/standalone" }

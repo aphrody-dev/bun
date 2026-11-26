@@ -10,7 +10,10 @@
 //   - a `bun_js::JSHostFn` per function (`pub fn <name>(global, frame)`), and `create_<name>(global)`, its
 //     function object;
 //   - `create_<namespace>(global)`, the namespace object;
-//   - `impl bun_js::JsClass` for each class's payload, and a struct with `into_js` for each dictionary that is returned;
+//   - `impl bun_js::JsClass` for each class's payload: its builtins are the JavaScript of src/js/builtins/<class>.ts,
+//     and a method with a `privateSymbol` is the property `__intrinsic__<symbol>` that a builtin reads;
+//   - a struct with `into_js` for each dictionary that is returned, and a struct or an enum with `from_js` for each
+//     dictionary and union that is taken;
 //   - `exports(global)`: every function, namespace and class constructor by the name JavaScript knows it by;
 //   - `native(global, symbol)`: what `$bindgen("<file>.bind.ts", symbol)` answers.
 // At the top level, `native(global, file, symbol)` picks the module of `file`.
@@ -34,11 +37,14 @@ import {
   LocalStringType,
   type Method,
   type NamespaceDefinition,
+  NamedType,
   OptionalType,
+  OwnedUtf8Type,
   RestType,
   type Signature,
   snakeCase,
   type Type,
+  UnionType,
   UnitType,
   Utf8Type,
   VariadicType,
@@ -83,6 +89,7 @@ function converter(type: Type): string {
     return refuse(type.idlType);
   }
   if (type instanceof Utf8Type) return type.isLoose ? "loose_utf8" : "strict_utf8";
+  if (type instanceof OwnedUtf8Type) return type.valueKinds === "any" ? "loose_owned_utf8" : "strict_owned_utf8";
   // `.allowStringObject` made a `String` object a string already (`prepared`).
   if (type instanceof LocalStringType) return "local_string";
   // `b.any.orAbsent`: an argument that is not passed is `undefined`, as C++'s `arguments.at(i)` reads it.
@@ -102,9 +109,15 @@ function context(arg: Pick<Argument, "name" | "validatorExpects">, index?: strin
   return `bindgen::from_js::Context::Validator { name: ${rustString(arg.name)}, expected: ${rustString(arg.validatorExpects)}, index: ${index === undefined ? "None" : `Some(${index})`} }`;
 }
 
+/** The schema whose module is being written: where a dictionary or a union of another schema is found from. */
+let currentFile: SchemaFile;
+
 /** Rust that converts `value` (a `JSValue`) to an argument of `type`, an expression of `bindgen::Result<'a, T>`. */
 function convert(type: Type, value: string, ctx: string): string {
-  const call = (inner: Type) => `bindgen::from_js::${converter(inner)}(heap, &${value}, ${ctx})`;
+  const call = (inner: Type) =>
+    inner instanceof DictionaryType || inner instanceof UnionType
+      ? `${namedPath(inner, currentFile)}::from_js(heap, &${value}, ${ctx})`
+      : `bindgen::from_js::${converter(inner)}(heap, &${value}, ${ctx})`;
   if (type instanceof OptionalType) {
     const absent = { optional: `${value}.is_undefined()`, nullable: `${value}.is_undefined_or_null()` }[
       type.modifier as "optional" | "nullable"
@@ -123,7 +136,7 @@ function convert(type: Type, value: string, ctx: string): string {
 }
 
 /** Where `type` is in the module of `file`: a dictionary of another schema is in that one's module. */
-function namedPath(type: DictionaryType, file: SchemaFile): string {
+function namedPath(type: DictionaryType | UnionType, file: SchemaFile): string {
   if (type.origin!.crate !== file.origin.crate) refuse(`${type.name}: a dictionary of another crate`);
   return type.origin!.rustModule === file.origin.rustModule
     ? type.name
@@ -133,21 +146,35 @@ function namedPath(type: DictionaryType, file: SchemaFile): string {
 /** Whether what a body returns as `type` borrows from the call. */
 function borrowsCall(type: Type): boolean {
   if (type instanceof LocalStringType || type instanceof Utf8Type || type instanceof AnyType) return true;
-  if (type instanceof OptionalType) return borrowsCall(type.inner);
+  if (type instanceof OptionalType || type instanceof DefaultType) return borrowsCall(type.inner);
   if (type instanceof DictionaryType) return type.members.some(member => borrowsCall(member.type));
+  if (type instanceof UnionType) return type.alternatives.some(alternative => borrowsCall(alternative.type));
   return false;
 }
 
-/** The Rust type of a member of a dictionary that is returned. */
+/** The Rust type of a member of a dictionary or an alternative of a union. A member with a default that is taken
+ * has it filled in. */
 function memberRustType(type: Type, file: SchemaFile): string {
   if (type instanceof LocalStringType || type instanceof Utf8Type) return "&'a [u8]";
+  if (type instanceof OwnedUtf8Type) return "Vec<u8>";
   if (type instanceof BoolType || type instanceof DoubleType) return type.rustName;
   if (type instanceof IntegerType && isPlainInteger(type)) return type.rustName;
   if (type instanceof AnyType && type.checkedResult === null) return "bindgen::JsLocal<'a>";
   if (type instanceof OptionalType && (type.modifier === "optional" || type.modifier === "nullable"))
     return `Option<${memberRustType(type.inner, file)}>`;
-  if (type instanceof DictionaryType) return `${namedPath(type, file)}${borrowsCall(type) ? "<'a>" : ""}`;
+  if (type instanceof DefaultType) return memberRustType(type.inner, file);
+  if (type instanceof DictionaryType || type instanceof UnionType)
+    return `${namedPath(type, file)}${borrowsCall(type) ? "<'a>" : ""}`;
   return refuse(`a member of a dictionary of ${type.constructor.name} (${type.tsType})`);
+}
+
+/** The value of a member that is absent, for `Default`: its `.default()`, or `None`. */
+function absentValue(type: Type): string {
+  if (type instanceof DefaultType)
+    return type.inner instanceof Utf8Type ? `&${type.inner.toRust(type.value)}[..]` : type.inner.toRust(type.value);
+  if (type instanceof OptionalType) return "None";
+  if (type instanceof AnyType) return "bindgen::JsLocal::UNDEFINED";
+  return refuse(`a default of ${type.constructor.name} (${type.tsType})`);
 }
 
 /** Rust that converts `value` (what a body returns) to JS, an expression of `bindgen::Result<'a, JsLocal<'a>>`. */
@@ -361,6 +388,123 @@ ${indent(puts.join("\n"), 8)}
 `;
 }
 
+/** A dictionary that a body takes: a struct, `Default` where every member can be absent, and `from_js`, which reads
+ * it as C++'s `convertDictionaryInto`: each member in order, from the object and its prototypes short of
+ * `Object.prototype`. */
+function rustForAcceptedDictionary(type: DictionaryType, file: SchemaFile): string {
+  const what = `dictionary ${type.name}`;
+  const unsupported = (
+    [
+      ["nonObjectAsEmpty", type.nonObjectAsEmpty],
+      ["webIDL", type.webIDL],
+    ] as const
+  ).filter(([, value]) => value);
+  if (unsupported.length) refuse(`${what}: ${unsupported.map(([key]) => key).join(", ")}`);
+  for (const member of type.members)
+    if (member.expected !== undefined) refuse(`${what}.${member.name}: expected (Node's ERR_INVALID_ARG_TYPE text)`);
+  const lifetime = borrowsCall(type) ? "<'a>" : "";
+  const fields = type.members.map(member => `pub ${member.rustName}: ${memberRustType(member.type, file)},`);
+  const reads = type.members.map((member, i) => {
+    const qualified = type.reportedAs ? `${type.reportedAs}.${member.name}` : member.name;
+    const ctx = `bindgen::from_js::Context::Argument(${rustString(qualified)})`;
+    const [first, ...others] = member.names;
+    const lines = [
+      `let ${others.length ? "mut " : ""}value${i} = bindgen::from_js::dictionary_member(heap, &object, ${rustString(first)})?;`,
+    ];
+    for (const other of others)
+      lines.push(
+        `if value${i}.is_undefined() { value${i} = bindgen::from_js::dictionary_member(heap, &object, ${rustString(other)})?; }`,
+      );
+    if (!member.type.takesUndefined)
+      lines.push(`if value${i}.is_undefined() { return Err(bindgen::from_js::required(heap, ${ctx})); }`);
+    lines.push(`let ${member.rustName} = (${convert(member.type, `value${i}`, ctx)})?;`);
+    return lines.join("\n");
+  });
+  const defaults = type.hasDefault
+    ? `
+impl${lifetime} Default for ${type.name}${lifetime} {
+    fn default() -> Self {
+        Self {
+${indent(type.members.map(member => `${member.rustName}: ${absentValue(member.type)},`).join("\n"), 12)}
+        }
+    }
+}
+`
+    : "";
+  return `
+/// \`${type.name}\`, as a body takes it.
+pub struct ${type.name}${lifetime} {
+${indent(fields.join("\n"), 4)}
+}
+${defaults}
+impl<'a> ${type.name}${lifetime} {
+    /// \`value\` as this dictionary. It names itself in an error, as C++'s does: \`_ctx\` names the argument.
+    pub fn from_js(heap: &bindgen::JsHeap<'a>, value: &JSValue, _ctx: bindgen::from_js::Context<'_>) -> bindgen::Result<'a, Self> {
+        let object = bindgen::from_js::dictionary_object(heap, value, ${rustString(type.reportedAs || type.name)}, ${type.allowArray})?;
+${indent(reads.join("\n"), 8)}
+        Ok(Self { ${type.members.map(member => member.rustName).join(", ")} })
+    }
+}
+`;
+}
+
+/** What `value.is_<kind>()` tells a union's alternatives apart by. */
+const KIND_TESTS: Record<string, string> = {
+  undefined: "is_undefined",
+  null: "is_null",
+  boolean: "is_boolean",
+  number: "is_number",
+  bigint: "is_big_int",
+  string: "is_string",
+  symbol: "is_symbol",
+  stringObject: "is_string_object",
+  array: "is_array",
+  callable: "is_callable",
+};
+
+/** A union that a body takes: an enum, and `from_js`, which hands a value to the first alternative that takes its
+ * kind, and what no other takes to the one that converts it. Only a union where each kind goes to one alternative. */
+function rustForAcceptedUnion(type: UnionType, file: SchemaFile): string {
+  const what = `union ${type.name}`;
+  const lifetime = borrowsCall(type) ? "<'a>" : "";
+  const variants = type.alternatives.map(a =>
+    a.type instanceof UnitType ? `${a.variant},` : `${a.variant}(${memberRustType(a.type, file)}),`,
+  );
+  const branch = (index: number) => {
+    const alternative = type.alternatives[index];
+    if (alternative.type instanceof UnitType) return `Ok(Self::${alternative.variant})`;
+    const ctx = `bindgen::from_js::Context::Argument(${rustString(alternative.name)})`;
+    return `(${convert(alternative.type, "(*value)", ctx)}).map(Self::${alternative.variant})`;
+  };
+  const tests: string[] = [];
+  let other: number | undefined;
+  for (const [kind, list] of type.alternativesByKind) {
+    if (list.length !== 1) refuse(`${what}: a value of kind ${String(kind)} that one alternative may pass to the next`);
+    if (kind === "other") {
+      other = list[0];
+      continue;
+    }
+    const test = typeof kind === "string" ? KIND_TESTS[kind] : undefined;
+    if (!test) refuse(`${what}: telling apart a value of kind ${typeof kind === "string" ? kind : kind.cpp}`);
+    tests.push(`if value.${test}() { return ${branch(list[0])}; }`);
+  }
+  if (other === undefined) refuse(`${what}: a value no alternative takes`);
+  return `
+/// \`${type.name}\`, as a body takes it.
+pub enum ${type.name}${lifetime} {
+${indent(variants.join("\n"), 4)}
+}
+
+impl<'a> ${type.name}${lifetime} {
+    /// \`value\` as the alternative that takes it.
+    pub fn from_js(heap: &bindgen::JsHeap<'a>, value: &JSValue, _ctx: bindgen::from_js::Context<'_>) -> bindgen::Result<'a, Self> {
+${indent(tests.join("\n"), 8)}
+        ${branch(other!)}
+    }
+}
+`;
+}
+
 // ───────────────────────────── classes ─────────────────────────────
 
 function rustForClass(type: ClassType): string {
@@ -379,7 +523,6 @@ function rustForClass(type: ClassType): string {
       ["calledFromRust", type.calledFromRust.length],
       ["protoCaller", type.protoCaller],
       ["prototypeBase", type.prototypeBase],
-      ["builtins", type.builtins.length],
       ["constants", type.constants.length],
       ["finalize", type.finalize],
       ["thisValue", type.thisValue],
@@ -408,13 +551,25 @@ function rustForClass(type: ClassType): string {
 
   for (const fn of type.functions) {
     const method = onlySignature(fn, `${type.name}.${fn.name}`) as Method;
-    if (method.passThis || method.answersThis || method.privateSymbol || method.functionName)
-      refuse(`${what}.${fn.name}: passThis, answersThis, privateSymbol, functionName`);
+    if (method.passThis || method.answersThis || method.functionName)
+      refuse(`${what}.${fn.name}: passThis, answersThis, functionName`);
     if (method.invalidThis !== "throw") refuse(`${what}.${fn.name}: invalidThis "${method.invalidThis}"`);
     const call = (args: string[]) => `<${rustPath}>::${method.rustName}(${["this", ...args].join(", ")})`;
     const statements = body(method, call, returnConverted(method), borrow(method.receiver));
+    const host = `|this, global, frame| ${scoped("global", statements)}`;
+    // As C++'s: keyed by the private name (`this.$globScan` in a builtin), read-only and not enumerable.
     members.push(
-      `class.method(${named(fn.name)}, ${fn.length}, ${attributes()}, |this, global, frame| ${scoped("global", statements)})?;`,
+      method.privateSymbol
+        ? `class.private_method(${rustString(method.privateSymbol)}, ${named(fn.name)}, ${fn.length}, ${host})?;`
+        : `class.method(${named(fn.name)}, ${fn.length}, ${attributes()}, ${host})?;`,
+    );
+  }
+
+  for (const builtin of type.builtins) {
+    const source = builtinSources.get(`${type.name}.${builtin.name}`);
+    if (source === undefined) throw new Error(`${what}.${builtin.name}: its builtin source was not loaded`);
+    members.push(
+      `class.builtin(${named(builtin.name)}, ${builtin.length}, ${attributes()}, ${rustString(source)})?;`,
     );
   }
 
@@ -497,14 +652,50 @@ function rustForGetter(
 
 // ───────────────────────────── files ─────────────────────────────
 
+/** The named types an argument reaches, and those a result reaches: as bindgen-emit.ts's `analyze`. */
+function directions(files: readonly SchemaFile[]) {
+  const accepted = new Set<NamedType>();
+  const returned = new Set<NamedType>();
+  const walk = (type: Type, into: Set<NamedType>, seen = new Set<Type>()) => {
+    if (seen.has(type)) return;
+    seen.add(type);
+    if (type instanceof NamedType) into.add(type);
+    for (const dependency of type.dependencies) walk(dependency, into, seen);
+  };
+  for (const file of files) {
+    const signatures: Signature[] = file.functions.flatMap(fn => fn.signatures);
+    for (const type of file.types) {
+      if (type instanceof DictionaryType && type.fromJS) walk(type, accepted);
+      if (!(type instanceof ClassType)) continue;
+      signatures.push(...type.constructions, ...type.methods);
+      for (const getter of [...type.getters, ...type.staticGetters]) {
+        walk(getter.type, returned);
+        if (getter.hasSetter) walk(getter.type, accepted);
+      }
+    }
+    for (const signature of signatures) {
+      for (const arg of signature.args) walk(arg.type, accepted);
+      walk(signature.returns, returned);
+    }
+  }
+  return { accepted, returned };
+}
+let direction: ReturnType<typeof directions>;
+
 function rustForFile(file: SchemaFile): string {
+  currentFile = file;
   const items: string[] = [];
   const exports: string[] = [];
   /** `symbol => value` of `native`: what C++'s `js2native_bindgen_<stem>_<symbol>` answers. */
   const natives: string[] = [];
   for (const type of file.types) {
-    if (type instanceof DictionaryType) {
-      items.push(rustForDictionary(type, file));
+    if (type instanceof DictionaryType || type instanceof UnionType) {
+      const taken = direction.accepted.has(type);
+      if (taken && direction.returned.has(type)) refuse(`${type.name}: a type that is both taken and returned`);
+      if (type instanceof UnionType) {
+        if (!taken) refuse(`${type.name}: a union that is returned`);
+        items.push(rustForAcceptedUnion(type, file));
+      } else items.push(taken ? rustForAcceptedDictionary(type, file) : rustForDictionary(type, file));
       continue;
     }
     if (!(type instanceof ClassType)) refuse(`${type.constructor.name} ${type.name}`);
@@ -512,7 +703,7 @@ function rustForFile(file: SchemaFile): string {
     // As C++'s `$bindgen`: a class with `construct`, an illegal one included, has its constructor exported.
     if (type.construct) {
       exports.push(`(${rustString(type.name)}, bun_js::class::constructor::<${type.rustPath}>(global)?),`);
-      natives.push(`${rustString(type.name)} => return Some(bun_js::class::constructor::<${type.rustPath}>(global)),`);
+      natives.push(`${rustString(type.name)} => bun_js::class::constructor::<${type.rustPath}>(global),`);
     }
   }
   // As C++'s `$bindgen(file, name)`: every function by its key, those of a namespace too.
@@ -522,13 +713,13 @@ function rustForFile(file: SchemaFile): string {
       throw new Error(`${fn.name}: the generated module has an item of that name`);
     items.push(rustForFunction(fn, file));
     exports.push(`(${rustString(fn.name)}, create_${snakeCase(fn.name)}(global)),`);
-    natives.push(`${rustString(fn.name)} => create_${snakeCase(fn.name)}(global),`);
+    natives.push(`${rustString(fn.name)} => Ok(create_${snakeCase(fn.name)}(global)),`);
   }
   const namespaces: string[] = [];
   for (const namespace of file.namespaces) {
     items.push(rustForNamespace(namespace));
     namespaces.push(`(${rustString(namespace.name)}, create_${snakeCase(namespace.name)}(global)),`);
-    natives.push(`${rustString(namespace.name)} => create_${snakeCase(namespace.name)}(global),`);
+    natives.push(`${rustString(namespace.name)} => Ok(create_${snakeCase(namespace.name)}(global)),`);
   }
   return `
 /// \`${file.origin.stem}.bind.ts\`
@@ -553,10 +744,10 @@ ${indent(namespaces.join("\n"), 12)}
     /// What \`$bindgen("${file.origin.stem}.bind.ts", symbol)\` answers: the function, namespace or class constructor the
     /// schema exports as \`symbol\`, made anew each time, as C++ does. \`None\` for a symbol it does not export.
     pub fn native(global: &JSGlobalObject, symbol: &str) -> Option<JsResult<JSValue>> {
-        Some(Ok(match symbol {
+        Some(match symbol {
 ${indent(natives.join("\n"), 12)}
             _ => return None,
-        }))
+        })
     }
 }
 `;
@@ -578,6 +769,7 @@ function assertOwnersUnique(files: readonly SchemaFile[]) {
 
 export function rustForCrate(files: readonly SchemaFile[]): string {
   assertOwnersUnique(files);
+  direction = directions(files);
   for (const file of files)
     if (file.origin.rustModule === "native")
       throw new Error(`${file.origin.stem}.bind.ts: its module would be named native`);
@@ -607,12 +799,35 @@ ${indent(byFile.join("\n"), 8)}
 `;
 }
 
+/** `<class>.<name>` → the JavaScript of a class's builtin, which `ClassBuilder::builtin` evaluates. */
+const builtinSources = new Map<string, string>();
+
+/** Each builtin of the classes in `files`: the export of its name in src/js/builtins/<class>.ts, as Bun transpiles
+ * it, with `$name` as `__intrinsic__name`, the property a private name is on Boa. A builtin that reads an intrinsic
+ * that is not a member (`$isObject(x)`) is refused: nothing defines those for it. */
+export async function loadBuiltinSources(files: readonly SchemaFile[]) {
+  for (const file of files)
+    for (const type of file.types) {
+      if (!(type instanceof ClassType) || type.builtins.length === 0) continue;
+      const module = await import(path.join(import.meta.dir, "../js/builtins", `${type.name}.ts`));
+      for (const builtin of type.builtins) {
+        const fn = module[builtin.name];
+        if (typeof fn !== "function") throw new Error(`src/js/builtins/${type.name}.ts: no export ${builtin.name}`);
+        const source = ` ${fn.toString()}`.replace(/([^a-zA-Z0-9_$])\$([a-zA-Z0-9_]+\b)/g, "$1__intrinsic__$2").slice(1);
+        const free = source.match(/(?<![.\w$])__intrinsic__\w+/);
+        if (free) refuse(`${type.name}.${builtin.name}: a builtin that reads ${free[0].replace("__intrinsic__", "$")}`);
+        builtinSources.set(`${type.name}.${builtin.name}`, source);
+      }
+    }
+}
+
 if (import.meta.main) {
   const args = argParse(["sources", "codegen-path"]);
   const sources = (args.sources as string).split(",").filter(Boolean).sort();
   const files: SchemaFile[] = [];
   for (const source of sources) files.push(await loadSchemaFile(source));
   files.forEach(sortTypes);
+  await loadBuiltinSources(files);
   for (const [crate, crateFiles] of Map.groupBy(files, file => file.origin.crate)) {
     writeIfNotChanged(path.join(args["codegen-path"], `generated_bun_js_${crate}.rs`), rustForCrate(crateFiles));
   }

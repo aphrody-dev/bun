@@ -12,6 +12,7 @@
   nativeName(id: number): string;
   className(id: number): string | undefined;
   brand(value: unknown): string | undefined;
+  functionName(value: unknown): string | undefined;
   promiseState(promise: Promise<unknown>): 0 | 1 | 2;
   promiseResult(promise: Promise<unknown>): unknown;
   proxyField(proxy: object, field: 0 | 1): object | null | undefined;
@@ -25,6 +26,7 @@
   internalFields: WeakMap<object, unknown[]>;
   specifiers: string[];
   native: boolean[];
+  StringDecoder: new (encoding?: unknown) => object;
   installed?: { require(id: number): unknown; esm(id: number): [string, unknown][] };
 }) {
   const G = globalThis as any;
@@ -267,12 +269,39 @@
     );
   const intrinsic = (name: string) => (name in intrinsics ? intrinsics[name] : missing("$" + name));
 
+  // JSStringDecoderConstructor::call: called without `new` on an object, the constructor makes that object a
+  // decoder, which holds one in its private `decode` (express's body-parser does it). A Boa constructor does not see
+  // `this`, so this function stands in front of the Rust class (src/runtime_js/node/string_decoder.rs).
+  function stringDecoder(Native: new (encoding?: unknown) => object) {
+    const StringDecoder = function StringDecoder(this: unknown) {
+      const encoding = arguments[0];
+      if (new.target) return Reflect.construct(Native, [encoding], new.target);
+      const decoder: any = new Native(encoding);
+      if (((typeof this === "object" && this !== null) || typeof this === "function") && this !== StringDecoder) {
+        const hidden = { writable: true, enumerable: false, configurable: true };
+        defineProperty(this, "encoding", { ...hidden, value: decoder.encoding });
+        defineProperty(this, "__intrinsic__decode", { ...hidden, value: decoder });
+        return this;
+      }
+      return decoder;
+    } as unknown as { prototype: object };
+    defineProperty(StringDecoder, "prototype", { value: Native.prototype, writable: false });
+    defineProperty(Native.prototype, "constructor", {
+      value: StringDecoder,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+    return StringDecoder;
+  }
+
   const NATIVE_MODULES: Record<string, () => unknown> = {
     "bun": () => G.Bun,
     "node:process": () => G.process,
     "node:buffer": () => ({ Buffer: G.Buffer, kMaxLength: 2 ** 32, constants: { MAX_LENGTH: 2 ** 32 } }),
     "node:util/types": () => utilTypes,
     "node:constants": () => ({ ...processBindingConstants.os, ...processBindingConstants.fs }),
+    "node:string_decoder": () => ({ StringDecoder: stringDecoder(native.StringDecoder) }),
     "bun:jsc": () => bunJSC,
     "node:module": () => nodeModule,
   };
@@ -600,7 +629,15 @@
       if (inspecting) return String(value);
       inspecting = true;
       try {
-        return (createInternalModuleById(id) as any).inspect(value, options);
+        const text: string = (createInternalModuleById(id) as any).inspect(value, options);
+        // JavaScriptCore's formatter names a function as `getName` does, a bound one by its target: `[Function: f]`.
+        const name = typeof value === "function" ? native.functionName(value) : undefined;
+        const shown = typeof value === "function" ? (value as Function).name : undefined;
+        if (name && typeof shown === "string" && name !== shown) {
+          const head = text.slice(0, text.indexOf(": ") + 2);
+          if (text.startsWith(`${head}${shown}]`)) return head + name + text.slice(head.length + shown.length);
+        }
+        return text;
       } finally {
         inspecting = false;
       }

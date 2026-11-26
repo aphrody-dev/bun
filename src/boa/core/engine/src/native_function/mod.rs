@@ -84,6 +84,14 @@ pub struct NativeFunctionObject {
     pub(crate) realm: Option<Realm>,
 }
 
+impl NativeFunctionObject {
+    /// The name it was made with, which `Function.prototype.toString` prints: its `name` property can differ.
+    #[must_use]
+    pub const fn name(&self) -> &JsString {
+        &self.name
+    }
+}
+
 // SAFETY: this traces all fields that need to be traced by the GC.
 unsafe impl Trace for NativeFunctionObject {
     custom_trace!(this, mark, {

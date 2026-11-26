@@ -159,6 +159,13 @@ impl Error {
         }
     }
 
+    /// The kind of native error this is: `TypeError` for an instance of a class that extends `TypeError`.
+    #[inline]
+    #[must_use]
+    pub const fn kind(&self) -> ErrorKind {
+        self.tag
+    }
+
     /// Create a new [`Error`] with the given [`ErrorStack`].
     pub(crate) fn with_stack(tag: ErrorKind, location: ErrorStack) -> Self {
         Self {

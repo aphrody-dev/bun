@@ -174,6 +174,28 @@ fn class_name(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<
         .map_or(JsValue::undefined(), |c| JsString::from(*c).into()))
 }
 
+/// `functionName(fn)`: the name JavaScriptCore's `getName` gives a function, which `Bun.inspect` prints: a native
+/// function's own (`join` for one named as bound), a bound function's target's `name` (without `bound `).
+/// `undefined` for any other value, whose `name` property is it.
+fn function_name(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = args.get_or_undefined(0).as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    if let Some(native) =
+        object.downcast_ref::<boa_engine::native_function::NativeFunctionObject>()
+    {
+        return Ok(native.name().clone().into());
+    }
+    let target = object
+        .downcast_ref::<boa_engine::builtins::function::BoundFunction>()
+        .map(|bound| bound.target_function().clone());
+    let Some(target) = target else {
+        return Ok(JsValue::undefined());
+    };
+    let name = target.get(js_string!("name"), context)?;
+    Ok(if name.is_string() { name } else { js_string!().into() })
+}
+
 /// `brand(value)`: what kind of built-in object `value` is, by its internal slots, as JavaScriptCore's
 /// `@isPromise`, `@isMap`, … see it (a `Symbol.toStringTag` does not change it).
 fn brand(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
@@ -322,6 +344,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ("nativeName", native_name, 1),
         ("className", class_name, 1),
         ("brand", brand, 1),
+        ("functionName", function_name, 1),
         ("promiseState", promise_state, 1),
         ("promiseResult", promise_result, 1),
         ("proxyField", proxy_field, 2),
@@ -334,8 +357,17 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     ] {
         ops.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);
     }
+    // The native classes of the modules js/intrinsics.ts makes (`node:string_decoder`).
+    let global = bun_js::JSGlobalObject::from_context(ops.context());
+    let string_decoder = bun_runtime_js::node::string_decoder::constructor(global)
+        .map_err(|error| global.into_engine_error(error))?;
     ops.property(js_string!("specifiers"), specifiers, Attribute::all())
-        .property(js_string!("native"), native, Attribute::all());
+        .property(js_string!("native"), native, Attribute::all())
+        .property(
+            js_string!("StringDecoder"),
+            string_decoder.into_engine(),
+            Attribute::all(),
+        );
     let ops = ops.build();
     let internal_fields = bun_js::JSGlobalObject::from_context(context).internal_fields();
     ops.set(

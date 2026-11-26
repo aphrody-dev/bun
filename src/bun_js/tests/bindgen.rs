@@ -56,6 +56,23 @@ mod fixture {
         })
     }
 
+    pub fn describe_shape<'a>(
+        _: &JsHeap<'a>,
+        shape: Option<crate::generated::fixture::ShapeOrName<'a>>,
+    ) -> bindgen::Result<'a, String> {
+        use crate::generated::fixture::ShapeOrName;
+        Ok(match shape {
+            None => "nothing".to_owned(),
+            Some(ShapeOrName::Name(name)) => format!("named {}", String::from_utf8_lossy(name)),
+            Some(ShapeOrName::Shape(shape)) => format!(
+                "{} sides, {}, {}",
+                shape.sides,
+                shape.label.map_or("unlabelled".into(), String::from_utf8_lossy),
+                if shape.filled { "filled" } else { "empty" }
+            ),
+        })
+    }
+
     pub fn same<'a>(_: &JsHeap<'a>, value: JsLocal<'a>) -> JsLocal<'a> {
         value
     }
@@ -108,6 +125,10 @@ mod fixture {
 
         pub fn zero() -> u32 {
             0
+        }
+
+        pub fn peek(&self) -> u32 {
+            self.count
         }
     }
 }
@@ -349,6 +370,74 @@ fn a_dictionary_that_is_returned_and_any_values() {
         // `b.any.returning` holds the result to nothing: a String object stays one.
         assert_eq!(eval(global, "typeof same(new String('q'))"), "object");
         assert_eq!(eval(global, "const o = {}; same(o) === o"), "true");
+    });
+}
+
+#[test]
+fn dictionaries_and_unions_that_are_taken() {
+    realm(|global| {
+        assert_eq!(eval(global, "describeShape()"), "nothing");
+        assert_eq!(eval(global, "describeShape(null)"), "nothing");
+        assert_eq!(eval(global, "describeShape('box')"), "named box");
+        assert_eq!(eval(global, "describeShape(new String('box'))"), "named box");
+        assert_eq!(eval(global, "describeShape({ sides: 3 })"), "3 sides, unlabelled, filled");
+        // A second name is read where the first is undefined; `.default()` of `.nullable` takes null.
+        assert_eq!(
+            eval(global, "describeShape({ sides: 4, name: 'square', filled: null })"),
+            "4 sides, square, filled"
+        );
+        assert_eq!(
+            eval(global, "describeShape({ sides: 4, label: 'a', name: 'b', filled: 0 })"),
+            "4 sides, a, empty"
+        );
+        // From a prototype, but not from Object.prototype.
+        assert_eq!(
+            eval(global, "describeShape(Object.create({ sides: 5 }))"),
+            "5 sides, unlabelled, filled"
+        );
+        assert_eq!(
+            thrown(
+                global,
+                "Object.prototype.sides = 6; try { describeShape({}) } finally { delete Object.prototype.sides }"
+            ),
+            "TypeError: Shape.sides is required (ERR_INVALID_ARG_TYPE)"
+        );
+        // Members are read in order, each once.
+        assert_eq!(
+            eval(
+                global,
+                "(() => { const read = []; const o = {}; for (const k of ['filled', 'name', 'label', 'sides']) Object.defineProperty(o, k, { get() { read.push(k); return k === 'sides' ? 1 : undefined } }); describeShape(o); return read.join() })()"
+            ),
+            "sides,label,name,filled"
+        );
+        assert_eq!(
+            thrown(global, "describeShape(5)"),
+            "TypeError: Shape must be an object (ERR_INVALID_ARG_TYPE)"
+        );
+        // Without `allowArray`, an array is not one.
+        assert_eq!(
+            thrown(global, "describeShape([])"),
+            "TypeError: Shape must be an object (ERR_INVALID_ARG_TYPE)"
+        );
+        assert_eq!(
+            thrown(global, "describeShape({ sides: 1, label: 2 })"),
+            "TypeError: Shape.label must be a string (ERR_INVALID_ARG_TYPE)"
+        );
+        assert!(!global.has_exception());
+    });
+}
+
+#[test]
+fn a_method_keyed_by_a_private_name() {
+    realm(|global| {
+        assert_eq!(eval(global, "new Counter(7).__intrinsic__counterPeek()"), "7");
+        assert_eq!(eval(global, "Counter.prototype.__intrinsic__counterPeek.name"), "__peek");
+        let descriptor = "Object.getOwnPropertyDescriptor(Counter.prototype, '__intrinsic__counterPeek')";
+        assert_eq!(
+            eval(global, &format!("[{descriptor}.writable, {descriptor}.enumerable].join()")),
+            "false,false"
+        );
+        assert_eq!(eval(global, "'__peek' in Counter.prototype"), "false");
     });
 }
 

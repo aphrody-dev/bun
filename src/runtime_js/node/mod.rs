@@ -3,5 +3,6 @@
 pub mod async_hooks;
 pub(crate) mod node_validators;
 pub mod path;
+pub mod string_decoder;
 pub(crate) mod validators;
 pub mod vm;
