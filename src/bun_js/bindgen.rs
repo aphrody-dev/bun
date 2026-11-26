@@ -305,20 +305,76 @@ pub mod to_js {
     }
 }
 
-/// Converting arguments, as C++'s `Bun::Bindgen::LiteralConversionContext` does: a value of the wrong type throws
+/// Converting arguments, as C++'s conversion contexts do (see [`Context`]): a value of the wrong type throws
 /// `ERR_INVALID_ARG_TYPE` (`a must be a number`), a number out of range `ERR_OUT_OF_RANGE`
 /// (`a must be an integer (received 1.5)`, `a must be in the range [0, 255] (received 256)`).
 pub mod from_js {
     use super::*;
 
-    fn type_must_be<'a>(heap: &JsHeap<'a>, name: &str, noun_phrase: &str) -> Error<'a> {
+    /// What the error of a conversion says, as C++'s conversion contexts.
+    #[derive(Clone, Copy, Debug)]
+    pub enum Context<'n> {
+        /// `LiteralConversionContext`: `a must be a number`.
+        Argument(&'n str),
+        /// `ValidatorArgumentContext`, for an argument that `validatorExpects` names: what
+        /// src/runtime/node/util/validators.rs throws, `The "a" property must be of type string, got number`. `index`
+        /// is that of an element of a `b.rest`: `paths[1]`.
+        Validator {
+            name: &'n str,
+            expected: &'n str,
+            index: Option<usize>,
+        },
+    }
+
+    impl Context<'_> {
+        fn name(&self) -> &str {
+            match self {
+                Context::Argument(name) | Context::Validator { name, .. } => name,
+            }
+        }
+    }
+
+    /// `ERR_INVALID_ARG_TYPE` as Node's validators (src/runtime/node/util/validators.rs) throw it:
+    /// `The "name" property must be of type string, got number`, where an array is `array`.
+    pub fn invalid_arg_type<'a>(
+        heap: &JsHeap<'a>,
+        name: impl fmt::Display,
+        expected: &str,
+        value: &JSValue,
+    ) -> Error<'a> {
+        let actual = value.type_name(heap.global_object());
         heap.error_with_code(
             ErrorCode::INVALID_ARG_TYPE,
-            format_args!("{name} must be {noun_phrase}"),
+            format_args!("The \"{name}\" property must be of type {expected}, got {actual}"),
         )
     }
 
-    fn range<'a>(heap: &JsHeap<'a>, name: &str, predicate: fmt::Arguments<'_>) -> Error<'a> {
+    fn type_must_be<'a>(
+        heap: &JsHeap<'a>,
+        ctx: Context<'_>,
+        noun_phrase: &str,
+        value: &JSValue,
+    ) -> Error<'a> {
+        match ctx {
+            Context::Argument(name) => heap.error_with_code(
+                ErrorCode::INVALID_ARG_TYPE,
+                format_args!("{name} must be {noun_phrase}"),
+            ),
+            Context::Validator {
+                name,
+                expected,
+                index: None,
+            } => invalid_arg_type(heap, name, expected, value),
+            Context::Validator {
+                name,
+                expected,
+                index: Some(index),
+            } => invalid_arg_type(heap, format_args!("{name}[{index}]"), expected, value),
+        }
+    }
+
+    fn range<'a>(heap: &JsHeap<'a>, ctx: Context<'_>, predicate: fmt::Arguments<'_>) -> Error<'a> {
+        let name = ctx.name();
         heap.error_with_code(ErrorCode::OUT_OF_RANGE, format_args!("{name} {predicate}"))
     }
 
@@ -338,30 +394,30 @@ pub mod from_js {
         result.map_err(Error::pending)
     }
 
-    pub fn any<'a>(heap: &JsHeap<'a>, value: &JSValue, _: &str) -> Result<'a, JsLocal<'a>> {
+    pub fn any<'a>(heap: &JsHeap<'a>, value: &JSValue, _: Context<'_>) -> Result<'a, JsLocal<'a>> {
         Ok(JsLocal::new(heap, value.clone()))
     }
 
-    pub fn strict_bool<'a>(heap: &JsHeap<'a>, value: &JSValue, name: &str) -> Result<'a, bool> {
+    pub fn strict_bool<'a>(heap: &JsHeap<'a>, value: &JSValue, ctx: Context<'_>) -> Result<'a, bool> {
         value
             .as_engine()
             .as_boolean()
-            .ok_or_else(|| type_must_be(heap, name, "a boolean"))
+            .ok_or_else(|| type_must_be(heap, ctx, "a boolean", value))
     }
 
     /// `ToBoolean`.
-    pub fn loose_bool<'a>(_: &JsHeap<'a>, value: &JSValue, _: &str) -> Result<'a, bool> {
+    pub fn loose_bool<'a>(_: &JsHeap<'a>, value: &JSValue, _: Context<'_>) -> Result<'a, bool> {
         Ok(value.to_boolean())
     }
 
-    pub fn strict_f64<'a>(heap: &JsHeap<'a>, value: &JSValue, name: &str) -> Result<'a, f64> {
+    pub fn strict_f64<'a>(heap: &JsHeap<'a>, value: &JSValue, ctx: Context<'_>) -> Result<'a, f64> {
         value
             .get_number()
-            .ok_or_else(|| type_must_be(heap, name, "a number"))
+            .ok_or_else(|| type_must_be(heap, ctx, "a number", value))
     }
 
     /// `ToNumber`.
-    pub fn loose_f64<'a>(heap: &JsHeap<'a>, value: &JSValue, _: &str) -> Result<'a, f64> {
+    pub fn loose_f64<'a>(heap: &JsHeap<'a>, value: &JSValue, _: Context<'_>) -> Result<'a, f64> {
         lift(value.to_number(heap.global_object()))
     }
 
@@ -369,35 +425,35 @@ pub mod from_js {
     pub fn strict_integer<'a, T: Integer>(
         heap: &JsHeap<'a>,
         value: &JSValue,
-        name: &str,
+        ctx: Context<'_>,
     ) -> Result<'a, T> {
         let number = value
             .get_number()
-            .ok_or_else(|| type_must_be(heap, name, "a number"))?;
-        integer_of_number(heap, number, name)
+            .ok_or_else(|| type_must_be(heap, ctx, "a number", value))?;
+        integer_of_number(heap, number, ctx)
     }
 
     /// `ToNumber`, then as [`strict_integer`]: 1.5, NaN and Infinity are out of range, not truncated.
     pub fn loose_integer<'a, T: Integer>(
         heap: &JsHeap<'a>,
         value: &JSValue,
-        name: &str,
+        ctx: Context<'_>,
     ) -> Result<'a, T> {
         let number = lift(value.to_number(heap.global_object()))?;
-        integer_of_number(heap, number, name)
+        integer_of_number(heap, number, ctx)
     }
 
     fn integer_of_number<'a, T: Integer>(
         heap: &JsHeap<'a>,
         number: f64,
-        name: &str,
+        ctx: Context<'_>,
     ) -> Result<'a, T> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         if !(number.trunc() == number && number.abs() <= MAX_SAFE_INTEGER) {
             let received = number_text(heap, number);
             return Err(range(
                 heap,
-                name,
+                ctx,
                 format_args!("must be an integer (received {received})"),
             ));
         }
@@ -405,7 +461,7 @@ pub mod from_js {
         T::try_from(integer).map_err(|_| {
             range(
                 heap,
-                name,
+                ctx,
                 format_args!(
                     "must be in the range [{}, {}] (received {integer})",
                     T::MIN,
@@ -416,20 +472,48 @@ pub mod from_js {
     }
 
     /// A string (or a `String` object), as UTF-8 for the call.
-    pub fn strict_utf8<'a>(heap: &JsHeap<'a>, value: &JSValue, name: &str) -> Result<'a, &'a [u8]> {
-        let is_string_object = value
-            .get_object()
-            .is_some_and(|object| object.as_engine().is::<boa_engine::JsString>());
-        if !value.is_string() && !is_string_object {
-            return Err(type_must_be(heap, name, "a string"));
+    pub fn strict_utf8<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        ctx: Context<'_>,
+    ) -> Result<'a, &'a [u8]> {
+        if !value.is_string() && !value.is_string_object() {
+            return Err(type_must_be(heap, ctx, "a string", value));
         }
-        loose_utf8(heap, value, name)
+        loose_utf8(heap, value, ctx)
     }
 
     /// `ToString`, as UTF-8 for the call.
-    pub fn loose_utf8<'a>(heap: &JsHeap<'a>, value: &JSValue, _: &str) -> Result<'a, &'a [u8]> {
+    pub fn loose_utf8<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        _: Context<'_>,
+    ) -> Result<'a, &'a [u8]> {
         let string = lift(value.to_utf8(heap.global_object()))?;
         Ok(heap.keep(string.into_bytes()))
+    }
+
+    /// `b.string.local`: a string, as UTF-8 for the call. A `String` object is not one: `.allowStringObject` makes it
+    /// a string first, with [`string_of_string_object`].
+    pub fn local_string<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        ctx: Context<'_>,
+    ) -> Result<'a, &'a [u8]> {
+        if !value.is_string() {
+            return Err(type_must_be(heap, ctx, "a string", value));
+        }
+        loose_utf8(heap, value, ctx)
+    }
+
+    /// C++'s `stringOfStringObject`: `ToString` of a `String` object (which runs its `toString`), anything else as it
+    /// is. `.allowStringObject` and `b.any.stringObjectAsString` have it run on each argument, in order, before any is
+    /// converted.
+    pub fn string_of_string_object<'a>(heap: &JsHeap<'a>, value: &JSValue) -> Result<'a, JSValue> {
+        if !value.is_string_object() {
+            return Ok(value.clone());
+        }
+        lift(value.to_js_string(heap.global_object()))
     }
 
     /// The integer types an argument converts to.

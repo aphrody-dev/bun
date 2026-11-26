@@ -3,7 +3,7 @@
 [workspace]
 resolver = "2"
 # bun_js and the crates on it are members: Bun's root workspace does not build Boa.
-members = ["cdp", "../../src/bun_js", "../../src/semver_js"]
+members = ["cdp", "../../src/bun_js", "../../src/runtime_js", "../../src/semver_js"]
 
 [package]
 name = "bun-boa"

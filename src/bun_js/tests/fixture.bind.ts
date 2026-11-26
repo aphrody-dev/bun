@@ -1,8 +1,42 @@
 // What tests/bindgen.rs calls through the Rust that src/codegen/bindgen-js.ts writes from it: one of each kind of
 // member and conversion the emitter supports.
 import * as b from "../../codegen/bindgen-lib.ts";
+import * as table from "../../codegen/builtins/lib.ts";
 
 export default b.module({ rustPath: "crate::fixture" });
+
+/** Named as bound; `b.rest`; `.allowStringObject.local`; an error of `validatorExpects`; `convertedFirst`. */
+export const joinAll = b.fn({
+  namedAsBound: true,
+  length: 1,
+  args: { separator: b.string.allowStringObject.local, parts: b.rest(b.string.allowStringObject.local) },
+  validatorExpects: { parts: "string" },
+  convertedFirst: ["parts"],
+  returns: b.string.local,
+  capability: "heap",
+  throws: true,
+});
+
+/** A dictionary that is returned. */
+export const Split = b.dictionary({ head: b.string.local, count: b.u32, last: b.any, done: b.bool.optional });
+
+/** `b.rest` of `b.any.stringObjectAsString`. */
+export const split = b.fn({
+  args: { text: b.string.local, items: b.rest(b.any.stringObjectAsString) },
+  returns: Split,
+  capability: "heap",
+  throws: true,
+});
+
+/** `b.any.returning` with what is not a word: the result is held to nothing. */
+export const same = b.fn({
+  args: { value: b.any },
+  returns: b.any.returning(table.operand("value").spec),
+  capability: "heap",
+  uses: { value: [table.returned] },
+  reads: [],
+  writes: [],
+});
 
 export const add = b.fn({
   args: { a: b.i32, b: b.i32.loose },

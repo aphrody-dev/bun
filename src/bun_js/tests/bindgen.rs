@@ -34,6 +34,32 @@ mod fixture {
             .call(global, JSValue::UNDEFINED, &[argument])?)
     }
 
+    pub fn join_all<'a>(
+        _: &JsHeap<'a>,
+        separator: &'a [u8],
+        parts: &[&'a [u8]],
+    ) -> bindgen::Result<'a, Vec<u8>> {
+        Ok(parts.join(separator))
+    }
+
+    pub fn split<'a>(
+        _: &JsHeap<'a>,
+        text: &'a [u8],
+        items: &[JsLocal<'a>],
+    ) -> bindgen::Result<'a, crate::generated::fixture::Split<'a>> {
+        let end = bun_core::strings::index_of_char_usize(text, b' ').unwrap_or(text.len());
+        Ok(crate::generated::fixture::Split {
+            head: &text[..end],
+            count: items.len() as u32,
+            last: items.last().cloned().unwrap_or(JsLocal::UNDEFINED),
+            done: (end == text.len()).then_some(true),
+        })
+    }
+
+    pub fn same<'a>(_: &JsHeap<'a>, value: JsLocal<'a>) -> JsLocal<'a> {
+        value
+    }
+
     pub fn half(value: f64) -> f64 {
         value / 2.0
     }
@@ -227,7 +253,7 @@ fn a_body_that_runs_javascript() {
 fn namespaces() {
     realm(|global| {
         fn make(global: &JSGlobalObject, _: &CallFrame<'_>) -> JsResult<JSValue> {
-            generated::fixture::create_math(global)
+            Ok(generated::fixture::create_math(global))
         }
         global.to_js_value().put(
             global,
@@ -249,6 +275,116 @@ fn namespaces() {
             ),
             "false:function"
         );
+    });
+}
+
+#[test]
+fn rest_string_objects_and_the_errors_of_validators() {
+    realm(|global| {
+        assert_eq!(eval(global, "joinAll('-', 'a', new String('b'), 'c')"), "a-b-c");
+        assert_eq!(eval(global, "joinAll(new String('+'))"), "");
+        // `namedAsBound`: its `name` is that of a bound function, and it prints as itself.
+        assert_eq!(
+            eval(global, "[joinAll.name, joinAll.length, String(joinAll)].join()"),
+            "bound joinAll,1,function joinAll() { [native code] }"
+        );
+        assert_eq!(
+            thrown(global, "joinAll('-', 'a', 1)"),
+            "TypeError: The \"parts[1]\" property must be of type string, got number (ERR_INVALID_ARG_TYPE)"
+        );
+        assert_eq!(
+            thrown(global, "joinAll('-', [])"),
+            "TypeError: The \"parts[0]\" property must be of type string, got array (ERR_INVALID_ARG_TYPE)"
+        );
+        // `parts` is converted first. `separator` has the message of a literal conversion: no `validatorExpects`.
+        assert_eq!(
+            thrown(global, "joinAll(1, null)"),
+            "TypeError: The \"parts[0]\" property must be of type string, got object (ERR_INVALID_ARG_TYPE)"
+        );
+        assert_eq!(
+            thrown(global, "joinAll(1, 'a')"),
+            "TypeError: separator must be a string (ERR_INVALID_ARG_TYPE)"
+        );
+        // Every String object is made a string, in order, before any argument is converted.
+        assert_eq!(
+            eval(
+                global,
+                "(() => { const log = []; const s = t => { const o = new String(t); o.toString = () => (log.push(t), t); return o }; try { joinAll(s('/'), 1, s('x')) } catch {} return log.join() })()"
+            ),
+            "/,x"
+        );
+        assert_eq!(
+            thrown(
+                global,
+                "const bad = new String('x'); bad.toString = () => { throw new EvalError('to string') }; joinAll('-', bad)"
+            ),
+            "EvalError: to string (undefined)"
+        );
+        // Without `.allowStringObject`, a String object is not a string.
+        assert_eq!(
+            thrown(global, "split(new String('a b'))"),
+            "TypeError: text must be a string (ERR_INVALID_ARG_TYPE)"
+        );
+        assert!(!global.has_exception());
+    });
+}
+
+#[test]
+fn a_dictionary_that_is_returned_and_any_values() {
+    realm(|global| {
+        assert_eq!(
+            eval(global, "JSON.stringify(split('a b', 1, new String('z')))"),
+            r#"{"head":"a","count":2,"last":"z"}"#
+        );
+        // `.optional` and absent: left out.
+        assert_eq!(eval(global, "Object.keys(split('a b')).join()"), "head,count,last");
+        assert_eq!(eval(global, "Object.keys(split('ab')).join()"), "head,count,last,done");
+        assert_eq!(eval(global, "split('ab').done"), "true");
+        // `b.any.stringObjectAsString`: a String object arrives as its string.
+        assert_eq!(eval(global, "typeof split('a', new String('z')).last"), "string");
+        assert_eq!(
+            eval(global, "Object.getPrototypeOf(split('')) === Object.prototype"),
+            "true"
+        );
+        // `b.any.returning` holds the result to nothing: a String object stays one.
+        assert_eq!(eval(global, "typeof same(new String('q'))"), "object");
+        assert_eq!(eval(global, "const o = {}; same(o) === o"), "true");
+    });
+}
+
+#[test]
+fn natives_as_bindgen_answers_them() {
+    realm(|global| {
+        let native = |symbol| generated::native(global, "fixture.bind.ts", symbol);
+        assert!(native("nothing").is_none());
+        assert!(generated::native(global, "other.bind.ts", "add").is_none());
+        let add = native("add").expect("add");
+        let five = add
+            .call(
+                global,
+                JSValue::UNDEFINED,
+                &[JSValue::js_number(2.0), JSValue::js_number(3.0)],
+            )
+            .unwrap();
+        assert_eq!(five.get_number(), Some(5.0));
+        // A function of a namespace by its key, and the namespace by its name.
+        assert!(native("half").is_some_and(|half| half.is_callable()));
+        assert!(
+            native("math")
+                .unwrap()
+                .get(global, "isTruthy")
+                .unwrap()
+                .is_some()
+        );
+        // A class by its constructor.
+        let counter = native("Counter").expect("Counter");
+        global.to_js_value().put(global, "NativeCounter", counter);
+        assert_eq!(
+            eval(global, "new NativeCounter(4).count + ':' + (new NativeCounter() instanceof Counter)"),
+            "4:true"
+        );
+        // A dictionary is a type, not a value.
+        assert!(native("Split").is_none());
     });
 }
 

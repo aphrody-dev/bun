@@ -194,3 +194,33 @@ fn function_constructor_early_errors_super() {
         ),
     ]);
 }
+
+#[test]
+fn function_prototype_to_string_of_built_ins_prints_their_initial_name() {
+    run_test_actions([
+        TestAction::assert_eq(
+            "String(Array)",
+            js_str!("function Array() { [native code] }"),
+        ),
+        TestAction::assert_eq(
+            "String(Array.prototype.map)",
+            js_str!("function map() { [native code] }"),
+        ),
+        TestAction::assert_eq(
+            "String(parseInt)",
+            js_str!("function parseInt() { [native code] }"),
+        ),
+        TestAction::assert_eq(
+            "String(Object.getOwnPropertyDescriptor(Map.prototype, 'size').get)",
+            js_str!("function get size() { [native code] }"),
+        ),
+        TestAction::assert_eq(
+            "Object.defineProperty(parseFloat, 'name', { value: 'renamed' }); String(parseFloat)",
+            js_str!("function parseFloat() { [native code] }"),
+        ),
+        TestAction::assert_eq(
+            "delete Math.max.name; String(Math.max)",
+            js_str!("function max() { [native code] }"),
+        ),
+    ]);
+}

@@ -22,11 +22,17 @@ A crate on `bun_js` (`src/bun_js`, the engine boundary on Boa) gets its bindings
 instead: `generated_bun_js_<crate>.rs`, Rust only, whose host functions convert their arguments with
 `bun_js::bindgen::from_js` and call the same bodies, against `bun_js::bindgen`'s `JsHeap`, `JsScope` and `Result`. Each schema file
 becomes a module with a `JSHostFn` per function, `create_<name>` for its function object or namespace, `impl bun_js::JsClass` for each
-class, and `exports(global)`, which the embedder puts where JavaScript finds them (`packages/bun-boa/src/runtime.rs`). Its conversions
-throw what C++'s `LiteralConversionContext` throws (`a must be a number`, `ERR_INVALID_ARG_TYPE`). A class member converts its arguments
-before it borrows the payload. Whatever the emitter does not convert yet, it refuses by name, failing the build: each `refuse(` call in
-the emitter is one such feature. `src/bun_js/tests/fixture.bind.ts` is one of each kind it supports. `packages/bun-boa/scripts/setup.ts` runs it over the `.bind.ts` files of that workspace's members. Until `bun_runtime` moves,
-the JavaScriptCore build compiles such a crate's code too, from a crate of its own (`src/semver_jsc` includes `src/semver_js`).
+class, a struct with `into_js` for each dictionary that is returned, `exports(global)`, which the embedder puts where JavaScript finds
+them (`packages/bun-boa/src/runtime.rs`), and `native(global, symbol)`, what `$bindgen("<file>.bind.ts", symbol)` answers; the crate's
+top-level `native(global, file, symbol)` picks the file. Its conversions throw what C++'s `LiteralConversionContext` throws (`a must be a
+number`, `ERR_INVALID_ARG_TYPE`), or for an argument that `validatorExpects` names what Node's validators throw (`The "paths[1]" property
+must be of type string, got number`). On `bun_js`, `b.string.local` and `b.string.utf8` are `&'a [u8]` of UTF-8 for the body. A class
+member converts its arguments before it borrows the payload. Whatever the emitter does not convert yet, it refuses by name, failing the
+build: each `refuse(` call in the emitter is one such feature. `src/bun_js/tests/fixture.bind.ts` is one of each kind it supports.
+`packages/bun-boa/scripts/setup.ts` runs it over the `.bind.ts` files of that workspace's members, and over the schemas a member lists
+outside its directory in its `Cargo.toml` (`[package.metadata.bun-js] bindings = ["../runtime/node/node_path.bind.ts"]`), which the
+JavaScriptCore build shares (`src/runtime_js`, `bun_runtime_js`, implements `node_path.bind.ts`). Until `bun_runtime` moves, the
+JavaScriptCore build compiles such a crate's code too, from a crate of its own (`src/semver_jsc` includes `src/semver_js`).
 
 The body of a binding is Rust, but for a function that says `cppSymbol`. `$cpp` and `$newCppFunction` reach a function written in C++ from `src/js`.
 

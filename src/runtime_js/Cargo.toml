@@ -1,0 +1,22 @@
+[package]
+name = "bun_runtime_js"
+description = "bun_runtime's JS-visible APIs on bun_js: node:path."
+version = "0.0.0"
+edition = "2024"
+publish = false
+# A member of the Boa build's workspace, not of Bun's: Bun's root lockfile stays without Boa.
+workspace = "../../packages/bun-boa"
+
+[lib]
+path = "lib.rs"
+
+# The schemas this crate implements that are not in its directory: the JavaScriptCore build reads them too.
+[package.metadata.bun-js]
+bindings = ["../runtime/node/node_path.bind.ts"]
+
+[dependencies]
+bun_js = { path = "../bun_js" }
+bun_node_path = { path = "../node_path" }
+
+[dev-dependencies]
+bun_paths = { path = "../paths" }
