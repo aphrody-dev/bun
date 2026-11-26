@@ -9,6 +9,39 @@ fn fixtures() -> PathBuf {
     PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or(env!("CARGO_MANIFEST_DIR").into())).join("tests/fixtures")
 }
 
+/// An empty directory of this test's own, removed on drop: other runs of this suite on the host (other trees, other
+/// sessions) share `temp_dir()`.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("bun-boa-e2e-{}", std::process::id())).join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for Scratch {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir(self.0.parent().unwrap());
+    }
+}
+
 fn text(output: &Output) -> (String, String) {
     (String::from_utf8_lossy(&output.stdout).into_owned(), String::from_utf8_lossy(&output.stderr).into_owned())
 }
@@ -116,9 +149,7 @@ export const obj = { a: 1, b: [1, 2, 3] };
 
 #[test]
 fn fmt_formats_files_and_stdin() {
-    let dir = std::env::temp_dir().join("bun-boa-e2e").join("fmt");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("fmt");
     std::fs::copy(fixtures().join("fmt/messy.ts"), dir.join("messy.ts")).unwrap();
 
     let out = bun().args(["fmt", "--check", "messy.ts"]).current_dir(&dir).output().unwrap();
@@ -140,9 +171,7 @@ fn fmt_formats_files_and_stdin() {
 
 #[test]
 fn fmt_reads_bunfig() {
-    let dir = std::env::temp_dir().join("bun-boa-e2e").join("fmt-bunfig");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("fmt-bunfig");
     std::fs::write(dir.join("bunfig.toml"), "[fmt]\nsemi = false\n").unwrap();
     let out = bun()
         .args(["fmt", "--stdin-filepath", "a.ts"])
@@ -157,9 +186,7 @@ fn fmt_reads_bunfig() {
 
 #[test]
 fn lint_reports_and_passes() {
-    let dir = std::env::temp_dir().join("bun-boa-e2e").join("lint");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("lint");
     std::fs::write(dir.join("bad.ts"), "debugger;\nif (/a+b/.test(\"aab\")) console.log(1);\n").unwrap();
     std::fs::write(dir.join("good.ts"), "export const x = /a(b)?/.exec(\"ab\");\n").unwrap();
     let out = bun().args(["lint", "--rule", r#"{"no-debugger":"error"}"#, "bad.ts"]).current_dir(&dir).output().unwrap();
@@ -174,9 +201,7 @@ fn lint_reports_and_passes() {
 /// pattern ran, through `bun_yarr`'s C ABI on regress (`src/yarr.rs`).
 #[test]
 fn lint_runs_regular_expressions_through_yarr() {
-    let dir = std::env::temp_dir().join("bun-boa-e2e").join("lint-regex");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("lint-regex");
     std::fs::write(dir.join("ids.ts"), "export const snake_ok = 1;\nexport const BadName = 2;\n").unwrap();
     let rule = r#"{"id-match":["error","^[a-z]+(_[a-z]+)*$"]}"#;
     let out = bun().args(["lint", "--rule", rule, "ids.ts"]).current_dir(&dir).output().unwrap();
@@ -193,8 +218,7 @@ fn lint_runs_regular_expressions_through_yarr() {
 
 #[test]
 fn runs_package_json_scripts() {
-    let dir = std::env::temp_dir().join("bun-boa-e2e").join("scripts");
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = Scratch::new("scripts");
     std::fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
     std::fs::write(
         dir.join("package.json"),
@@ -221,9 +245,7 @@ fn runs_package_json_scripts() {
 
 #[test]
 fn a_path_is_a_file_not_a_script() {
-    let dir = std::env::temp_dir().join("bun-boa-e2e").join("script-path");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("script-path");
     std::fs::write(dir.join("package.json"), r#"{"scripts":{"./x.js":"echo script","x.js":"echo script"}}"#).unwrap();
     std::fs::write(dir.join("x.js"), "console.log('file');\n").unwrap();
     for args in [&["./x.js"][..], &["run", "./x.js"]] {
@@ -239,9 +261,7 @@ fn a_path_is_a_file_not_a_script() {
 #[cfg(feature = "build")]
 #[test]
 fn build_bundles_and_runs() {
-    let dir = std::env::temp_dir().join("bun-boa-e2e").join("build");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("build");
     std::fs::write(dir.join("a.ts"), "export const x: number = 2;\n").unwrap();
     std::fs::write(dir.join("e.ts"), "import { x } from \"./a.ts\";\nconsole.log(x * 21);\n").unwrap();
     let out = bun().args(["build", "e.ts", "--outfile", "out/e.js"]).current_dir(&dir).output().unwrap();

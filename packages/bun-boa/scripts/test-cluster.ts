@@ -17,7 +17,9 @@ const sh = (host: string, script: string) => $`ssh -o BatchMode=yes ${host} sh -
 
 // nextest only checks that the remapped workspace has a Cargo.toml; an empty one does.
 await Promise.all(
-  hosts.map(host => sh(host, `mkdir -p ${workspace}/tests ${dir}/extract && touch ${workspace}/Cargo.toml`)),
+  hosts.map(host =>
+    sh(host, `rm -rf ${workspace} && mkdir -p ${workspace}/tests ${dir}/extract && touch ${workspace}/Cargo.toml`),
+  ),
 );
 await $`bun ${import.meta.dir}/remote.ts cargo nextest archive ${features} --archive-file ${archive}`.env({
   ...Bun.env,
@@ -33,7 +35,9 @@ const address = async (host: string) => {
 await sh(hosts[0], `cp "$(command -v cargo-nextest)" ${nextest}`);
 await Promise.all(
   hosts.map(async (host, i) => {
-    await $`rsync -az --delete ${join(import.meta.dir, "../tests")}/ ${host}:${workspace}/tests/`;
+    // Owned by the host's user, not this machine's uid: n2 runs as root, and root in the test's user namespace
+    // cannot write to a file of a uid the namespace does not map.
+    await $`rsync -rlptz ${join(import.meta.dir, "../tests")}/ ${host}:${workspace}/tests/`;
     if (i)
       await sh(hosts[0], `rsync -az -e 'ssh -o BatchMode=yes' ${archive} ${nextest} ${await address(host)}:${dir}/`);
   }),
