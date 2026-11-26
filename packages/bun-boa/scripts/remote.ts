@@ -39,7 +39,13 @@ await $`rsync -az --files-from=${list} ${`${repo}/`} ${`${host}:${remoteRepo}/`}
 const deleted = (await $`git -C ${repo} diff --name-only --diff-filter=D ${head}`.text()).split("\n").filter(Boolean);
 if (deleted.length) await $`ssh -o BatchMode=yes ${host} ${`cd ${remoteRepo} && xargs -0 rm -f`} < ${Buffer.from(deleted.join("\0"))}`;
 
+// A pinned RUSTUP_TOOLCHAIN makes rustup skip the rust-toolchain.toml component sync, which otherwise reinstalls
+// the sysroot under concurrent builds on the same host and breaks their links (missing libstd-*.rlib).
+const toolchain = Bun.TOML.parse(await Bun.file(join(repo, "rust-toolchain.toml")).text()) as {
+  toolchain: { channel: string };
+};
 const env = {
+  RUSTUP_TOOLCHAIN: toolchain.toolchain.channel,
   CARGO_HOME: `${xfs}/cargo-home`,
   CARGO_TARGET_DIR: `${xfs}/target/${Bun.env.BUN_REMOTE_REPO ? `bun-boa-${Bun.env.BUN_REMOTE_REPO}` : "bun-boa"}`,
   BUN_CODEGEN_DIR: `${remoteRepo}/build/debug/codegen`,
@@ -47,6 +53,6 @@ const env = {
   SCCACHE_CONF: `${xfs}/sccache-dist-client.toml`,
 };
 const exports = Object.entries(env).map(([k, v]) => `${k}=${quote(v)}`).join(" ");
-const script = `cd ${remoteRepo}/packages/bun-boa && bun scripts/setup.ts && env ${exports} ${args.map(quote).join(" ")}`;
+const script = `cd ${remoteRepo}/packages/bun-boa && RUSTUP_TOOLCHAIN=${quote(env.RUSTUP_TOOLCHAIN)} bun scripts/setup.ts && env ${exports} ${args.map(quote).join(" ")}`;
 const proc = Bun.spawn(["ssh", "-o", "BatchMode=yes", host, script], { stdio: ["inherit", "inherit", "inherit"] });
 process.exit(await proc.exited);
