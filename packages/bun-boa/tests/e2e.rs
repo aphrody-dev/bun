@@ -671,7 +671,8 @@ ECONNREFUSED
 }
 
 /// `Buffer` and `node:buffer`: js/buffer.ts on the encoders of bun_runtime_js, and Bun's builtin functions of
-/// src/js/builtins (`Buffer.from`, `toJSON`); node:string_decoder over `Buffer`.
+/// src/js/builtins (`Buffer.from`, `toJSON`); `TextEncoder` and `TextDecoder` of bun_runtime_js; node:string_decoder
+/// over `Buffer`.
 #[test]
 fn buffer_is_nodes() {
     let out = bun()
@@ -680,6 +681,6 @@ fn buffer_is_nodes() {
         .output()
         .unwrap();
     let all = format!("{}{}", text(&out).0, text(&out).1);
-    assert!(all.contains(" 8 pass") && all.contains(" 0 fail"), "{all}");
+    assert!(all.contains(" 9 pass") && all.contains(" 0 fail"), "{all}");
     assert!(out.status.success(), "{all}");
 }

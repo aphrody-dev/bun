@@ -1,5 +1,5 @@
 //! Web APIs: `src/runtime/webcore` on `bun_js`. The Fetch standard: `Headers`, `Request`, `Response`, `fetch()`; the
-//! encoders of `Buffer`.
+//! Encoding standard: `TextEncoder`, `TextDecoder`; the encoders of `Buffer`.
 
 #[path = "Blob.rs"]
 pub mod blob;
@@ -16,6 +16,10 @@ pub mod headers;
 pub mod request;
 #[path = "Response.rs"]
 pub mod response;
+#[path = "TextDecoder.rs"]
+pub mod text_decoder;
+#[path = "TextEncoder.rs"]
+pub mod text_encoder;
 
 use boa_engine::{Context, JsResult};
 
@@ -23,5 +27,7 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
     headers::install(context)?;
     request::install(context)?;
     response::install(context)?;
+    text_encoder::install(context)?;
+    text_decoder::install(context)?;
     fetch::install(context)
 }

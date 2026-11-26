@@ -126,6 +126,29 @@ test("toJSON, swap, module functions", () => {
   );
 });
 
+test("TextEncoder and TextDecoder", () => {
+  const encoder = new TextEncoder();
+  expect(encoder.encoding).toBe("utf-8");
+  expect([...encoder.encode("é\ud800")]).toEqual([0xc3, 0xa9, 0xef, 0xbf, 0xbd]);
+  const into = new Uint8Array(3);
+  expect(encoder.encodeInto("a€", into)).toEqual({ read: 1, written: 1 });
+  expect(new TextDecoder().decode(new Uint8Array([0xef, 0xbb, 0xbf, 0x68, 0xc3]))).toBe("h�");
+  const streaming = new TextDecoder("utf-16le");
+  expect(streaming.decode(new Uint8Array([0xac]), { stream: true })).toBe("");
+  expect(streaming.decode(new Uint8Array([0x20]))).toBe("€");
+  expect(new TextDecoder("shift_jis").decode(new Uint8Array([0x82, 0xa0]))).toBe("あ");
+  expect(new TextDecoder("latin1").encoding).toBe("windows-1252");
+  expect(code(() => new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array([0xff])))).toBe(
+    "TypeError ERR_ENCODING_INVALID_ENCODED_DATA: The encoded data was not valid for encoding utf-8",
+  );
+  expect(code(() => new TextDecoder("nope"))).toBe(
+    'RangeError ERR_ENCODING_NOT_SUPPORTED: Unsupported encoding label "nope"',
+  );
+  expect(code(() => new TextDecoder("utf-8", 1 as any))).toBe(
+    'TypeError ERR_INVALID_ARG_TYPE: The "options" argument must be of type object. Received type number (1)',
+  );
+});
+
 test("node:string_decoder on Buffer", () => {
   const { StringDecoder } = require("node:string_decoder");
   const utf8 = new StringDecoder();

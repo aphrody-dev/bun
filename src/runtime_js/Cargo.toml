@@ -1,6 +1,6 @@
 [package]
 name = "bun_runtime_js"
-description = "bun_runtime's JS-visible APIs on bun_js: node:path, node:fs, bun:test's diff, Blob, File, FormData, Bun.file, Bun.write, Bun.Glob, Bun.deepEquals, the event loop, timers, fetch, Headers/Request/Response, Bun.serve and node:buffer."
+description = "bun_runtime's JS-visible APIs on bun_js: node:path, node:fs, bun:test's diff, Blob, File, FormData, Bun.file, Bun.write, Bun.Glob, Bun.deepEquals, the event loop, timers, fetch, Headers/Request/Response, Bun.serve, node:buffer, TextEncoder and TextDecoder."
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -40,6 +40,7 @@ bun_threading = { path = "../threading" }
 bun_usockets_rs = { path = "../usockets_rs" }
 bun_uws_sys = { path = "../uws_sys" }
 const_format = "0.2"
+encoding_rs = "0.8.35"
 getrandom = "0.4"
 # crypto/: RustCrypto, instead of BoringSSL.
 aes-gcm = "0.10"
