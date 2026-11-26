@@ -16,7 +16,7 @@ import {
   show,
   showUnquoted,
 } from "./format.ts";
-import { native, runtime } from "./state.ts";
+import { append, native, runtime } from "./state.ts";
 
 type Fn = (...args: any[]) => any;
 const colors = () => native.colors;
@@ -272,7 +272,7 @@ function once(ask: () => unknown): unknown {
     value = error;
   }
   if (j) {
-    j.answers.push([threw, value]);
+    append(j.answers, [threw, value]);
     j.cursor++;
   }
   if (threw) throw value;
@@ -322,7 +322,7 @@ function runDeferring(attempt: () => unknown): unknown {
       }
     })(error);
     // The test ends once the matchers it left waiting are done (`pending_matchers`).
-    runtime.sequence?.pendingMatchers.push(settled);
+    if (runtime.sequence) append(runtime.sequence.pendingMatchers, settled);
     return settled;
   }
 }
@@ -350,7 +350,7 @@ function runMatcherOnce(e: Expect, name: string, def: MatcherDef, args: unknown[
     try {
       return run(e[VALUE]);
     } catch (error) {
-      runtime.sequence?.softErrors.push(error);
+      if (runtime.sequence) append(runtime.sequence.softErrors, error);
       return undefined;
     }
   }
@@ -494,22 +494,22 @@ function propertyPath(path: string): string[] {
   for (let i = 0; i < path.length; i++) {
     const c = path[i];
     if (c === ".") {
-      parts.push(current);
+      append(parts, current);
       current = "";
     } else if (c === "[") {
-      if (current) parts.push(current);
+      if (current) append(parts, current);
       current = "";
       const end = path.indexOf("]", i);
       if (end < 0) {
         current = path.slice(i);
         break;
       }
-      parts.push(path.slice(i + 1, end));
+      append(parts, path.slice(i + 1, end));
       i = end;
       if (path[i + 1] === ".") i++;
     } else current += c;
   }
-  if (current || !parts.length || path.endsWith(".")) parts.push(current);
+  if (current || !parts.length || path.endsWith(".")) append(parts, current);
   return path === "" ? [""] : parts;
 }
 
@@ -1388,7 +1388,7 @@ define("toHaveReturnedWith", EXPECTED, (m, expected) => {
   for (let i = 0; i < r.count; i++) {
     const o = r.outcome(i);
     if (o.kind === "value") {
-      returned.push(o.value);
+      append(returned, o.value);
       matched = matched || deepEquals(o.value, expected);
     } else if (o.kind === "error") someThrew = true;
   }
@@ -1901,7 +1901,7 @@ function extend(definitions: unknown) {
             try {
               return run(e[VALUE]);
             } catch (error) {
-              runtime.sequence?.softErrors.push(error);
+              if (runtime.sequence) append(runtime.sequence.softErrors, error);
               return undefined;
             }
           }
@@ -2130,11 +2130,11 @@ Object.assign(expect, {
       throw new TypeError(`expect.addEqualityTesters: expected an array of functions, got ${show(testers)}`);
     for (const t of testers) {
       if (typeof t !== "function") throw new TypeError(`expect.addEqualityTesters: expected an array of functions, got ${show(t)}`);
-      equalityTesters.push(t);
+      append(equalityTesters, t);
     }
   },
   addSnapshotSerializer(serializer: unknown) {
-    snapshotSerializers.push(serializer);
+    append(snapshotSerializers, serializer);
   },
   assertions(expected: unknown) {
     const n = nonNegativeInteger(expected, 0xffffffff);

@@ -4,7 +4,7 @@ import { deepMatch } from "./equals.ts";
 import { diffStrings, type M, type SnapshotHooks } from "./expect.ts";
 import { isAsymmetric, isError, showUnquoted, snapshotText } from "./format.ts";
 import { framesOf } from "./source.ts";
-import { native, runtime } from "./state.ts";
+import { append, native, put, runtime } from "./state.ts";
 
 const HEADER = "// Bun Snapshot v1, https://bun.sh/docs/test/snapshots\n";
 
@@ -59,7 +59,7 @@ function withMatchers(value: any, matchers: any): unknown {
   const out: any = Array.isArray(value) ? [...value] : { ...value };
   for (const key of Object.keys(matchers)) {
     const matcher = matchers[key];
-    out[key] = isAsymmetric(matcher) ? matcher : withMatchers(value[key], matcher);
+    put(out, key, isAsymmetric(matcher) ? matcher : withMatchers(value[key], matcher));
   }
   return out;
 }
@@ -176,7 +176,7 @@ export const hooks: SnapshotHooks = {
         "<b>Matcher error<r>: Inline snapshot matchers must be called from the test file:\n  Expected to be called from file: <green>{}<r>\n",
         JSON.stringify(runtime.path),
       );
-    inlineWrites.push({ line: site!.line!, column: site!.column!, kind: m.name, value: text, hasMatchers: propertyMatchers !== undefined });
+    append(inlineWrites, { line: site!.line!, column: site!.column!, kind: m.name, value: text, hasMatchers: propertyMatchers !== undefined });
   },
 };
 
@@ -252,7 +252,7 @@ function literal(value: string, indent: string): string {
 
 function applyInlineWrites(source: string): string {
   const lineStarts = [0];
-  for (let i = 0; i < source.length; i++) if (source[i] === "\n") lineStarts.push(i + 1);
+  for (let i = 0; i < source.length; i++) if (source[i] === "\n") append(lineStarts, i + 1);
   const edits: [start: number, end: number, text: string][] = [];
   for (const write of inlineWrites) {
     const lineStart = lineStarts[write.line - 1];
@@ -274,11 +274,11 @@ function applyInlineWrites(source: string): string {
       const next = skipSpace(source, i);
       if (source[next] === ",") {
         const start = skipSpace(source, next + 1);
-        if (source[start] === ")") edits.push([next + 1, next + 1, ` ${text}`]);
-        else edits.push([start, skipValue(source, start), text]);
-      } else edits.push([i, i, `, ${text}`]);
-    } else if (source[i] === ")") edits.push([i, i, text]);
-    else edits.push([i, skipValue(source, i), text]);
+        if (source[start] === ")") append(edits, [next + 1, next + 1, ` ${text}`]);
+        else append(edits, [start, skipValue(source, start), text]);
+      } else append(edits, [i, i, `, ${text}`]);
+    } else if (source[i] === ")") append(edits, [i, i, text]);
+    else append(edits, [i, skipValue(source, i), text]);
   }
   edits.sort((a, b) => b[0] - a[0]);
   let out = source;

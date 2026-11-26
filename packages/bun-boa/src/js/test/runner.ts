@@ -4,7 +4,7 @@
 // `describe` and their modifiers), with what test_command.rs prints for each test.
 import { markup, show } from "./format.ts";
 import { framesOf, sourcePreview } from "./source.ts";
-import { native, runtime, type ExpectAssertions, type Sequence as ExpectSequence } from "./state.ts";
+import { append, native, prepend, runtime, type ExpectAssertions, type Sequence as ExpectSequence } from "./state.ts";
 
 type Fn = (...args: any[]) => any;
 
@@ -133,7 +133,7 @@ function appendDescribe(name: string | undefined, cfg: ScopeCfg, inherited: Inhe
   const parent = activeScope;
   const child = newScope(baseOf(cfg, name, parent, false), inherited);
   propagate(child);
-  parent.entries.push(child);
+  append(parent.entries, child);
   return child;
 }
 
@@ -142,7 +142,7 @@ function appendTest(name: string | undefined, callback: Fn | undefined, options:
   const entry = newEntry(name, callback, options, parent, cfg);
   entry.hasCallback = entry.callback !== undefined;
   propagate(entry);
-  parent.entries.push(entry);
+  append(parent.entries, entry);
 }
 
 /** `with_async_context_if_needed`: a callback runs in the AsyncLocalStorage context it was registered in. */
@@ -168,7 +168,7 @@ function appendHook(scope: Scope, tag: HookTag, callback: Fn, timeout: number) {
   // A hook in a skipped scope keeps no callback, and an entry without one would be reported as a test.
   if (!entry.callback) return;
   entry.hook = tag;
-  scope.hooks[tag].push(entry);
+  append(scope.hooks[tag], entry);
 }
 
 // ── Collection.rs: describe callbacks run after the file, depth first ──────
@@ -181,7 +181,7 @@ let describeQueue: QueuedDescribe[] = [];
 let currentScopeQueue: QueuedDescribe[] = [];
 
 function takeNextCallback(): QueuedDescribe | undefined {
-  describeQueue.push(...currentScopeQueue.reverse().filter(item => !item.newScope.failed));
+  append(describeQueue, ...currentScopeQueue.reverse().filter(item => !item.newScope.failed));
   currentScopeQueue = [];
   for (let item = describeQueue.pop(); item; item = describeQueue.pop()) if (!item.activeScope.failed) return item;
   return undefined;
@@ -323,8 +323,8 @@ interface ConcurrentGroup {
 
 const namesOf = (entry: Base): string[] => {
   const names: string[] = [];
-  for (const scope of scopesFrom(entry.parent)) if (scope.name) names.unshift(scope.name);
-  if (entry.name !== undefined) names.push(entry.name);
+  for (const scope of scopesFrom(entry.parent)) if (scope.name) prepend(names, scope.name);
+  if (entry.name !== undefined) append(names, entry.name);
   return names;
 };
 
@@ -349,7 +349,7 @@ class Order {
   }
   appendGroupOf(entry: SequenceEntry) {
     const sequence = new ExecutionSequence(entry, undefined, 0, 0, false);
-    this.groups.push({ sequences: [sequence], failureSkipTo: this.groups.length + 1, concurrent: false });
+    append(this.groups, { sequences: [sequence], failureSkipTo: this.groups.length + 1, concurrent: false });
     this.previousGroupWasConcurrent = false;
   }
   setFailureSkipTo([start, end]: [number, number]) {
@@ -360,7 +360,7 @@ class Order {
   generate(scope: Scope) {
     const open: OpenDescribe[] = [];
     const entered = this.enter(scope);
-    if (entered) open.push(entered);
+    if (entered) append(open, entered);
     while (open.length) {
       const frame = open[open.length - 1];
       const child = frame.children[frame.next];
@@ -372,7 +372,7 @@ class Order {
       if (frame.scope.only === CONTAINS && child.only === NO) continue;
       if (child.kind === "describe") {
         const next = this.enter(child);
-        if (next) open.push(next);
+        if (next) append(open, next);
       } else this.test(child, open);
     }
   }
@@ -393,10 +393,10 @@ class Order {
     const useEachHooks = test.hasCallback;
     const parents = open.map(frame => frame.hooks).reverse();
     const list: Entry[] = [];
-    if (useEachHooks) for (const p of parents) list.unshift(...p.beforeEach);
+    if (useEachHooks) for (const p of parents) prepend(list, ...p.beforeEach);
     const testIndex = list.length;
-    list.push(test);
-    if (useEachHooks) for (const p of parents) list.push(...p.afterEach);
+    append(list, test);
+    if (useEachHooks) for (const p of parents) append(list, ...p.afterEach);
     const entries: SequenceEntry[] = list.map(entry => ({ entry, next: undefined, failureSkipPast: undefined }));
     entries.forEach((e, i) => {
       e.next = entries[i + 1];
@@ -404,8 +404,8 @@ class Order {
     });
     const sequence = new ExecutionSequence(entries[0], entries[testIndex], test.retry, test.repeat, test.concurrent);
     const previous = this.groups[this.groups.length - 1];
-    if (test.concurrent && previous && this.previousGroupWasConcurrent) previous.sequences.push(sequence);
-    else this.groups.push({ sequences: [sequence], failureSkipTo: this.groups.length + 1, concurrent: test.concurrent });
+    if (test.concurrent && previous && this.previousGroupWasConcurrent) append(previous.sequences, sequence);
+    else append(this.groups, { sequences: [sequence], failureSkipTo: this.groups.length + 1, concurrent: test.concurrent });
     this.previousGroupWasConcurrent = test.concurrent;
   }
 }
@@ -1035,13 +1035,13 @@ function enqueue(s: ScopeFunctionsState, callback: Fn | undefined, description: 
   if (native.options.concurrent && cfg.concurrent === "inherit") cfg.concurrent = "yes";
   if (s.kind === "describe") {
     const scope = appendDescribe(description, cfg, parsed.inherited);
-    if (callback) currentScopeQueue.push({ callback, activeScope, newScope: scope });
+    if (callback) append(currentScopeQueue, { callback, activeScope, newScope: scope });
     return;
   }
   let matches = true;
   if (filterRegex) {
     const names: string[] = [description ?? ""];
-    for (const scope of scopesFrom(activeScope)) if (scope.name !== undefined) names.unshift(scope.name);
+    for (const scope of scopesFrom(activeScope)) if (scope.name !== undefined) prepend(names, scope.name);
     matches = filterRegex.test(names.join(" "));
   }
   if (!matches) cfg.mode = "filtered_out";
@@ -1145,7 +1145,7 @@ function templateRows(strings: unknown, values: unknown[]): unknown[] | undefine
     throw new Error(`Not enough arguments supplied for given headings:\n${headings.join(" | ")}\n\nReceived:\n${show(values)}`);
   const rows: Record<string, unknown>[] = [];
   for (let i = 0; i < values.length; i += headings.length)
-    rows.push(Object.fromEntries(headings.map((h: string, j: number) => [h, values[i + j]])));
+    append(rows, Object.fromEntries(headings.map((h: string, j: number) => [h, values[i + j]])));
   return rows;
 }
 

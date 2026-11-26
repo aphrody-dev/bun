@@ -1,6 +1,29 @@
 // What the runner and expect() share: the running test, the file, and the natives test.rs gives bun:test.
 const NATIVE = "__bun_test_native__";
 
+// The runner's own arrays grow by defining their elements, so that what a test puts on Array.prototype (an index
+// accessor, another push) does not reach them: Bun's runner is native.
+const { defineProperty } = Object;
+
+/** `object[key] = value` as an own data property, whatever `object`'s prototypes have at `key`. */
+export function put(object: object, key: PropertyKey, value: unknown): void {
+  defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
+/** `list.push(...values)`. */
+export function append<T>(list: T[], ...values: T[]): number {
+  for (let i = 0; i < values.length; i++) put(list, list.length, values[i]);
+  return list.length;
+}
+
+/** `list.unshift(...values)`. */
+export function prepend<T>(list: T[], ...values: T[]): number {
+  const n = values.length;
+  for (let i = list.length - 1; i >= 0; i--) put(list, i + n, list[i]);
+  for (let i = 0; i < n; i++) put(list, i, values[i]);
+  return list.length;
+}
+
 export interface Native {
   /** printDiff.rs (src/runtime/test_runner/diff), compiled into bun_runtime_js. */
   diff(not: boolean, received: string, expected: string, colors: boolean): string;

@@ -1,6 +1,7 @@
 // How bun:test prints values: `show()` is the console's formatter (src/jsc/ConsoleObject.rs) as expect()'s messages
 // use it (`make_formatter` in expect.rs), and `pretty()` is the snapshot format (src/runtime/test_runner/pretty_format.rs),
 // which diffs and snapshots use. Both are ports: their line breaking follows the same estimated line length.
+import { append } from "./state.ts";
 
 const ASYMMETRIC = Symbol.for("bun:test:asymmetric");
 const INSPECT_CUSTOM = Symbol.for("nodejs.util.inspect.custom");
@@ -209,8 +210,8 @@ function ownEntries(object: any, ordered: boolean, skipIndices: boolean, callGet
     if (skipIndices && typeof key === "string" && /^(0|[1-9]\d*)$/.test(key) && Number(key) < 2 ** 32 - 1) continue;
     const desc = getOwnPropertyDescriptor(object, key);
     if (!desc || !desc.enumerable) continue;
-    if ("value" in desc) out.push({ key, value: desc.value });
-    else if (callGetters === "throws" && desc.get) out.push({ key, value: desc.get.call(object) });
+    if ("value" in desc) append(out, { key, value: desc.value });
+    else if (callGetters === "throws" && desc.get) append(out, { key, value: desc.get.call(object) });
     else if (callGetters === "marks" && desc.get) {
       let entry;
       try {
@@ -218,9 +219,9 @@ function ownEntries(object: any, ordered: boolean, skipIndices: boolean, callGet
       } catch {
         entry = { key, value: undefined, getter: desc.set ? ("both" as const) : ("get" as const) };
       }
-      out.push(entry);
-    } else if (callGetters === "marks") out.push({ key, value: undefined });
-    else out.push({ key, value: undefined, getter: desc.get && desc.set ? "both" : desc.get ? "get" : "set" });
+      append(out, entry);
+    } else if (callGetters === "marks") append(out, { key, value: undefined });
+    else append(out, { key, value: undefined, getter: desc.get && desc.set ? "both" : desc.get ? "get" : "set" });
   }
   return out;
 }
