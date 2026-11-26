@@ -437,4 +437,7 @@ pub fn functions(global: &JSGlobalObject) -> Vec<(&'static str, JSValue)> {
         ("getReport", JSFunction::create(global, "getReport", get_report, 0)),
         ("execPath", JSValue::from_utf8(&exec_path())),
     ]
+    .into_iter()
+    .chain(super::process_kill::functions(global))
+    .collect()
 }

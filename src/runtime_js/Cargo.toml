@@ -1,6 +1,6 @@
 [package]
 name = "bun_runtime_js"
-description = "bun_runtime's JS-visible APIs on bun_js: node:path, node:fs, bun:test's diff, Blob, File, FormData, Bun.file, Bun.write, Bun.Glob, Bun.deepEquals, the event loop, timers, fetch, Headers/Request/Response, Bun.serve, node:buffer, TextEncoder and TextDecoder."
+description = "bun_runtime's JS-visible APIs on bun_js: node:path, node:fs, bun:test's diff, Blob, File, FormData, Bun.file, Bun.write, Bun.Glob, Bun.deepEquals, Bun.spawn, Bun.spawnSync, Bun.which, process.kill, the event loop, timers, fetch, Headers/Request/Response, Bun.serve, node:buffer, TextEncoder and TextDecoder."
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -15,6 +15,7 @@ path = "lib.rs"
 bindings = [
   "../runtime/api/Glob.bind.ts",
   "../runtime/api/UnsafeObject.bind.ts",
+  "../runtime/api/bun/js_bun_spawn_bindings.bind.ts",
   "../runtime/node/Stat.bind.ts",
   "../runtime/node/node_fs_binding.bind.ts",
   "../runtime/node/node_path.bind.ts",
@@ -28,6 +29,7 @@ boa_wintertc = { path = "../boa/core/wintertc" }
 bstr = { version = "1", default-features = false, features = ["alloc"] }
 bun_base64 = { path = "../base64" }
 bun_core = { path = "../bun_core" }
+bun_errno = { path = "../errno" }
 bun_glob = { path = "../glob" }
 bun_http_rs = { path = "../http_rs" }
 bun_deflate = { path = "../deflate" }
@@ -37,6 +39,8 @@ bun_js = { path = "../bun_js" }
 bun_node_path = { path = "../node_path" }
 bun_paths = { path = "../paths" }
 bun_simdutf_sys = { path = "../simdutf_sys" }
+bun_spawn_rs = { path = "../spawn_rs" }
+bun_spawn_sys = { path = "../spawn_sys" }
 bun_sys = { path = "../sys" }
 bun_text_diff = { path = "../text_diff" }
 bun_threading = { path = "../threading" }
@@ -65,6 +69,8 @@ sha2 = "0.10"
 sha3 = "0.10"
 subtle = "2"
 libc = "0.2"
+# The descriptors of a child (its pidfd and pipes) on bun_http_rs's reactor.
+mio = { version = "1", features = ["os-poll", "os-ext"] }
 
 [dev-dependencies]
 # The C and C++ symbols that bun_core and bun_sys link against (WTF), in Rust, as the bun binary has them.

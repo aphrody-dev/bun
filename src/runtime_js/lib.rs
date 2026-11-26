@@ -33,6 +33,8 @@ mod work_pool;
 use boa_engine::property::{Attribute, PropertyDescriptor};
 use boa_engine::{Context, JsResult, JsString, JsValue};
 use bun_js::{JSGlobalObject, JSValue};
+// `posix_spawn_bun`, which `bun_spawn_sys::spawn_process_posix` calls and nothing names in Rust.
+use bun_spawn_rs as _;
 
 pub use event_loop::EventLoop;
 
@@ -48,14 +50,19 @@ pub fn cpp(global: &bun_js::JSGlobalObject, file: &str, symbol: &str) -> Option<
     }
 }
 
-/// The properties of `Bun` this crate implements besides Blob's, by name: `Bun.Glob`, `Bun.deepEquals`,
-/// `Bun.sleepSync`, `Bun.which`, `Bun.unsafe`.
+/// The properties of `Bun` this crate implements besides Blob's.
 pub fn bun_object(global: &JSGlobalObject) -> bun_js::JsResult<Vec<(&'static str, JSValue)>> {
     let mut properties = generated_bindgen::glob::exports(global)?;
+    properties.extend(generated_bindgen::js_bun_spawn_bindings::exports(global)?);
     properties.extend(api::bun_object::functions(global));
     properties.extend(web::streams::readable_stream::bun_functions(global));
     properties.extend(generated_bindgen::unsafe_object::namespaces(global)?);
     Ok(properties)
+}
+
+/// What of `process` this crate implements, by name: `process.kill`, `process._kill`.
+pub fn process_object(global: &JSGlobalObject) -> Vec<(&'static str, JSValue)> {
+    node::process::functions(global)
 }
 
 /// Boa's context of a realm, for one engine operation at a time (see `JSGlobalObject::context`).

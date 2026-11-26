@@ -155,9 +155,8 @@ fn native(context: &mut Context, realm: &Realm<'_>) -> JsResult<JsValue> {
     bound.extend(
         bun_runtime_js::bun_object(global).map_err(|error| global.into_engine_error(error))?,
     );
-    // `process`'s members that BunProcess.cpp defines (`umask`, `memoryUsage`, `report.getReport`, …).
     let process = bun_js::JSObject::create(global);
-    for (name, value) in bun_runtime_js::node::process::functions(global) {
+    for (name, value) in bun_runtime_js::process_object(global) {
         process.put(global, name, value);
     }
     for (name, value) in bound.into_iter().chain(clock) {

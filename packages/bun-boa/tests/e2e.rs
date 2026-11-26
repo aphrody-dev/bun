@@ -698,6 +698,25 @@ ECONNREFUSED
     assert!(out.status.success(), "stderr: {stderr}");
 }
 
+/// Bun.spawn, Bun.spawnSync, Bun.which and process.kill from bun_runtime_js: fixtures/spawn/spawn.ts prints what
+/// Bun on JavaScriptCore prints, expected.txt.
+#[test]
+fn spawn_and_spawn_sync_answer_as_javascriptcore() {
+    let dir = fixtures().join("spawn");
+    let out = bun().arg("spawn.ts").current_dir(&dir).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    let expected = std::fs::read_to_string(dir.join("expected.txt")).unwrap();
+    let differ: Vec<String> = expected
+        .lines()
+        .zip(stdout.lines())
+        .filter(|(expected, actual)| expected != actual)
+        .map(|(expected, actual)| format!("expected: {expected}\n  actual: {actual}"))
+        .collect();
+    assert!(differ.is_empty(), "{}\nstderr: {stderr}", differ.join("\n"));
+    assert_eq!(stdout.lines().count(), expected.lines().count(), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(out.status.success(), "stderr: {stderr}");
+}
+
 /// `Buffer` and `node:buffer`: js/buffer.ts on the encoders of bun_runtime_js, and Bun's builtin functions of
 /// src/js/builtins (`Buffer.from`, `toJSON`); `TextEncoder` and `TextDecoder` of bun_runtime_js; node:string_decoder
 /// over `Buffer`.

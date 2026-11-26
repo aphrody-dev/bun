@@ -12,6 +12,7 @@ pub mod path;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod path_watcher;
 pub mod process;
+pub mod process_kill;
 pub(crate) mod stat;
 pub mod string_decoder;
 pub(crate) mod types;

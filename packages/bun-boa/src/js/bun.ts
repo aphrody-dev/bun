@@ -46,6 +46,11 @@ const OPS = "__bun_native_ops__";
   readableStreamToJSON(stream: unknown): Promise<unknown>;
   readableStreamToBlob(stream: unknown): Promise<Blob>;
   readableStreamToArray(stream: unknown): Promise<unknown[]>;
+  spawn(cmdOrOptions: unknown, options?: unknown): unknown;
+  spawnSync(cmdOrOptions: unknown, options?: unknown): unknown;
+  which(command: unknown, options?: unknown): string | null;
+  // bun_runtime_js::process_object
+  process: { kill(pid: unknown, signal?: unknown): boolean; _kill(pid: number, signal: number): number };
   env: Record<string, string>;
   argv: string[];
   main: string;
@@ -84,6 +89,9 @@ const OPS = "__bun_native_ops__";
     readableStreamToJSON: native.readableStreamToJSON,
     readableStreamToBlob: native.readableStreamToBlob,
     readableStreamToArray: native.readableStreamToArray,
+    spawn: native.spawn,
+    spawnSync: native.spawnSync,
+    which: native.which,
     fileURLToPath(url: unknown): string {
       const parsed = url instanceof URL ? url : new URL(String(url));
       if (parsed.protocol !== "file:") throw new TypeError("The URL must be of scheme file");
@@ -110,6 +118,8 @@ const OPS = "__bun_native_ops__";
     versions: { bun: native.version },
     release: { name: "node" },
     cwd: native.cwd,
+    kill: native.process.kill,
+    _kill: native.process._kill,
     exit(code?: number): never {
       return native.exit(code ?? process.exitCode ?? 0);
     },
