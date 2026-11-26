@@ -552,7 +552,16 @@ fn get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<J
         doc.get_node(node_id)
             .and_then(|node| node.element_data())
             .map(|element| match element.text_input_data() {
-                Some(input_data) => input_data.editor.raw_text().to_string(),
+                // kitesurf's blitz-dom keeps the live value in `value_override` and shows
+                // the placeholder (or a lone space) in the editor of an empty control.
+                Some(input_data) => match &input_data.value_override {
+                    Some(value) => value.clone(),
+                    None if input_data.is_showing_placeholder => String::new(),
+                    None => match input_data.editor.raw_text() {
+                        " " => String::new(),
+                        text => text.to_string(),
+                    },
+                },
                 None => element
                     .attrs()
                     .iter()
@@ -566,7 +575,15 @@ fn get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<J
 }
 
 fn set_value(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    attr_setter("value", this, args, context)
+    let ctx = dom_ctx(context)?;
+    let node_id = this_node_id(this)?;
+    let value = to_rust_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    // The IDL value of a text control is its live value, not the `value` attribute.
+    if ctx.doc.borrow_mut().mutate().set_text_input_value(node_id, &value) {
+        return Ok(JsValue::undefined());
+    }
+    write_attr(&ctx, node_id, "value", &value);
+    Ok(JsValue::undefined())
 }
 
 fn get_checked(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
