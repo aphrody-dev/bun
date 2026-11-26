@@ -252,10 +252,17 @@ fn tsconfig_paths(specifier: &str, from_dir: &Path) -> Option<PathBuf> {
 }
 
 impl BunModuleLoader {
-    /// The modules built into the binary: `bun:test` and `bun`.
+    /// The modules built into the binary: `bun:test` (and the modules of js/test it imports) and `bun`.
     pub fn builtin(&self, name: &str, context: &mut Context) -> Option<JsResult<Module>> {
         let source: &[u8] = match name {
             "bun:test" => include_bytes!("js/test.ts"),
+            "bun:test/equals.ts" => include_bytes!("js/test/equals.ts"),
+            "bun:test/expect.ts" => include_bytes!("js/test/expect.ts"),
+            "bun:test/format.ts" => include_bytes!("js/test/format.ts"),
+            "bun:test/mock.ts" => include_bytes!("js/test/mock.ts"),
+            "bun:test/runner.ts" => include_bytes!("js/test/runner.ts"),
+            "bun:test/snapshot.ts" => include_bytes!("js/test/snapshot.ts"),
+            "bun:test/state.ts" => include_bytes!("js/test/state.ts"),
             "bun" => include_bytes!("js/bun_module.ts"),
             // The helpers the transpiler imports (`__using`, `__callDispose`, …): src/runtime.bun.js, whose
             // "./runtime" is src/runtime.js.
@@ -419,6 +426,15 @@ impl ModuleLoader for BunModuleLoader {
         let mut specifier = request.specifier().to_std_string_escaped();
         if specifier == "./runtime" && referrer.path().is_some_and(|p| p == Path::new("bun:wrap")) {
             specifier = "bun:wrap/runtime".to_owned();
+        }
+        // bun:test's modules import each other relatively: "bun:test" is the file "test" in "bun:", and
+        // "./test/expect.ts" from it is "bun:test/expect.ts", whose "./state.ts" is "bun:test/state.ts".
+        if let (Some(relative), Some(from)) = (
+            specifier.strip_prefix("./"),
+            referrer.path().and_then(Path::to_str).filter(|p| p.starts_with("bun:test")),
+        ) {
+            let dir = &from[..from.rfind(['/', ':']).map_or(0, |i| i + 1)];
+            specifier = format!("{dir}{relative}");
         }
         if let Some(module) = self.builtin(&specifier, &mut context.borrow_mut()) {
             return std::future::ready(module);

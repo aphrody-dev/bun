@@ -395,10 +395,17 @@
     getProtectedObjects: () => [],
     setTimeZone: identity,
     setTimezone: identity,
+    /** The URL of the module that called it: the first frame of the stack in a file (this one has none). */
+    callerSourceOrigin() {
+      const file = String(new Error().stack ?? "")
+        .split("\n")
+        .map(line => /\(?((?:\/|[A-Za-z]:\\)[^()]*?):\d+:\d+\)?\s*$/.exec(line)?.[1])
+        .find(file => file !== undefined);
+      return file === undefined ? "" : `file://${file}`;
+    },
   };
   for (const name of [
     "bytecodeOrderStats",
-    "callerSourceOrigin",
     "getRandomSeed",
     "setRandomSeed",
     "startSamplingProfiler",
