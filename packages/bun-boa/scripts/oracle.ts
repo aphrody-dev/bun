@@ -203,8 +203,10 @@ async function worker(dir: string, partition: string, limit: number) {
       while (next < tasks.length) {
         const { input, checkpoint } = tasks[next++];
         const args = argv(input, checkpoint);
-        const a = await exec(jsc, args, input.cwd, dir);
-        const b = await exec(boa, args, input.cwd, dir);
+        const [a, b] = [await exec(jsc, args, input.cwd, dir), await exec(boa, args, input.cwd, dir)];
+        // The bundler reports errors from its parallel parse in no fixed order, upstream included.
+        if (checkpoint === "bundle")
+          for (const o of [a, b]) o.stderr = o.stderr.trimEnd().split("\n\n").sort().join("\n\n");
         process.stdout.write(JSON.stringify(compare(input.id, checkpoint, a, b)) + "\n");
       }
     }),
@@ -250,8 +252,10 @@ async function coordinate() {
   // Binaries on n1: the upstream one is the host's own Bun, so every host compares against the same build.
   await ssh(
     builder,
-    `set -e; mkdir -p ${DIR}/bin ${DIR}/corpus/npm; cp -f ${boaBinary} ${DIR}/bin/bun-boa; ` +
-      `cp -fL "$(command -v bun)" ${DIR}/bin/bun-jsc`,
+    `set -e; mkdir -p ${DIR}/bin ${DIR}/corpus/npm; ` +
+      // A rename, not a copy over, so a binary still running from an earlier run does not block it.
+      `cp -f ${boaBinary} ${DIR}/bin/.bun-boa && mv -f ${DIR}/bin/.bun-boa ${DIR}/bin/bun-boa; ` +
+      `cp -fL "$(command -v bun)" ${DIR}/bin/.bun-jsc && mv -f ${DIR}/bin/.bun-jsc ${DIR}/bin/bun-jsc`,
   );
   const revisions = {
     upstream: (await ssh(builder, `${DIR}/bin/bun-jsc --revision`).text()).trim(),
