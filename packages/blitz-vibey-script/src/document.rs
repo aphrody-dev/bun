@@ -230,6 +230,41 @@ impl ScriptDocument {
         self.arm_timer_thread();
     }
 
+    /// Evaluate `code` as a classic script and return its completion value
+    /// converted with `ToString`, draining the microtask queue afterwards.
+    /// An uncaught exception is returned as `Err` (and not recorded as a JS error).
+    pub fn evaluate_to_string(&mut self, code: &str) -> Result<String, String> {
+        self.runtime.sync_named_element_globals();
+        let context = &mut self.runtime.context;
+        let result = context
+            .eval(boa_engine::Source::from_bytes(code))
+            .and_then(|value| value.to_string(context))
+            .map(|value| value.to_std_string_lossy())
+            .map_err(|error| error.to_string());
+        self.runtime.run_jobs("<evaluate>");
+        self.request_redraw();
+        self.arm_timer_thread();
+        result
+    }
+
+    /// Drain the microtask queue
+    pub fn run_jobs(&mut self) {
+        self.runtime.run_jobs("<jobs>");
+    }
+
+    /// Run the JS timers that are due; returns whether any ran
+    pub fn run_due_timers(&mut self) -> bool {
+        let ran = self.runtime.run_due_timers();
+        self.arm_timer_thread();
+        ran
+    }
+
+    /// Drain `console.*` output as `(level, message)` pairs, `level` being one
+    /// of `log`, `info`, `warning` and `error`.
+    pub fn take_console_messages(&mut self) -> Vec<(&'static str, String)> {
+        std::mem::take(&mut self.runtime.ctx.state.borrow_mut().console_messages)
+    }
+
     /// Drain messages sent from JavaScript via the global
     /// `__blitz_send_message(message)` native function.
     ///

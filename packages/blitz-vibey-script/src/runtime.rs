@@ -1246,27 +1246,68 @@ impl ModuleLoader for BlitzModuleLoader {
 }
 
 /// Console logger which routes all console output to the `log` crate at
-/// `debug` level (target `js_console`), keeping stdout/stderr clean.
+/// `debug` level (target `js_console`), keeping stdout/stderr clean, and keeps
+/// it for the embedder (see `ScriptDocument::take_console_messages`).
 #[derive(Debug, Trace, Finalize)]
 struct LogCrateLogger;
 
+/// Console messages kept between drains
+const MAX_CONSOLE_MESSAGES: usize = 1024;
+
+fn record_console(level: &'static str, msg: String, context: &mut Context) {
+    log::debug!(target: "js_console", "{msg}");
+    if let Ok(ctx) = dom_ctx(context) {
+        let mut state = ctx.state.borrow_mut();
+        if state.console_messages.len() < MAX_CONSOLE_MESSAGES {
+            state.console_messages.push((level, msg));
+        }
+    }
+}
+
 impl Logger for LogCrateLogger {
-    fn log(&self, msg: String, _state: &ConsoleState, _context: &mut Context) -> JsResult<()> {
-        log::debug!(target: "js_console", "{msg}");
+    fn log(&self, msg: String, _state: &ConsoleState, context: &mut Context) -> JsResult<()> {
+        record_console("log", msg, context);
         Ok(())
     }
 
-    fn info(&self, msg: String, state: &ConsoleState, context: &mut Context) -> JsResult<()> {
-        self.log(msg, state, context)
+    fn info(&self, msg: String, _state: &ConsoleState, context: &mut Context) -> JsResult<()> {
+        record_console("info", msg, context);
+        Ok(())
     }
 
-    fn warn(&self, msg: String, state: &ConsoleState, context: &mut Context) -> JsResult<()> {
-        self.log(msg, state, context)
+    fn warn(&self, msg: String, _state: &ConsoleState, context: &mut Context) -> JsResult<()> {
+        record_console("warning", msg, context);
+        Ok(())
     }
 
-    fn error(&self, msg: String, state: &ConsoleState, context: &mut Context) -> JsResult<()> {
-        self.log(msg, state, context)
+    fn error(&self, msg: String, _state: &ConsoleState, context: &mut Context) -> JsResult<()> {
+        record_console("error", msg, context);
+        Ok(())
     }
+}
+
+/// `__blitz_node_id(node)`: the embedder-facing id of a DOM node wrapper
+/// (`NodeId::as_u64() + 1`, so that 0 is never a valid id), or `null`.
+fn node_id_native(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(args
+        .first()
+        .and_then(node_id_of_value)
+        .map(|id| JsValue::from((id.as_u64() + 1) as f64))
+        .unwrap_or_else(JsValue::null))
+}
+
+/// `__blitz_node(id)`: the DOM node wrapper for an id from `__blitz_node_id`, or `null`.
+fn node_by_id_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let raw = args.first().cloned().unwrap_or_default().to_number(context)?;
+    if !(raw >= 1.0) || raw.fract() != 0.0 {
+        return Ok(JsValue::null());
+    }
+    let node_id = NodeId::from_u64(raw as u64 - 1);
+    let ctx = dom_ctx(context)?;
+    if ctx.doc.borrow().get_node(node_id).is_none() {
+        return Ok(JsValue::null());
+    }
+    Ok(node_wrapper(&ctx, node_id, context).into())
 }
 
 pub(crate) struct ScriptRuntime {
@@ -1385,6 +1426,10 @@ impl ScriptRuntime {
 
         // Embedder message channel (see `ScriptDocument::take_messages`)
         register_global_fn(&mut context, "__blitz_send_message", 1, send_message);
+
+        // Embedder node handles (DevTools-style node ids)
+        register_global_fn(&mut context, "__blitz_node_id", 1, node_id_native);
+        register_global_fn(&mut context, "__blitz_node", 1, node_by_id_native);
 
         // Synchronous resource fetch backing the bootstrap's `fetch()`
         register_global_fn(&mut context, "__blitz_fetch_sync", 1, fetch_sync);

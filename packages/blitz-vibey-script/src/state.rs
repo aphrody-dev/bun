@@ -84,6 +84,9 @@ pub(crate) struct RuntimeState {
     /// `__blitz_send_message` native function. Drained with
     /// [`ScriptDocument::take_messages`](crate::ScriptDocument::take_messages).
     pub outbound_messages: Vec<String>,
+    /// `console.*` output as `(level, message)`, drained with
+    /// [`ScriptDocument::take_console_messages`](crate::ScriptDocument::take_console_messages).
+    pub console_messages: Vec<(&'static str, String)>,
     /// The value exposed as `document.readyState`
     pub ready_state: ReadyState,
     /// Uncaught JavaScript errors (from script loading/evaluation, event
