@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyrender_vello_cpu::VelloCpuImageRenderer;
-use blitz_dom::{BaseDocument, Document, DocumentConfig};
+use blitz_dom::{BaseDocument, Document, DocumentConfig, NodeId};
 use blitz_html::{DocumentHtmlParser, HtmlProvider};
 use blitz_traits::events::{
-    BlitzKeyEvent, BlitzPointerEvent, BlitzPointerId, BlitzWheelDelta, BlitzWheelEvent, KeyState, MouseEventButton,
+    BlitzInputEvent, BlitzKeyEvent, BlitzPointerEvent, DomEvent, DomEventData, BlitzPointerId, BlitzWheelDelta, BlitzWheelEvent, KeyState, MouseEventButton,
     MouseEventButtons, PointerCoords, PointerDetails, UiEvent,
 };
 use blitz_traits::shell::{ColorScheme, Viewport};
@@ -281,11 +281,45 @@ impl Page {
         self.resolve();
     }
 
+    /// Typed text is appended to the focused text control's live value (kitesurf's blitz-dom lets the
+    /// embedder own it), then an `input` event goes through the event driver. Returns false when no
+    /// text control has focus.
+    pub fn insert_text(&mut self, text: &str) -> Result<bool, String> {
+        self.edit_text(text, 0)
+    }
+
+    fn edit_text(&mut self, text: &str, back: usize) -> Result<bool, String> {
+        let Some(answer) = self.ks(&format!("editText({}, {back})", js_string(text)))? else {
+            return Ok(false);
+        };
+        let (Some(id), Some(value)) = (answer["node"].as_u64(), answer["value"].as_str()) else {
+            return Ok(false);
+        };
+        let event = DomEvent::new(NodeId::from_u64(id - 1), DomEventData::Input(BlitzInputEvent { value: value.to_string() }));
+        self.doc.dispatch_dom_event(event);
+        self.resolve();
+        Ok(true)
+    }
+
     pub fn key(&mut self, kind: &str, key: &str, code: &str, text: Option<&str>, modifiers: u64, auto_repeat: bool) {
+        let state = if kind == "keyUp" { KeyState::Released } else { KeyState::Pressed };
+        // Blitz's editor would type into its display buffer, which kitesurf's blitz-dom re-derives from
+        // the embedder-owned value: printable text and Backspace in a text control are edits of that value.
+        if state == KeyState::Pressed {
+            // `keyDown` is `rawKeyDown` plus `char`: text arrives with one or the other.
+            let printable = text.filter(|t| kind != "rawKeyDown" && !t.is_empty() && !t.chars().any(char::is_control));
+            let edited = match (printable, key) {
+                (Some(t), _) => self.edit_text(t, 0),
+                (None, "Backspace") => self.edit_text("", 1),
+                _ => Ok(false),
+            };
+            if edited.unwrap_or(false) {
+                return;
+            }
+        }
         if kind == "char" {
             return;
         }
-        let state = if kind == "keyUp" { KeyState::Released } else { KeyState::Pressed };
         let key: Key = key.parse().unwrap_or_else(|_| match text {
             Some(t) if !t.is_empty() => Key::Character(t.to_string()),
             _ => Key::Named(NamedKey::Unidentified),

@@ -80,12 +80,16 @@ const PAGE: &str = r#"<!doctype html>
   <head><style>body { margin: 0 } #root { background: rgb(255, 0, 0); width: 200px; height: 100px }</style></head>
   <body>
     <div id="root">before</div>
+    <button id="btn" onclick="this.textContent = 'pressed'" style="position: absolute; left: 300px; top: 20px; width: 80px; height: 30px">press</button>
+    <input id="name" style="position: absolute; left: 300px; top: 80px; width: 120px">
     <script>
       const p = document.createElement("p");
       p.id = "added";
       p.textContent = "mutated by script";
       document.getElementById("root").appendChild(p);
       console.log("script ran");
+      window.inputs = 0;
+      document.getElementById("name").addEventListener("input", () => window.inputs++);
     </script>
   </body>
 </html>"#;
@@ -166,6 +170,27 @@ fn navigate_mutate_and_screenshot() {
 
     let awaited = client.call(s, "Runtime.evaluate", json!({ "expression": "new Promise(r => setTimeout(() => r(6 * 7), 10))", "awaitPromise": true, "returnByValue": true }));
     assert_eq!(awaited["result"]["value"], 42);
+
+    let href = client.call(s, "Runtime.evaluate", json!({ "expression": "location.href", "returnByValue": true }));
+    assert!(href["result"]["value"].as_str().unwrap().starts_with("data:text/html"), "{href}");
+
+    // A real click (hit testing, pointer events) runs the inline onclick attribute.
+    for kind in ["mousePressed", "mouseReleased"] {
+        client.call(s, "Input.dispatchMouseEvent", json!({ "type": kind, "x": 340, "y": 35, "button": "left", "clickCount": 1 }));
+    }
+    let pressed = client.call(s, "Runtime.evaluate", json!({ "expression": "document.getElementById('btn').textContent", "returnByValue": true }));
+    assert_eq!(pressed["result"]["value"], "pressed");
+
+    // Typing into a focused text field.
+    for kind in ["mousePressed", "mouseReleased"] {
+        client.call(s, "Input.dispatchMouseEvent", json!({ "type": kind, "x": 320, "y": 90, "button": "left", "clickCount": 1 }));
+    }
+    client.call(s, "Input.insertText", json!({ "text": "Ada" }));
+    for (kind, key, text) in [("keyDown", "!", "!"), ("keyUp", "!", ""), ("rawKeyDown", "Backspace", ""), ("keyUp", "Backspace", ""), ("keyDown", "s", "s")] {
+        client.call(s, "Input.dispatchKeyEvent", json!({ "type": kind, "key": key, "text": text }));
+    }
+    let typed = client.call(s, "Runtime.evaluate", json!({ "expression": "document.getElementById('name').value + ' ' + window.inputs", "returnByValue": true }));
+    assert_eq!(typed["result"]["value"], "Adas 4");
 
     let thrown = client.call(s, "Runtime.evaluate", json!({ "expression": "null.boom" }));
     assert!(thrown.get("exceptionDetails").is_some(), "{thrown}");

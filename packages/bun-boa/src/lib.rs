@@ -2,6 +2,7 @@
 //! engine, with no JavaScriptCore and no C++.
 
 pub mod cli;
+pub mod fmt;
 pub mod loader;
 pub mod runtime;
 pub mod transpile;

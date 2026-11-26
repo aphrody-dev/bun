@@ -766,7 +766,7 @@ impl Browser {
             }
             ("Input", "insertText") => {
                 let text = params["text"].as_str().unwrap_or_default();
-                self.pages[i].ks(&format!("insertText({})", js(text))).map_err(server_error)?;
+                self.pages[i].insert_text(text).map_err(server_error)?;
                 Ok(json!({}))
             }
             ("Input", "setIgnoreInputEvents" | "setInterceptDrags") => Ok(json!({})),
@@ -825,6 +825,7 @@ impl Browser {
             ("Accessibility" | "Log" | "Security" | "Performance" | "CSS" | "Overlay" | "Inspector" | "ServiceWorker" | "Fetch" | "Storage" | "Audits"
             | "Debugger" | "Profiler" | "HeapProfiler" | "Animation" | "LayerTree" | "Media" | "WebAuthn" | "DOMStorage" | "IndexedDB" | "CacheStorage"
             | "BackgroundService" | "Autofill", _) => Ok(json!({})),
+            (_, "enable" | "disable") => Ok(json!({})),
             _ => Err(server_error(format!("'{domain}.{command}' wasn't found"))),
         }
     }

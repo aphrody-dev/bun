@@ -106,3 +106,51 @@ fn elf_needed(elf: &object::read::elf::ElfFile64) -> Vec<String> {
     }
     out
 }
+
+const MESSY_FORMATTED: &str = "const greeting: string = \"hi\";
+function add(a: number, b: number) {
+  return a + b;
+}
+export const obj = { a: 1, b: [1, 2, 3] };
+";
+
+#[test]
+fn fmt_formats_files_and_stdin() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fmt");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(fixtures().join("fmt/messy.ts"), dir.join("messy.ts")).unwrap();
+
+    let out = bun().args(["fmt", "--check", "messy.ts"]).current_dir(&dir).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{:?}", text(&out));
+
+    let out = bun().args(["fmt", "messy.ts"]).current_dir(&dir).output().unwrap();
+    assert!(out.status.success(), "{:?}", text(&out));
+    assert_eq!(std::fs::read_to_string(dir.join("messy.ts")).unwrap(), MESSY_FORMATTED);
+
+    let out = bun()
+        .args(["fmt", "--stdin-filepath", "messy.ts"])
+        .current_dir(&dir)
+        .stdin(std::fs::File::open(fixtures().join("fmt/messy.ts")).unwrap())
+        .output()
+        .unwrap();
+    assert_eq!(text(&out).0, MESSY_FORMATTED, "{:?}", text(&out));
+    assert!(out.status.success());
+}
+
+#[test]
+fn fmt_reads_bunfig() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fmt-bunfig");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("bunfig.toml"), "[fmt]\nsemi = false\n").unwrap();
+    let out = bun()
+        .args(["fmt", "--stdin-filepath", "a.ts"])
+        .current_dir(&dir)
+        .stdin(std::fs::File::open(fixtures().join("fmt/messy.ts")).unwrap())
+        .output()
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert!(stdout.starts_with("const greeting: string = \"hi\"\n"), "{stdout}{stderr}");
+    assert!(out.status.success(), "{stderr}");
+}

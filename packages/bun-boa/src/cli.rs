@@ -1,4 +1,4 @@
-//! `bun [run] <file> [args…]`, `bun -e <code>`, `bun --version`, `bun --revision`.
+//! `bun [run] <file> [args…]`, `bun -e <code>`, `bun fmt`, `bun --version`, `bun --revision`.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,6 +14,7 @@ Commands:
   run       ./my-script.ts       Execute a file with Bun
   <file>    ./my-script.ts       Same as `bun run`
   -e        'console.log(1)'     Evaluate source code
+  fmt       ./src                Format files with Bun's formatter
   --version                      Print the version
   --revision                     Print the version with its git revision
 ";
@@ -136,6 +137,7 @@ pub fn main() -> i32 {
                 1
             }
         },
+        Some("fmt") => crate::fmt::main(&args[1..]),
         Some("run") => match args.get(1) {
             Some(file) => run_file(file, &args[2..]),
             None => {

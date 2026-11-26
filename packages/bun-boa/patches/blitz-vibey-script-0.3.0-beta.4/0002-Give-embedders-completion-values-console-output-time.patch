@@ -1,7 +1,7 @@
 From b51fa0c52b279b944ad1ae587e3dad7fb2c8ca05 Mon Sep 17 00:00:00 2001
 From: aphrody-dev <contact@aphrody.com>
 Date: Thu, 26 Nov 2026 02:12:59 +0100
-Subject: [PATCH 2/3] Give embedders completion values, console output, timers
+Subject: [PATCH 2/5] Give embedders completion values, console output, timers
  and node handles
 
 evaluate_to_string returns a script's completion value (or its exception), take_console_messages keeps

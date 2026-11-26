@@ -348,12 +348,14 @@
       const n = typeof document.elementFromPoint === "function" ? document.elementFromPoint(x, y) : null;
       return String(nodeId(n) || 0);
     },
-    insertText(text) {
+    // Appends `text` to the focused text control after deleting `back` characters.
+    editText(text, back) {
       const el = document.activeElement;
-      if (!el || !("value" in el)) return "{}";
-      el.value = String(el.value ?? "") + text;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      return "{}";
+      const tag = el && el.nodeType === 1 ? String(el.localName).toLowerCase() : "";
+      if (tag !== "textarea" && (tag !== "input" || (inputRole(el) !== "textbox" && inputRole(el) !== "searchbox"))) return "";
+      const chars = Array.from(String(el.value ?? ""));
+      el.value = chars.slice(0, Math.max(0, chars.length - back)).join("") + text;
+      return JSON.stringify({ node: nodeId(el), value: el.value });
     },
     axTree() {
       return JSON.stringify({ nodes: axTree() });
@@ -372,4 +374,15 @@
     },
   };
   Object.defineProperty(globalThis, "__ks", { value: ks, enumerable: false, configurable: false, writable: false });
+
+  // Inline `on<event>="…"` attributes of the parsed document, as handler properties (the DOM bindings
+  // only dispatch to properties and listeners). Runs before the page's scripts, which may replace them.
+  for (const el of Array.from(document.querySelectorAll("*"))) {
+    for (const name of el.getAttributeNames()) {
+      if (!name.startsWith("on") || name === "onload" && el.localName === "body") continue;
+      try {
+        el[name] = new Function("event", el.getAttribute(name));
+      } catch {}
+    }
+  }
 })();

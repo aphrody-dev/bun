@@ -1,7 +1,7 @@
 From 52b57ffe46f9f54087f75d684798b54b44b5d8a4 Mon Sep 17 00:00:00 2001
 From: aphrody-dev <contact@aphrody.com>
 Date: Thu, 26 Nov 2026 02:25:53 +0100
-Subject: [PATCH 3/3] Read nodes through kitesurf's packed-storage accessors
+Subject: [PATCH 3/5] Read nodes through kitesurf's packed-storage accessors
 
 kitesurf's blitz-dom series packs node storage: parent, children, layout children, inline layouts and
 list markers move behind accessors (parent_id, children, layout_children, inline_layout_data, ...).
