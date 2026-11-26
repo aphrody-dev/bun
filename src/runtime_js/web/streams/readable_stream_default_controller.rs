@@ -8,7 +8,7 @@ use bun_js::{JSGlobalObject, JSValue, JsClass, JsResult};
 use super::internals::{self, Queue, Reaction, chunk_size, invalid_state, promise_call, upon};
 use super::readable_stream::{self, State};
 use super::readable_stream_default_reader::ReadRequest;
-use super::{stream_tee_state, transform_stream};
+use super::{direct_stream_controller, stream_tee_state, transform_stream};
 
 /// Where a controller's pull and cancel algorithms come from.
 #[derive(Clone, Trace, Finalize)]
@@ -22,6 +22,23 @@ pub enum SourceAlgorithms {
     Tee { state: JSValue, branch: u8 },
     /// The readable side of a `TransformStream`.
     Transform { stream: JSValue },
+    /// A `type: "direct"` source, through its `DirectStreamController`.
+    Direct { controller: JSValue },
+    /// `ReadableStream.from(iterable)`: the iterator, its `next`, and whether it is an async one.
+    Iterator { iterator: JSValue, next: JSValue, is_async: bool },
+    /// A descriptor's reads (`Bun.stdin.stream()`): a `FileSource`.
+    File { source: JSValue },
+}
+
+/// The direct stream controller of `controller`, for a `type: "direct"` stream.
+pub fn direct_controller(global: &JSGlobalObject, controller: &JSValue) -> JsResult<Option<JSValue>> {
+    let Some(c) = controller.as_class_ref::<ReadableStreamDefaultController>() else {
+        return Ok(None);
+    };
+    Ok(match &c.borrow(global)?.algorithms {
+        SourceAlgorithms::Direct { controller } => Some(controller.clone()),
+        _ => None,
+    })
 }
 
 #[derive(Trace, Finalize)]
@@ -49,6 +66,11 @@ fn pull_algorithm(global: &JSGlobalObject, controller: &JSValue, algorithms: &So
         SourceAlgorithms::Js { source, pull, .. } => promise_call(global, pull, source, &[controller.clone()]),
         SourceAlgorithms::Tee { state, .. } => stream_tee_state::pull(global, state),
         SourceAlgorithms::Transform { stream } => transform_stream::source_pull(global, stream),
+        SourceAlgorithms::Direct { controller } => direct_stream_controller::pull(global, controller),
+        SourceAlgorithms::Iterator { iterator, next, is_async } => {
+            readable_stream::iterator_pull(global, controller, iterator, next, *is_async)
+        }
+        SourceAlgorithms::File { source } => crate::webcore::blob::file_sink::source_pull(global, controller, source),
     }
 }
 
@@ -58,6 +80,9 @@ fn cancel_algorithm(global: &JSGlobalObject, algorithms: &SourceAlgorithms, reas
         SourceAlgorithms::Js { source, cancel, .. } => promise_call(global, cancel, source, &[reason]),
         SourceAlgorithms::Tee { state, branch } => stream_tee_state::cancel(global, state, *branch, reason),
         SourceAlgorithms::Transform { stream } => transform_stream::source_cancel(global, stream, reason),
+        SourceAlgorithms::Direct { controller } => direct_stream_controller::cancel(global, controller, reason),
+        SourceAlgorithms::Iterator { iterator, .. } => readable_stream::iterator_cancel(global, iterator, reason),
+        SourceAlgorithms::File { .. } => Ok(internals::resolved(global, JSValue::UNDEFINED)),
     }
 }
 

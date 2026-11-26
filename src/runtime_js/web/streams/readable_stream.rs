@@ -8,6 +8,8 @@ use bun_js::{CallFrame, ErrorCode, JSArray, JSGlobalObject, JSValue, JsClass, Js
 use super::internals::{self, Deferred, Reaction, callback_member, invalid_state, member, upon};
 use super::readable_stream_default_controller::{self as controller, SourceAlgorithms};
 use super::readable_stream_default_reader::{self as reader, ReadRequest, reader_of};
+use super::readable_byte_stream_controller as byte_controller;
+use super::readable_stream_byob_reader as byob_reader;
 use super::{readable_stream_async_iterator, stream_pipe_to_operation, stream_tee_state};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -56,10 +58,10 @@ pub fn is_locked(global: &JSGlobalObject, stream: &JSValue) -> JsResult<bool> {
 /// `ReadableStreamGetNumReadRequests`.
 pub fn num_read_requests(global: &JSGlobalObject, stream: &JSValue) -> JsResult<usize> {
     let reader = stream_of(stream).borrow(global)?.reader.clone();
-    if reader.is_undefined() {
-        return Ok(0);
+    match reader.as_class_ref::<reader::ReadableStreamDefaultReader>() {
+        Some(reader) => Ok(reader.borrow(global)?.read_requests.len()),
+        None => Ok(0),
     }
-    Ok(reader_of(&reader).borrow(global)?.read_requests.len())
 }
 
 /// `ReadableStreamAddReadRequest`.
@@ -94,7 +96,14 @@ pub fn cancel(global: &JSGlobalObject, stream: &JSValue, reason: JSValue) -> JsR
         State::Readable => {}
     }
     close(global, stream)?;
-    let source_cancel = controller::cancel_steps(global, &controller, reason)?;
+    let reader = stream_of(stream).borrow(global)?.reader.clone();
+    if byob_reader::is_byob_reader(&reader) {
+        byob_reader::close_read_into_requests(global, &reader)?;
+    }
+    let source_cancel = match byte_controller::is_byte_controller(&controller) {
+        true => byte_controller::cancel_steps(global, &controller, reason)?,
+        false => controller::cancel_steps(global, &controller, reason)?,
+    };
     let to_undefined: Reaction<internals::Nothing> = |_, _, _| Ok(JSValue::UNDEFINED);
     Ok(internals::react(global, &source_cancel, internals::Nothing, Some(to_undefined), None))
 }
@@ -108,6 +117,10 @@ pub fn close(global: &JSGlobalObject, stream: &JSValue) -> JsResult<()> {
         s.reader.clone()
     };
     if reader.is_undefined() {
+        return Ok(());
+    }
+    if byob_reader::is_byob_reader(&reader) {
+        byob_reader::byob_reader_of(&reader).borrow(global)?.closed.resolve(global, JSValue::UNDEFINED);
         return Ok(());
     }
     let (closed, requests) = {
@@ -133,6 +146,12 @@ pub fn error(global: &JSGlobalObject, stream: &JSValue, reason: JSValue) -> JsRe
     };
     if reader.is_undefined() {
         return Ok(());
+    }
+    if byob_reader::is_byob_reader(&reader) {
+        let closed = byob_reader::byob_reader_of(&reader).borrow(global)?.closed.clone();
+        closed.reject(global, reason.clone());
+        internals::mark_handled(global, &closed.promise);
+        return byob_reader::error_read_into_requests(global, &reader, reason);
     }
     let closed = reader_of(&reader).borrow(global)?.closed.clone();
     closed.reject(global, reason.clone());
@@ -235,15 +254,48 @@ fn construct_steps(global: &JSGlobalObject, stream: &JSValue, frame: &CallFrame<
     match kind.as_deref() {
         None => {}
         Some("bytes") => {
-            let _ = auto_allocate_chunk_size;
-            return Err(global.throw_type_error(format_args!(
-                "ReadableStream with type 'bytes' is not implemented on Boa yet"
-            )));
+            if !strategy.size.is_undefined() {
+                return Err(global.throw_range_error(format_args!(
+                    "The queuing strategy of a readable byte stream cannot have a size function"
+                )));
+            }
+            let auto_allocate_chunk_size = match auto_allocate_chunk_size.is_undefined() {
+                true => None,
+                false => {
+                    let size = auto_allocate_chunk_size.to_number(global)?;
+                    if !(size >= 1.0) || size.is_infinite() {
+                        return Err(global.throw_type_error(format_args!(
+                            "autoAllocateChunkSize must be greater than 0"
+                        )));
+                    }
+                    Some(size as usize)
+                }
+            };
+            let high_water_mark = internals::extract_high_water_mark(global, &strategy, 0.0)?;
+            return byte_controller::set_up_from_underlying_source(
+                global,
+                stream,
+                &underlying_source,
+                start,
+                pull,
+                cancel,
+                high_water_mark,
+                auto_allocate_chunk_size,
+            );
         }
         Some("direct") => {
-            return Err(global.throw_type_error(format_args!(
-                "ReadableStream with type 'direct' is not implemented on Boa yet"
-            )));
+            let close = callback_member(global, &underlying_source, "close", what)?;
+            let high_water_mark = internals::extract_high_water_mark(global, &strategy, 0.0)?;
+            let direct = super::direct_stream_controller::create(global, stream, &underlying_source, pull, cancel, close)?;
+            controller::set_up(
+                global,
+                stream,
+                |_| Ok(JSValue::UNDEFINED),
+                SourceAlgorithms::Direct { controller: direct },
+                high_water_mark,
+                JSValue::UNDEFINED,
+            )?;
+            return Ok(());
         }
         Some(other) => {
             return Err(global.throw_type_error(format_args!(
@@ -262,6 +314,103 @@ fn construct_steps(global: &JSGlobalObject, stream: &JSValue, frame: &CallFrame<
         high_water_mark,
         strategy.size,
     )
+}
+
+/// `ReadableStream.from(asyncIterable)` (Streams §4.9.1 `ReadableStreamFromIterable`).
+fn from(global: &JSGlobalObject, frame: &CallFrame<'_>) -> JsResult<JSValue> {
+    let iterable = frame.argument(0);
+    let not_iterable = |global: &JSGlobalObject| -> JsResult<bun_js::JsError> {
+        let shown = match iterable.is_string() {
+            true => format!("\"{}\"", iterable.to_utf8(global)?),
+            false => iterable.to_utf8(global).unwrap_or_else(|_| "value".to_owned()),
+        };
+        Ok(ErrorCode::ARG_NOT_ITERABLE.throw(global, format_args!("{shown} must be iterable")))
+    };
+    let (method, is_async) = match crate::engine::symbol_method(global, &iterable, "asyncIterator")? {
+        Some(method) => (method, true),
+        None => match crate::engine::symbol_method(global, &iterable, "iterator")? {
+            Some(method) => (method, false),
+            None => return Err(not_iterable(global)?),
+        },
+    };
+    let iterator = method.call(global, iterable.clone(), &[])?;
+    if !iterator.is_object() {
+        return Err(global.throw_type_error(format_args!("Invalid state: The iterator method must return an object")));
+    }
+    let next = iterator.get(global, "next")?.unwrap_or_default();
+    create(global, SourceAlgorithms::Iterator { iterator, next, is_async }, 0.0)
+}
+
+#[derive(Clone, Trace, Finalize)]
+#[boa_gc(unsafe_no_drop)]
+struct IteratorStep {
+    controller: JSValue,
+    is_async: bool,
+}
+
+/// The pull algorithm of `ReadableStream.from()`: the iterator's next value is enqueued, its end closes the stream.
+pub fn iterator_pull(
+    global: &JSGlobalObject,
+    controller: &JSValue,
+    iterator: &JSValue,
+    next: &JSValue,
+    is_async: bool,
+) -> JsResult<JSValue> {
+    let result = match next.call(global, iterator.clone(), &[]) {
+        Ok(result) => result,
+        Err(thrown) => return Ok(internals::rejected(global, internals::catch(global, thrown)?)),
+    };
+    let result = internals::resolved(global, result);
+    let step: Reaction<IteratorStep> = |global, step, result| {
+        if !result.is_object() {
+            return Err(global.throw_type_error(format_args!(
+                "The promise returned by the async iterator's next() method must fulfill with an object"
+            )));
+        }
+        let done = result.get(global, "done")?.is_some_and(|done| done.to_boolean());
+        if done {
+            controller::close(global, &step.controller)?;
+            return Ok(JSValue::UNDEFINED);
+        }
+        let value = result.get(global, "value")?.unwrap_or_default();
+        if step.is_async {
+            controller::enqueue(global, &step.controller, value)?;
+            return Ok(JSValue::UNDEFINED);
+        }
+        // A sync iterator's value is awaited, as CreateAsyncFromSyncIterator does.
+        let enqueue: Reaction<IteratorStep> = |global, step, value| {
+            controller::enqueue(global, &step.controller, value)?;
+            Ok(JSValue::UNDEFINED)
+        };
+        Ok(internals::react(global, &internals::resolved(global, value), step.clone(), Some(enqueue), None))
+    };
+    let captures = IteratorStep {
+        controller: controller.clone(),
+        is_async,
+    };
+    Ok(internals::react(global, &result, captures, Some(step), None))
+}
+
+/// The cancel algorithm of `ReadableStream.from()`: the iterator's `return(reason)`, if it has one.
+pub fn iterator_cancel(global: &JSGlobalObject, iterator: &JSValue, reason: JSValue) -> JsResult<JSValue> {
+    internals::promise_of(global, || {
+        let Some(method) = iterator.get(global, "return")? else {
+            return Ok(JSValue::UNDEFINED);
+        };
+        if !method.is_callable() {
+            return Err(global.throw_type_error(format_args!("The async iterator's return property must be callable")));
+        }
+        let result = method.call(global, iterator.clone(), &[reason])?;
+        let check: Reaction<internals::Nothing> = |global, _, result| {
+            if !result.is_object() {
+                return Err(global.throw_type_error(format_args!(
+                    "The promise returned by the async iterator's return() method must fulfill with an object"
+                )));
+            }
+            Ok(JSValue::UNDEFINED)
+        };
+        Ok(internals::react(global, &internals::resolved(global, result), internals::Nothing, Some(check), None))
+    })
 }
 
 /// What a consumer (`text()`, `bytes()`, ...) makes of the bytes.
@@ -302,6 +451,10 @@ pub fn consume(global: &JSGlobalObject, stream: &JSValue, kind: Consume) -> JsRe
     }
     if is_locked(global, stream)? {
         return Ok(internals::rejected(global, invalid_state(global, "ReadableStream is locked")));
+    }
+    let stream_controller = stream_of(stream).borrow(global)?.controller.clone();
+    if let Some(direct) = controller::direct_controller(global, &stream_controller)? {
+        super::direct_stream_controller::mark_one_shot(global, &direct)?;
     }
     let reader = reader::acquire(global, stream)?;
     let deferred = Deferred::new(global);
@@ -401,9 +554,7 @@ fn get_reader(this: &ClassRef<ReadableStream>, global: &JSGlobalObject, frame: &
     }
     let mode = mode.to_utf8(global)?;
     if mode == "byob" {
-        return Err(global.throw_type_error(format_args!(
-            "A BYOB reader requires a ReadableStream with an underlying byte source"
-        )));
+        return byob_reader::acquire(global, &this.to_js());
     }
     Err(ErrorCode::INVALID_ARG_VALUE.throw(
         global,
@@ -569,6 +720,7 @@ impl JsClass for ReadableStream {
         class.method("bytes", 0, attributes, consumer_method(Consume::Bytes))?;
         class.method("json", 0, attributes, consumer_method(Consume::Json))?;
         class.method("text", 0, attributes, consumer_method(Consume::Text))?;
+        class.static_method("from", 1, attributes, from)?;
         Ok(())
     }
 }

@@ -1,8 +1,8 @@
 //! `Blob`, `File`, `Bun.file()` and `Bun.stdin`/`stdout`/`stderr`: src/runtime/webcore/Blob.rs on `bun_js`.
 //!
 //! A read or a write runs when it is asked for and its promise is settled by the time it is returned: Boa has no
-//! thread pool and no I/O loop yet. What needs an API that Boa does not have yet (`stream()` and `writer()` need
-//! streams, `image()` needs `Bun.Image`, `s3://` needs S3) throws and says so.
+//! thread pool and no I/O loop yet. What needs an API that Boa does not have yet (`image()` needs `Bun.Image`,
+//! `s3://` needs S3) throws and says so.
 
 use std::rc::Rc;
 
@@ -20,7 +20,9 @@ use crate::sys_js::SystemError;
 #[path = "blob/Store.rs"]
 pub mod store;
 #[path = "blob/write_file.rs"]
-mod write_file;
+pub(crate) mod write_file;
+#[path = "FileSink.rs"]
+pub mod file_sink;
 
 use store::Data;
 pub use store::{INIT_TIMESTAMP, MAX_SIZE, PathOrFileDescriptor, SizeType, Store};
@@ -983,7 +985,14 @@ impl JsClass for Blob {
         class.method("slice", 2, attributes, slice)?;
         class.method("stat", 0, attributes, stat)?;
         class.method("stream", 1, attributes, |this, global, _| {
-            // The bytes are read now and are the stream's one chunk.
+            // A descriptor (Bun.stdin) is read as a reader asks; anything else now, as the stream's one chunk.
+            let fd = this.borrow(global)?.file().and_then(|file| match &file.pathlike {
+                PathOrFileDescriptor::Fd(fd) => Some(*fd),
+                PathOrFileDescriptor::Path(_) => None,
+            });
+            if let Some(fd) = fd {
+                return file_sink::stream_of_fd(global, fd);
+            }
             let bytes = this
                 .borrow(global)?
                 .read_bytes()
@@ -1002,8 +1011,9 @@ impl JsClass for Blob {
         })?;
         class.method("unlink", 0, attributes, unlink)?;
         class.method("write", 2, attributes, blob_write)?;
-        class.method("writer", 1, attributes, |_, global, _| {
-            Err(not_implemented(global, "Blob.writer()"))
+        class.method("writer", 1, attributes, |this, global, frame| {
+            let blob = this.borrow(global)?.clone();
+            file_sink::writer(global, &blob, &frame.argument(0))
         })?;
         Ok(())
     }

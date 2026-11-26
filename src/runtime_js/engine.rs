@@ -235,6 +235,170 @@ pub(crate) fn inherit_async_iterator_prototype(global: &JSGlobalObject, prototyp
     }
 }
 
+/// An `ArrayBufferView` as a readable byte stream needs it: its buffer, window, element size and constructor (the
+/// realm's own, not what `view.constructor` says).
+pub(crate) struct ViewInfo {
+    pub buffer: JSValue,
+    pub byte_offset: usize,
+    pub byte_length: usize,
+    pub element_size: usize,
+    pub constructor: JSValue,
+    /// Elements, for a typed array; bytes, for a `DataView`.
+    pub length: usize,
+}
+
+pub(crate) fn view_info(global: &JSGlobalObject, value: &JSValue) -> JsResult<Option<ViewInfo>> {
+    use boa_engine::builtins::typed_array::TypedArrayKind as K;
+    let Some(object) = value.as_engine().as_object() else {
+        return Ok(None);
+    };
+    if let Ok(array) = JsTypedArray::from_object(object.clone()) {
+        let constructors = cx(global).intrinsics().constructors();
+        let known = match array.kind() {
+            Some(K::Int8) => Some((1, constructors.typed_int8_array().constructor())),
+            Some(K::Uint8) | None => Some((1, constructors.typed_uint8_array().constructor())),
+            Some(K::Uint8Clamped) => Some((1, constructors.typed_uint8clamped_array().constructor())),
+            Some(K::Int16) => Some((2, constructors.typed_int16_array().constructor())),
+            Some(K::Uint16) => Some((2, constructors.typed_uint16_array().constructor())),
+            Some(K::Int32) => Some((4, constructors.typed_int32_array().constructor())),
+            Some(K::Uint32) => Some((4, constructors.typed_uint32_array().constructor())),
+            Some(K::Float32) => Some((4, constructors.typed_float32_array().constructor())),
+            Some(K::Float64) => Some((8, constructors.typed_float64_array().constructor())),
+            Some(K::BigInt64) => Some((8, constructors.typed_bigint64_array().constructor())),
+            Some(K::BigUint64) => Some((8, constructors.typed_biguint64_array().constructor())),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        };
+        // Float16Array, where the engine has it: two bytes, and the constructor of its prototype.
+        let (element_size, constructor) = match known {
+            Some(known) => known,
+            None => {
+                let constructor = match object.prototype() {
+                    Some(prototype) => global.lift(prototype.get(js_string!("constructor"), cx(global)))?,
+                    None => boa_engine::JsValue::undefined(),
+                };
+                (2, constructor.as_object().unwrap_or_else(|| constructors.typed_uint16_array().constructor()))
+            }
+        };
+        let buffer = global.lift(array.buffer(cx(global)))?;
+        let byte_offset = global.lift(array.byte_offset(cx(global)))?;
+        let byte_length = global.lift(array.byte_length(cx(global)))?;
+        return Ok(Some(ViewInfo {
+            buffer: JSValue::from_engine(buffer),
+            byte_offset,
+            byte_length,
+            element_size,
+            constructor: JSValue::from_engine(constructor.into()),
+            length: byte_length / element_size,
+        }));
+    }
+    if let Ok(view) = JsDataView::from_object(object.clone()) {
+        let constructor = cx(global).intrinsics().constructors().data_view().constructor();
+        let buffer = global.lift(view.buffer(cx(global)))?;
+        let byte_offset = global.lift(view.byte_offset(cx(global)))? as usize;
+        let byte_length = global.lift(view.byte_length(cx(global)))? as usize;
+        return Ok(Some(ViewInfo {
+            buffer: JSValue::from_engine(buffer),
+            byte_offset,
+            byte_length,
+            element_size: 1,
+            constructor: JSValue::from_engine(constructor.into()),
+            length: byte_length,
+        }));
+    }
+    Ok(None)
+}
+
+fn array_buffer_of(buffer: &JSValue) -> Option<JsArrayBuffer> {
+    JsArrayBuffer::from_object(buffer.as_engine().as_object()?.clone()).ok()
+}
+
+/// `IsDetachedBuffer`.
+pub(crate) fn is_detached(buffer: &JSValue) -> bool {
+    array_buffer_of(buffer).is_some_and(|buffer| buffer.data().is_none())
+}
+
+pub(crate) fn array_buffer_byte_length(buffer: &JSValue) -> usize {
+    array_buffer_of(buffer).map_or(0, |buffer| buffer.byte_length())
+}
+
+/// `TransferArrayBuffer(buffer)`: a new buffer with the bytes; `buffer` is detached.
+pub(crate) fn transfer_array_buffer(global: &JSGlobalObject, buffer: &JSValue) -> JsResult<JSValue> {
+    let Some(source) = array_buffer_of(buffer) else {
+        return Err(global.throw_type_error(format_args!("Cannot transfer an ArrayBuffer that is not detachable")));
+    };
+    let data = global.lift(source.detach(&boa_engine::JsValue::undefined()))?;
+    let transferred = global.lift(JsArrayBuffer::from_byte_block(data, cx(global)))?;
+    Ok(JSValue::from_engine(transferred.into()))
+}
+
+/// `CloneArrayBuffer(buffer, offset, length)`.
+pub(crate) fn clone_array_buffer(global: &JSGlobalObject, buffer: &JSValue, offset: usize, length: usize) -> JsResult<JSValue> {
+    let bytes = array_buffer_of(buffer)
+        .and_then(|buffer| buffer.data().and_then(|data| data.get(offset..offset + length).map(<[u8]>::to_vec)))
+        .unwrap_or_default();
+    array_buffer(global, &bytes)
+}
+
+/// Copies `length` bytes from one buffer into another.
+pub(crate) fn copy_buffer_bytes(from: &JSValue, from_offset: usize, to: &JSValue, to_offset: usize, length: usize) {
+    let (Some(from), Some(to)) = (array_buffer_of(from), array_buffer_of(to)) else {
+        return;
+    };
+    let bytes = from.data().and_then(|data| data.get(from_offset..from_offset + length).map(<[u8]>::to_vec));
+    if let (Some(bytes), Some(mut data)) = (bytes, to.data_mut())
+        && let Some(window) = data.get_mut(to_offset..to_offset + length)
+    {
+        window.copy_from_slice(&bytes);
+    }
+}
+
+/// `new ArrayBuffer(length)`.
+pub(crate) fn new_array_buffer(global: &JSGlobalObject, length: usize) -> JsResult<JSValue> {
+    array_buffer(global, &vec![0u8; length])
+}
+
+/// `new constructor(buffer, byteOffset, length)`.
+pub(crate) fn make_view(
+    global: &JSGlobalObject,
+    constructor: &JSValue,
+    buffer: &JSValue,
+    byte_offset: usize,
+    length: usize,
+) -> JsResult<JSValue> {
+    let args = [
+        buffer.clone(),
+        JSValue::js_number(byte_offset as f64),
+        JSValue::js_number(length as f64),
+    ];
+    construct(global, constructor, &args)
+}
+
+pub(crate) fn uint8_array_constructor(global: &JSGlobalObject) -> JSValue {
+    let constructor = cx(global).intrinsics().constructors().typed_uint8_array().constructor();
+    JSValue::from_engine(constructor.into())
+}
+
+/// `GetMethod(value, @@asyncIterator)` or `@@iterator`: `None` where it is `undefined` or `null`, or `value` is.
+pub(crate) fn symbol_method(global: &JSGlobalObject, value: &JSValue, which: &str) -> JsResult<Option<JSValue>> {
+    if value.is_undefined_or_null() {
+        return Ok(None);
+    }
+    let symbol = match which {
+        "asyncIterator" => boa_engine::JsSymbol::async_iterator(),
+        _ => boa_engine::JsSymbol::iterator(),
+    };
+    let object = global.lift(value.as_engine().to_object(cx(global)))?;
+    let method = global.lift(object.get(symbol, cx(global)))?;
+    if method.is_null_or_undefined() {
+        return Ok(None);
+    }
+    if !method.is_callable() {
+        return Err(global.throw_type_error(format_args!("The iterator method is not a function")));
+    }
+    Ok(Some(JSValue::from_engine(method)))
+}
+
 /// `new constructor(...args)`.
 pub(crate) fn construct(global: &JSGlobalObject, constructor: &JSValue, args: &[JSValue]) -> JsResult<JSValue> {
     let Some(constructor) = constructor.as_engine().as_object() else {

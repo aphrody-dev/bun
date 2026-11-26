@@ -1,12 +1,15 @@
 //! WHATWG Streams: src/jsc/bindings/webcore/streams on `bun_js`, the same classes and spec steps in Rust.
 //!
-//! Not ported yet: readable byte streams and BYOB readers, `type: "direct"` streams, `ReadableStream.from()`,
-//! `readMany()`, `TextEncoderStream`/`TextDecoderStream`, `CompressionStream`/`DecompressionStream`, and Bun's native
-//! sources and sinks (BunStreamSource.cpp, FileSink).
+//! Not ported yet: the byte-stream `tee()` (a byte stream tees as a default one), `readMany()`, brotli, and Bun's
+//! native sources (BunStreamSource.cpp) beyond a descriptor's reads (webcore::blob::file_sink).
 
+pub mod direct_stream_controller;
 pub mod internals;
+pub mod native_transform;
 pub mod queuing_strategy;
+pub mod readable_byte_stream_controller;
 pub mod readable_stream;
+pub mod readable_stream_byob_reader;
 pub mod readable_stream_async_iterator;
 pub mod readable_stream_default_controller;
 pub mod readable_stream_default_reader;
@@ -37,6 +40,18 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
             "ReadableStreamDefaultController",
             lift(global, constructor::<readable_stream_default_controller::ReadableStreamDefaultController>(global))?,
         ),
+        (
+            "ReadableByteStreamController",
+            lift(global, constructor::<readable_byte_stream_controller::ReadableByteStreamController>(global))?,
+        ),
+        (
+            "ReadableStreamBYOBReader",
+            lift(global, constructor::<readable_stream_byob_reader::ReadableStreamBYOBReader>(global))?,
+        ),
+        (
+            "ReadableStreamBYOBRequest",
+            lift(global, constructor::<readable_byte_stream_controller::ReadableStreamBYOBRequest>(global))?,
+        ),
         ("WritableStream", lift(global, constructor::<writable_stream::WritableStream>(global))?),
         (
             "WritableStreamDefaultWriter",
@@ -56,6 +71,10 @@ pub(crate) fn install(context: &mut Context) -> JsResult<()> {
             "ByteLengthQueuingStrategy",
             lift(global, constructor::<queuing_strategy::ByteLengthQueuingStrategy>(global))?,
         ),
+        ("TextEncoderStream", lift(global, constructor::<native_transform::TextEncoderStream>(global))?),
+        ("TextDecoderStream", lift(global, constructor::<native_transform::TextDecoderStream>(global))?),
+        ("CompressionStream", lift(global, constructor::<native_transform::CompressionStream>(global))?),
+        ("DecompressionStream", lift(global, constructor::<native_transform::DecompressionStream>(global))?),
     ];
     for (name, value) in classes {
         define_global(context, name, value.into_engine())?;

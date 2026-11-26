@@ -28,6 +28,7 @@ bun_base64 = { path = "../base64" }
 bun_core = { path = "../bun_core" }
 bun_glob = { path = "../glob" }
 bun_http_rs = { path = "../http_rs" }
+bun_deflate = { path = "../deflate" }
 bun_http_types = { path = "../http_types" }
 bun_io = { path = "../io" }
 bun_js = { path = "../bun_js" }
@@ -38,6 +39,7 @@ bun_text_diff = { path = "../text_diff" }
 bun_threading = { path = "../threading" }
 bun_usockets_rs = { path = "../usockets_rs" }
 bun_uws_sys = { path = "../uws_sys" }
+bun_zstd = { path = "../zstd" }
 const_format = "0.2"
 getrandom = "0.4"
 # crypto/: RustCrypto, instead of BoringSSL.

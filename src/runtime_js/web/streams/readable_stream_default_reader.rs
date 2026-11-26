@@ -143,6 +143,9 @@ pub fn read(global: &JSGlobalObject, reader: &JSValue, read_request: ReadRequest
     match state {
         State::Closed => read_request.close_steps(global),
         State::Errored => read_request.error_steps(global, stored_error),
+        State::Readable if super::readable_byte_stream_controller::is_byte_controller(&controller) => {
+            super::readable_byte_stream_controller::pull_steps(global, &controller, read_request)
+        }
         State::Readable => controller::pull_steps(global, &controller, read_request),
     }
 }
@@ -160,6 +163,10 @@ fn generic_release(global: &JSGlobalObject, reader: &JSValue) -> JsResult<()> {
         mark_handled(global, &closed.promise);
     } else {
         reader_of(reader).borrow_mut(global)?.closed = Deferred::rejected_handled(global, released);
+    }
+    let controller = stream_of(&stream).borrow(global)?.controller.clone();
+    if super::readable_byte_stream_controller::is_byte_controller(&controller) {
+        super::readable_byte_stream_controller::release_steps(global, &controller)?;
     }
     stream_of(&stream).borrow_mut(global)?.reader = JSValue::UNDEFINED;
     reader_of(reader).borrow_mut(global)?.stream = JSValue::UNDEFINED;

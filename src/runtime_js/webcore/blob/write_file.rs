@@ -186,7 +186,7 @@ pub(crate) fn write_file_internal(
 }
 
 /// Writes all of `bytes`, waiting where a non-blocking descriptor is full.
-fn write_all(fd: Fd, mut bytes: &[u8]) -> bun_sys::Result<usize> {
+pub(crate) fn write_all(fd: Fd, mut bytes: &[u8]) -> bun_sys::Result<usize> {
     let mut written = 0;
     while !bytes.is_empty() {
         match bun_sys::write(fd, bytes) {

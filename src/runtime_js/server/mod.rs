@@ -343,8 +343,8 @@ fn settle(slot: &Rc<Slot>, value: JsValue, context: &mut Context) -> JsResult<()
     match body {
         Body::Null => write(slot, status, &status_text, &headers, b""),
         Body::Bytes(bytes) => write(slot, status, &status_text, &headers, &bytes),
-        Body::Incoming(incoming) => {
-            let body_promise = body::read(&Body::Incoming(incoming), body::Read::Bytes, String::new(), context)?;
+        body @ (Body::Incoming(_) | Body::Stream(_)) => {
+            let body_promise = body::read(&body, body::Read::Bytes, String::new(), context)?;
             let response = Rc::new((status, status_text, headers));
             let promise = body_promise
                 .as_object()
