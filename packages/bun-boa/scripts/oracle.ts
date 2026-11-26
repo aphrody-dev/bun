@@ -1,7 +1,8 @@
 // Differential oracle: every input through upstream Bun (JavaScriptCore) and bun-boa, compared per checkpoint
 // (transpile, bundle, run: stdout, stderr, exit). Differences are grouped into fingerprints; the match rate per
-// checkpoint and the fingerprints go to build/oracle.json, one line per input and checkpoint to
-// build/oracle-inputs.jsonl. Fingerprints absent from the previous build/oracle.json are printed as new.
+// checkpoint and the fingerprints go to build/oracle.json at the root of the repository (and to this package's
+// tracked build/oracle.json), one line per input and checkpoint to build/oracle-inputs.jsonl. Fingerprints absent
+// from the tracked copy are printed as new.
 //
 // Corpus: test/js/**/*.test.ts, the sources under test/bundler, and the most downloaded npm packages.
 // n1 builds bun-boa and holds the upstream binary; both binaries, the corpus and this script go to every host
@@ -169,8 +170,14 @@ function compare(id: string, checkpoint: Checkpoint, a: Output, b: Output): Reco
     while (suffix < la.length && suffix < lb.length && la[la.length - 1 - suffix] === lb[lb.length - 1 - suffix])
       suffix++;
     return {
-      da: la.subarray(0, la.length - suffix).subarray(0, 80).toString(),
-      db: lb.subarray(0, lb.length - suffix).subarray(0, 80).toString(),
+      da: la
+        .subarray(0, la.length - suffix)
+        .subarray(0, 80)
+        .toString(),
+      db: lb
+        .subarray(0, lb.length - suffix)
+        .subarray(0, 80)
+        .toString(),
       id,
       checkpoint,
       match: false,
@@ -326,11 +333,14 @@ async function coordinate() {
   );
   const records = parts.flat().sort((a, b) => a.id.localeCompare(b.id) || a.checkpoint.localeCompare(b.checkpoint));
 
-  const out = join(pkg, "build/oracle.json");
+  // The run goes to the repository's build/; the copy in this package is tracked, and is the baseline that
+  // tells new fingerprints from known ones.
+  const out = join(repo, "build/oracle.json");
+  const baseline = join(pkg, "build/oracle.json");
   const previous = new Set(
     (
       (
-        await Bun.file(out)
+        await Bun.file(baseline)
           .json()
           .catch(() => ({}))
       ).fingerprints ?? []
@@ -375,8 +385,7 @@ async function coordinate() {
     id.startsWith("npm/") ? "npm" : id.startsWith("test/bundler/") ? "fixture" : "test";
   const kinds: { [k in Kind]?: number } = {};
   for (const id of new Set(records.map(r => r.id))) kinds[kind(id)] = (kinds[kind(id)] ?? 0) + 1;
-  await Bun.write(
-    out,
+  const report =
     JSON.stringify(
       {
         meta: {
@@ -395,9 +404,12 @@ async function coordinate() {
       },
       null,
       2,
-    ) + "\n",
-  );
-  await Bun.write(join(pkg, "build/oracle-inputs.jsonl"), records.map(r => JSON.stringify(r)).join("\n") + "\n");
+    ) + "\n";
+  await Promise.all([
+    Bun.write(out, report),
+    Bun.write(baseline, report),
+    Bun.write(join(repo, "build/oracle-inputs.jsonl"), records.map(r => JSON.stringify(r)).join("\n") + "\n"),
+  ]);
 
   for (const [checkpoint, r] of Object.entries(rates))
     console.log(`${checkpoint.padEnd(9)} ${r.matched}/${r.inputs} ${(r.rate * 100).toFixed(2)}%`);
