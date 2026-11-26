@@ -254,8 +254,13 @@ async function coordinate() {
   await ssh(
     builder,
     `set -e; rsync -a --delete --exclude node_modules --exclude .git ${tree}/test/ ${DIR}/corpus/test/; ` +
-      `cp -f ${tree}/bunfig.toml ${tree}/tsconfig.json ${tree}/tsconfig.base.json ${DIR}/corpus/`,
+      `cp -f ${tree}/bunfig.toml ${tree}/tsconfig.json ${tree}/tsconfig.base.json ${DIR}/corpus/; ` +
+      // test/package.json links these from the root of the repository.
+      `for p in bun-types bun-plugin-svelte; do rsync -a --delete --exclude node_modules ${tree}/packages/$p/ ${DIR}/corpus/packages/$p/; done`,
   );
+  const root = (await Bun.file(join(repo, "package.json")).json()) as { devDependencies: { react: string } };
+  const rootPackage = { private: true, devDependencies: { react: root.devDependencies.react } };
+  await $`ssh -o BatchMode=yes ${builder} ${`cat > ${DIR}/corpus/package.json`} < ${Buffer.from(JSON.stringify(rootPackage))}`;
   await Promise.all(
     hosts.map(async host => {
       await ssh(host, `mkdir -p ${DIR}/corpus ${DIR}/bin ${DIR}/cache`);
@@ -266,6 +271,7 @@ async function coordinate() {
   await ssh(
     builder,
     `set -e; export BUN_INSTALL_CACHE_DIR=${DIR}/cache; ` +
+      `cd ${DIR}/corpus && ${DIR}/bin/bun-jsc install --linker hoisted >/dev/null; ` +
       `cd ${DIR}/corpus/test && ${DIR}/bin/bun-jsc install --frozen-lockfile >/dev/null; ` +
       `cd ${DIR}/corpus/npm && ${DIR}/bin/bun-jsc install --linker hoisted >/dev/null`,
   );
