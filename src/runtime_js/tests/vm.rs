@@ -1,5 +1,5 @@
 //! node:vm's binding on bun_js (`$cpp("NodeVM.cpp", "Bun::createNodeVMBinding")`): contexts are realms of their own,
-//! and a script sees the context object's properties as its globals and leaves its own on it.
+//! whose global forwards its properties to the context object.
 
 use bun_js::JSGlobalObject;
 
@@ -46,5 +46,17 @@ fn scripts_in_contexts() {
         ("vm.createContext(1)", "throws TypeError: The \"contextObject\" argument must be of type object. Received type number (1) (ERR_INVALID_ARG_TYPE)"),
         ("new vm.Script('1').runInContext({})", "throws TypeError: The \"contextifiedObject\" argument must be an vm.Context (ERR_INVALID_ARG_TYPE)"),
         ("return vm.compileFunction('return a + b', ['a', 'b'])(1, 2)", "3"),
+    ]);
+}
+
+#[test]
+fn contexts_are_live() {
+    check(&[
+        ("const c = vm.createContext({ k: 1 }); const f = vm.compileFunction('return k', [], { parsingContext: c }); c.k = 2; return f()", "2"),
+        ("const c = vm.createContext({ k: 1 }); const f = new vm.Script('() => k').runInContext(c); c.k = 3; return f()", "3"),
+        ("const c = vm.createContext({}); const set = new vm.Script('v => { w = v }').runInContext(c); set(9); return c.w", "9"),
+        ("const c = vm.createContext({ a: 1 }); return new vm.Script('var b; Object.keys(globalThis).join()').runInContext(c)", "a,b"),
+        ("const c = vm.createContext({ Array: 4 }); const f = new vm.Script('() => Array').runInContext(c); const before = f(); delete c.Array; return [before, typeof f()]", "4,function"),
+        ("const c = vm.createContext({}); c.self = c; return new vm.Script('self === globalThis').runInContext(c)", "true"),
     ]);
 }

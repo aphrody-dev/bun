@@ -1,8 +1,7 @@
 //! `Bun::createNodeVMBinding` (src/jsc/bindings/NodeVM.cpp), what src/js/node/vm.ts takes, on bun_js. A context is a
 //! Boa realm of its own, which bun_js holds in a handle; vm.js (beside this file) builds `Script`, `createContext`
-//! and the rest on the natives here. JavaScriptCore's context global forwards every property to the contextified
-//! object; here the realm's global has the object's properties put on it before a script runs, and what the script
-//! left on the global is put back on the object after it.
+//! and the rest on the natives here. As JavaScriptCore's `NodeVMGlobalObject`, the realm's global forwards its
+//! properties to the contextified object (Boa's `Context::create_contextified_realm`).
 
 use bun_js::{CallFrame, JSFunction, JSGlobalObject, JSObject, JSValue, JsResult};
 
@@ -13,9 +12,10 @@ fn string(global: &JSGlobalObject, value: &JSValue, otherwise: &str) -> JsResult
     if value.is_undefined() { Ok(otherwise.to_owned()) } else { value.to_utf8(global) }
 }
 
-/// `createRealm()`: a handle of a new realm.
-fn create_realm(global: &JSGlobalObject, _: &CallFrame<'_>) -> JsResult<JSValue> {
-    global.create_realm_handle()
+/// `createRealm(object?)`: a handle of a new realm, whose global forwards to `object` when there is one.
+fn create_realm(global: &JSGlobalObject, frame: &CallFrame<'_>) -> JsResult<JSValue> {
+    let target = frame.argument(0);
+    if target.is_undefined() { global.create_realm_handle() } else { global.create_contextified_realm_handle(&target) }
 }
 
 /// `realmGlobal(handle)`: its global object.

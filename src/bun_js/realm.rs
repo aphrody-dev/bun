@@ -1,5 +1,6 @@
 //! Realms besides the global object's own: what node:vm's contexts are (JavaScriptCore's `NodeVMGlobalObject`). A
-//! realm has its own global object and intrinsics; values pass between realms as they are.
+//! realm has its own global object and intrinsics; values pass between realms as they are. A contextified realm's
+//! global forwards its properties to the object it was made for.
 
 use boa_engine::object::JsData;
 use boa_engine::realm::Realm;
@@ -18,6 +19,16 @@ impl JSGlobalObject {
     /// A new realm with the default global bindings, as an object that holds it.
     pub fn create_realm_handle(&self) -> JsResult<JSValue> {
         let realm = self.cx().create_realm();
+        let realm = self.lift(realm)?;
+        Ok(JSValue(JsObject::from_proto_and_data(None, RealmHandle(realm)).into()))
+    }
+
+    /// A new realm whose global forwards to `target` (Boa's `create_contextified_realm`), as an object that holds it.
+    pub fn create_contextified_realm_handle(&self, target: &JSValue) -> JsResult<JSValue> {
+        let Some(target) = target.0.as_object() else {
+            return Err(self.throw_type_error(format_args!("a context must be an object")));
+        };
+        let realm = self.cx().create_contextified_realm(target);
         let realm = self.lift(realm)?;
         Ok(JSValue(JsObject::from_proto_and_data(None, RealmHandle(realm)).into()))
     }
