@@ -24,7 +24,6 @@ await $`bun ${import.meta.dir}/remote.ts cargo nextest archive ${features} --arc
   BUN_BUILD_HOST: "n1",
   BUN_REMOTE_REPO: repo,
   GIT_NO_LAZY_FETCH: "1",
-  RUSTC_WRAPPER: "",
 });
 // n1 knows the others under other aliases, so it is pointed at the address this machine resolves them to.
 const address = async (host: string) => {
