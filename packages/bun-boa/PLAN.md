@@ -5,11 +5,15 @@ It merges Bun, Dioxus/Blitz and kitesurf without breaking any of them and withou
 
 - `packages/bun-boa/` is a standalone Cargo workspace (the Dioxus layout: a crate in `packages/`). Bun's root
   workspace and lockfile are untouched; Bun's `src/*` crates are path dependencies.
-- `patches/<crate>-<version>/` holds git-format-patch series against crates.io tarballs, kitesurf's series first
-  (Boa, Blitz, Stylo, Taffy, Parley, vello_cpu, usvg), ours on top. `bun run vendor` materialises them into
-  the gitignored `vendor/`, and `[patch.crates-io]` wires them in. A crate that is not on crates.io names its
-  base in `patches/<crate>-<version>/SOURCE` (`<git-url>@<ref>:<path>`) and is a path dependency.
-- `aphrody-dev/boa` and `aphrody-dev/blitz` are forks for upstream PRs only, never dependencies.
+- Boa and Blitz are first-party: `src/boa` and `src/blitz` are `git subtree`s (history kept) of the forks'
+  `bun/v0.22.0` (aphrody-dev/boa) and `bun/v0.3.0-beta.4` (aphrody-dev/blitz) branches: the release tag with
+  kitesurf's patch series, then ours, as commits. Changes are commits there (`scripts/port-pr.ts` ports an
+  upstream PR as one), published with `git subtree push`. Crates keep their crates.io names: Blitz's workspace
+  and kitesurf-cdp depend on them by those names, and `[patch.crates-io]` points every such user at the
+  in-tree copy.
+- `patches/<crate>-<version>/` holds kitesurf's git-format-patch series against crates.io tarballs for the rest
+  of the stack (Stylo, Taffy, Parley, vello_cpu, anyrender, usvg). `bun run vendor` materialises them into the
+  gitignored `vendor/`, and `[patch.crates-io]` wires them in.
 - Builds never run locally: `bun run build` / `bun run test` (`scripts/remote.ts`) give the build host (n1,
   `/srv/xbuild` XFS) its own clone of HEAD from GitHub, rsync only the local delta, run `scripts/setup.ts`
   (Bun's vendored Rust deps from `scripts/build/deps`, the patched crates, and the codegen commands from
@@ -39,7 +43,7 @@ Already Rust and reused as is: `js_parser`, `js_printer`, `ast`, `resolver`, `cs
 
 ## Phases
 
-0. **Infra**: Bun codegen without WebKit, forks as path deps, Rust native shims (start from
+0. **Infra**: Bun codegen without WebKit, Boa and Blitz in-tree, Rust native shims (start from
    `bun_sema_standalone::native`), and a test that the linked binary has no C++ in it.
 1. **Core runtime**: Bun's transpiler, then Boa ES modules, an event loop (microtasks and timers),
    `console`, `process`, `Bun.file`/`Bun.write`/`Bun.env`/`Bun.version`, top-level await.
@@ -50,8 +54,8 @@ Already Rust and reused as is: `js_parser`, `js_printer`, `ast`, `resolver`, `cs
 4. **Node compat**: run Bun's own `src/js/node/*` builtins on Boa by providing their `$` intrinsics in Rust.
 5. **Blitz**: headless `Bun.WebView` on Blitz (vello_cpu screenshots), `HTMLRewriter` on lol-html. First
    piece: `cdp/` (`kitesurf-cdp serve --host 127.0.0.1 --port N`), a headless browser on kitesurf's Blitz
-   stack and `blitz-vibey-script` (Boa DOM bindings, a `SOURCE` series) behind the DevTools protocol, the
+   stack and `blitz-vibey-script` (Boa DOM bindings, in `src/blitz`) behind the DevTools protocol, the
    `lightpanda serve` contract agent-browser launches. `bun run build:cdp`, `bun run test:cdp`.
 6. **The rest**: `bun:sqlite` on Turso, `bun:ffi` on Cranelift, HTTP/3 on quinn, Windows I/O.
 7. **Conformance**: run Bun's `test/js` suite with this binary and track the pass rate. Engine
-   performance work happens in the Boa fork.
+   performance work happens in `src/boa`.

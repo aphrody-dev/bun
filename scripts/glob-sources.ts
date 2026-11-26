@@ -106,6 +106,8 @@ const patterns = {
       "Cargo.lock",
       "rust-toolchain.toml",
     ],
+    // subtrees with their own workspaces, not members of the root one
+    exclude: ["src/boa/**", "src/blitz/**"],
   },
   /** all `*.cpp` compiled into bun (bindings, webcore, v8 shim, usockets) */
   cxx: {
