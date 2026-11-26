@@ -144,6 +144,14 @@ pub(crate) fn define_has_instance(
     define_symbol_method(global, target, boa_engine::JsSymbol::has_instance(), f, 1, false)
 }
 
+/// Makes `serializer` the structured clone steps of the realm's platform objects (`structuredClone`, `postMessage`).
+pub(crate) fn set_host_serializer(
+    global: &JSGlobalObject,
+    serializer: boa_wintertc::store::HostSerializer,
+) {
+    boa_wintertc::store::set_host_serializer(cx(global), serializer);
+}
+
 /// `target[Symbol.for(key)] = f`, writable and not enumerable, as a method of a class's prototype is.
 pub(crate) fn define_symbol_for_method(
     global: &JSGlobalObject,
@@ -173,19 +181,41 @@ fn define_symbol_method(
     length: usize,
     writable: bool,
 ) -> JsResult<()> {
+    let name = format!("[{}]", symbol.description().map(|d| d.to_std_string_escaped()).unwrap_or_default());
+    let function = bun_js::JSFunction::create(global, &name, f, length);
+    define_symbol_value(global, target, symbol, function, writable)
+}
+
+/// `target[symbol] = value`, not enumerable.
+fn define_symbol_value(
+    global: &JSGlobalObject,
+    target: &JSValue,
+    symbol: boa_engine::JsSymbol,
+    value: JSValue,
+    writable: bool,
+) -> JsResult<()> {
     let Some(target) = target.as_engine().as_object() else {
         return Ok(());
     };
-    let name = format!("[{}]", symbol.description().map(|d| d.to_std_string_escaped()).unwrap_or_default());
-    let function = bun_js::JSFunction::create(global, &name, f, length);
     let descriptor = boa_engine::property::PropertyDescriptor::builder()
-        .value(function.into_engine())
+        .value(value.into_engine())
         .writable(writable)
         .enumerable(false)
         .configurable(true)
         .build();
     let result = target.define_property_or_throw(symbol, descriptor, cx(global));
     global.lift(result).map(drop)
+}
+
+/// `target[Symbol.toStringTag] = tag`, read-only.
+pub(crate) fn define_to_string_tag(global: &JSGlobalObject, target: &JSValue, tag: &str) -> JsResult<()> {
+    let tag = JSValue::from_utf8(tag.as_bytes());
+    define_symbol_value(global, target, boa_engine::JsSymbol::to_string_tag(), tag, false)
+}
+
+/// `target[Symbol.iterator] = iterator`, as WebIDL's iterable declarations make it.
+pub(crate) fn define_iterator(global: &JSGlobalObject, target: &JSValue, iterator: JSValue) -> JsResult<()> {
+    define_symbol_value(global, target, boa_engine::JsSymbol::iterator(), iterator, true)
 }
 
 /// A string of UTF-16 code units in little-endian bytes; an odd last byte is dropped.

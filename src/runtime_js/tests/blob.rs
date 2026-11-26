@@ -16,11 +16,13 @@ fn with_runtime(f: impl FnOnce(&JSGlobalObject)) {
         let bun = JSObject::create(global);
         for (name, value) in bun_runtime_js::webcore::blob::exports(global).unwrap() {
             match name {
-                "Blob" | "File" => global.to_js_value().put(global, name, value),
+                "Blob" | "File" | "FormData" => global.to_js_value().put(global, name, value),
                 _ => bun.put(global, name, value),
             }
         }
         global.to_js_value().put(global, "Bun", bun.to_js());
+        // SAFETY: the context is used for this one call, and nothing else holds it.
+        boa_wintertc::clone::register(None, unsafe { global.context() }).unwrap();
         f(global)
     });
 }
@@ -195,6 +197,128 @@ fn bun_file_and_write() {
         assert_eq!(std::fs::read_to_string(format!("{dir}/copy.txt")).unwrap(), "he");
         assert_eq!(std::fs::read_to_string(format!("{dir}/parts.txt")).unwrap(), "ab");
         let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn structured_clone() {
+    with_runtime(|global| {
+        let cases = [
+            (
+                "const b = structuredClone(new Blob(['abc'], { type: 'text/plain' })); return [b instanceof Blob, b.type, b.size, await b.text()].join()",
+                "true,text/plain,3,abc",
+            ),
+            (
+                "const f = structuredClone(new File(['x'], 'n.txt', { lastModified: 5, type: 'Text/CSV' })); return [f instanceof File, f.name, f.lastModified, f.type].join()",
+                "true,n.txt,5,text/csv",
+            ),
+            (
+                "const s = structuredClone(new Blob(['hello']).slice(1, 3)); return [s.size, await s.text()].join()",
+                "2,el",
+            ),
+            (
+                "const b = new Blob(['x']); const [c, d] = structuredClone([b, b]); return [c === d, c !== b, structuredClone({ b }).b instanceof Blob].join()",
+                "true,true,true",
+            ),
+            (
+                "const f = structuredClone(Bun.file('/nonexistent/x.txt')); return [f instanceof Blob, f.name, f.type].join()",
+                "true,/nonexistent/x.txt,text/plain;charset=utf-8",
+            ),
+            ("return structuredClone(new Blob()).size", "0"),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(run(global, source), expected, "{source}");
+        }
+    });
+}
+
+/// Each expected value is what Bun on JavaScriptCore answers.
+#[test]
+fn form_data() {
+    with_runtime(|global| {
+        let multipart = r#"const body = '--x\r\nContent-Disposition: form-data; name="k"\r\n\r\nv\r\n--x\r\nContent-Disposition: form-data; name="f"; filename="a.txt"\r\n\r\nhello\r\n--x--';"#;
+        let cases = [
+            (
+                "const fd = new FormData(); fd.append('a','1'); fd.append('b', new Blob(['xy'], {type:'text/plain'})); fd.append('c', new Blob(['z']), 'c.txt'); const d = new File(['q'], 'orig.bin'); fd.append('d', d); fd.append('a', 2); const b = fd.get('b'); return [typeof b, b instanceof File, b.name, b.type, b.size, b === fd.get('b'), fd.get('c').name, fd.get('d') === d, fd.get('missing'), fd.getAll('a').join('|'), fd.has('a'), fd.has('z')].join()".to_owned(),
+                "object,true,,text/plain,2,true,c.txt,true,,1|2,true,false",
+            ),
+            (
+                "const fd = new FormData(); for (const k of ['a','b','a','c','a']) fd.append(k, k); fd.set('a', 'x'); const one = [...fd.keys()].join(''); fd.delete('a'); return one + ':' + [...fd.entries()].map(e => e.join('=')).join('&') + ':' + fd.length".to_owned(),
+                "abc:b=b&c=c:2",
+            ),
+            (
+                "const fd = new FormData(); fd.append('k','v'); const seen = []; fd.forEach(function (v, k, p) { seen.push(k + v + (p === fd) + (this == 1)) }, 1); return [...fd].join(';') + ':' + seen.join() + ':' + Object.prototype.toString.call(fd) + ':' + [...fd.values()].join()".to_owned(),
+                "k,v:kvtruetrue:[object FormData]:v",
+            ),
+            (
+                "const fd = new FormData(); const e = []; for (const f of [() => fd.append('x'), () => fd.append(), () => fd.append('x','y','z'), () => fd.get()]) { try { f() } catch (x) { e.push(x.name + ' ' + x.message) } } return e.join('|')".to_owned(),
+                "TypeError Not enough arguments|TypeError Not enough arguments|TypeError Expected argument to be a Blob.|TypeError Not enough arguments",
+            ),
+            (
+                "const fd = new FormData(); fd.append('a','1'); fd.append('a','2'); fd.append('b','3'); const j = fd.toJSON(); return JSON.stringify(j) + Object.prototype.toString.call(j)".to_owned(),
+                r#"{"a":["1","2"],"b":"3"}[object FormData]"#,
+            ),
+            (
+                "const r = await new Blob(['a=1&b=x+y&c=%41&&d'], {type:'application/x-www-form-urlencoded'}).formData(); return [...r].map(e => e.join('=')).join('&')".to_owned(),
+                "a=1&b=x y&c=A&d=",
+            ),
+            (
+                format!("{multipart} const r = await new Blob([body], {{type: 'multipart/form-data; boundary=x'}}).formData(); return [r.get('k'), r.get('f') instanceof File, r.get('f').name, r.get('f').type, await r.get('f').text()].join()"),
+                "v,true,a.txt,text/plain;charset=utf-8,hello",
+            ),
+            (
+                format!("{multipart} return [[...FormData.from(body, 'x').keys()].join(), [...FormData.from('a=1&b=2')].join(';'), [...FormData.from(Uint8Array.from('q=1', c => c.charCodeAt(0)), '')].join(), [...FormData.from(new Blob(['z=9']))].join()].join(' ')"),
+                "k,f a,1;b,2 q,1 z,9",
+            ),
+            ("return new Blob(['x']).formData()".to_owned(), "threw undefined Invalid encoding"),
+            (
+                "return new Blob(['x'], {type: 'multipart/form-data; boundary=abc'}).formData()".to_owned(),
+                "threw undefined FormData encoding failed: missing final boundary",
+            ),
+            (
+                "return [[...(await new Blob([]).formData())].length, FormData.length, FormData.from.length, typeof FormData.prototype[Symbol.iterator], FormData.prototype[Symbol.iterator] === FormData.prototype.entries].join()".to_owned(),
+                "0,0,1,function,true",
+            ),
+            (
+                "return FormData.from(1)".to_owned(),
+                "threw ERR_INVALID_ARG_TYPE input must be a string, ArrayBuffer or ArrayBufferView",
+            ),
+            (
+                "const fd = new FormData(); fd.append('f', new File(['x'], 'n.txt')); const c = structuredClone(fd.get('f')); return c.name".to_owned(),
+                "n.txt",
+            ),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(run(global, &source), expected, "{source}");
+        }
+    });
+}
+
+#[test]
+fn object_urls() {
+    with_runtime(|global| {
+        let cases = [
+            (
+                "const u = Bun.createObjectURL(new Blob(['hi'])); return /^blob:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(u)",
+                "true",
+            ),
+            (
+                "const u = Bun.createObjectURL(new File(['x'], 'f.txt')); const r = Bun.resolveObjectURL(u); return [r instanceof File, r.name, await r.text(), Bun.resolveObjectURL(u) !== r].join()",
+                "true,f.txt,x,true",
+            ),
+            (
+                "const u = Bun.createObjectURL(new Blob([])); Bun.revokeObjectURL(new String(u)); return Bun.resolveObjectURL(u)",
+                "undefined",
+            ),
+            ("return Bun.resolveObjectURL('blob:x') + ':' + Bun.resolveObjectURL(1)", "undefined:undefined"),
+            ("return Bun.revokeObjectURL('blob:nope')", "undefined"),
+            ("return Bun.createObjectURL({})", "threw ERR_INVALID_ARG_TYPE object must be of type Blob or BuildArtifact"),
+            ("return Bun.revokeObjectURL()", "threw ERR_MISSING_ARGS The \"url\" argument must be specified"),
+            ("return Bun.revokeObjectURL([])", "threw ERR_INVALID_ARG_TYPE revokeObjectURL expects a string"),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(run(global, source), expected, "{source}");
+        }
     });
 }
 

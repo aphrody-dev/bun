@@ -2,16 +2,18 @@
 //!
 //! A read or a write runs when it is asked for and its promise is settled by the time it is returned: Boa has no
 //! thread pool and no I/O loop yet. What needs an API that Boa does not have yet (`stream()` and `writer()` need
-//! streams, `formData()` needs `FormData`, `image()` needs `Bun.Image`, `s3://` needs S3) throws and says so.
+//! streams, `image()` needs `Bun.Image`, `s3://` needs S3) throws and says so.
 
 use std::rc::Rc;
 
 use boa_gc::{Finalize, Trace};
+use boa_wintertc::store::HostSerialized;
 use bun_core::strings;
 use bun_http_types::MimeType::{self as mime_type, MimeType};
 use bun_js::class::{self, Attributes, ClassBuilder, ClassRef};
 use bun_js::{CallFrame, ErrorCode, JSFunction, JSGlobalObject, JSObject, JSValue, JsClass, JsResult};
 
+use super::{form_data, object_url_registry};
 use crate::engine;
 use crate::sys_js::SystemError;
 
@@ -27,6 +29,11 @@ pub use store::{INIT_TIMESTAMP, MAX_SIZE, PathOrFileDescriptor, SizeType, Store}
 /// otherwise it is treated as the empty string.
 pub(crate) fn is_valid_blob_type(slice: &[u8]) -> bool {
     slice.iter().all(|&c| matches!(c, 0x20..=0x7E))
+}
+
+/// The type of a multipart part: printable ASCII and HTAB, so that a bare CR or LF never reaches a header.
+pub(crate) fn is_valid_blob_type_or_tab(slice: &[u8]) -> bool {
+    slice.iter().all(|&c| c == b'\t' || matches!(c, 0x20..=0x7E))
 }
 
 /// A Blob's `type`, as `bun_jsc::webcore_types::BlobContentType`.
@@ -102,6 +109,13 @@ impl BlobContentType {
                 _ => Self::Static(given),
             },
         )
+    }
+
+    /// The type of a Blob that structured clone made again, from the `type` of the one it serialized.
+    pub fn from_clone(given: &[u8]) -> Self {
+        Self::from_known_name(given)
+            .filter(|known| known.given() == given)
+            .unwrap_or_else(|| Self::Owned(Rc::from(given)))
     }
 
     pub fn from_lowercased(slice: &[u8]) -> Self {
@@ -503,6 +517,117 @@ fn inspect_custom(global: &JSGlobalObject, frame: &CallFrame<'_>) -> JsResult<JS
     Ok(JSValue::from_utf8(out.as_bytes()))
 }
 
+/// What structured clone keeps of a Blob, as `on_structured_clone_serialize` writes it: the bytes it views, or the
+/// file and the end of its window.
+#[derive(Debug)]
+enum SerializedData {
+    Empty,
+    Bytes(Vec<u8>),
+    File {
+        pathlike: PathOrFileDescriptor,
+        size: SizeType,
+    },
+}
+
+#[derive(Debug)]
+struct SerializedBlob {
+    data: SerializedData,
+    offset: SizeType,
+    content_type: Vec<u8>,
+    content_type_was_set: bool,
+    is_jsdom_file: bool,
+    last_modified: f64,
+    name: Option<String>,
+}
+
+impl SerializedBlob {
+    fn of(blob: &Blob) -> SerializedBlob {
+        let (data, offset) = match blob.store.as_deref().map(|store| &store.data) {
+            None => (SerializedData::Empty, blob.offset),
+            Some(Data::Bytes(_)) => (SerializedData::Bytes(blob.shared_view().to_vec()), 0),
+            Some(Data::File(file)) => (
+                SerializedData::File {
+                    pathlike: file.pathlike.clone(),
+                    size: blob.size,
+                },
+                blob.offset,
+            ),
+        };
+        SerializedBlob {
+            data,
+            offset,
+            content_type: blob.content_type.given().to_vec(),
+            content_type_was_set: blob.content_type_was_set,
+            is_jsdom_file: blob.is_jsdom_file,
+            last_modified: blob.last_modified,
+            name: blob
+                .is_jsdom_file
+                .then(|| blob.name.as_ref().and_then(JSValue::as_string).unwrap_or_default()),
+        }
+    }
+
+    /// `on_structured_clone_deserialize`.
+    fn blob(&self) -> Blob {
+        let mut file_size = None;
+        let mut blob = match &self.data {
+            SerializedData::Empty => Blob::init_empty(),
+            SerializedData::Bytes(bytes) => Blob::init(bytes.clone()),
+            SerializedData::File { pathlike, size } => {
+                file_size = Some(*size);
+                Blob::find_or_create_file_from_path(pathlike.clone())
+            }
+        };
+        blob.is_jsdom_file = self.is_jsdom_file;
+        blob.last_modified = self.last_modified;
+        if let Some(name) = &self.name {
+            blob.name = Some(JSValue::from_utf8(name.as_bytes()));
+        }
+        blob.offset = self.offset;
+        if let Some(size) = file_size.filter(|&size| size < MAX_SIZE) {
+            blob.size = size;
+        }
+        match blob.store.as_deref().map(Store::size) {
+            Some(store_size) if store_size != MAX_SIZE => {
+                blob.offset = blob.offset.min(store_size);
+                blob.size = blob.size.min(store_size - blob.offset);
+            }
+            Some(_) => {}
+            None => blob.offset = 0,
+        }
+        if !self.content_type.is_empty() {
+            blob.content_type = BlobContentType::from_clone(&self.content_type);
+            blob.content_type_was_set = self.content_type_was_set;
+        }
+        blob
+    }
+}
+
+impl HostSerialized for SerializedBlob {
+    fn deserialize(&self, context: &mut boa_engine::Context) -> boa_engine::JsResult<boa_engine::JsValue> {
+        let global = JSGlobalObject::from_context(context);
+        self.blob()
+            .to_js(global)
+            .map(JSValue::into_engine)
+            .map_err(|error| global.into_engine_error(error))
+    }
+}
+
+/// The serialization steps of the realm's platform objects: a Blob or a File.
+fn serialize_host(
+    object: &boa_engine::JsObject,
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<Option<Box<dyn HostSerialized>>> {
+    let global = JSGlobalObject::from_context(context);
+    let Some(blob) = JSValue::from_engine(object.clone().into()).as_class_ref::<Blob>() else {
+        return Ok(None);
+    };
+    let serialized = match blob.borrow(global) {
+        Ok(blob) => SerializedBlob::of(&blob),
+        Err(error) => return Err(global.into_engine_error(error)),
+    };
+    Ok(Some(Box::new(serialized)))
+}
+
 /// Only an unknown size ([`MAX_SIZE`]) becomes the rest of the store; a known one (a slice's) is clamped to it.
 fn window_size(current: SizeType, available: SizeType) -> SizeType {
     if current == MAX_SIZE {
@@ -818,8 +943,17 @@ impl JsClass for Blob {
             let exists = this.borrow_mut(global)?.exists_sync();
             engine::resolved(global, JSValue::js_boolean(exists))
         })?;
-        class.method("formData", 0, attributes, |_, global, _| {
-            engine::wrap(global, || Err(not_implemented(global, "Blob.formData()")))
+        class.method("formData", 0, attributes, |this, global, _| {
+            engine::wrap(global, || {
+                let blob = this.borrow(global)?.clone();
+                if blob.file().is_none() && blob.shared_view().is_empty() {
+                    return class::to_js(global, form_data::FormData::default());
+                }
+                let bytes = blob
+                    .read_bytes()
+                    .map_err(|error| throw_system_error(global, &error))?;
+                form_data::of_blob_bytes(global, blob.content_type.as_slice(), &bytes)
+            })
         })?;
         class.method("image", 0, attributes, |_, global, _| {
             Err(not_implemented(global, "Blob.image()"))
@@ -1051,7 +1185,8 @@ pub fn file(global: &JSGlobalObject, frame: &CallFrame<'_>) -> JsResult<JSValue>
 
 pub use write_file::write;
 
-/// What the runtime puts on `Bun` and `globalThis`: `Blob`, `File`, `file`, `write`, `stdin`, `stdout`, `stderr`.
+/// What the runtime puts on `Bun`, `globalThis` and `URL`: `Blob`, `File`, `file`, `write`, `stdin`, `stdout`,
+/// `stderr`, `createObjectURL`, `revokeObjectURL`, and node:buffer's `resolveObjectURL`.
 pub fn exports(global: &JSGlobalObject) -> JsResult<Vec<(&'static str, JSValue)>> {
     let blob = class::constructor::<Blob>(global)?;
     let file_ctor = JSFunction::create_constructor(global, "File", file_constructor, 2);
@@ -1067,6 +1202,7 @@ pub fn exports(global: &JSGlobalObject) -> JsResult<Vec<(&'static str, JSValue)>
         .expect("a function is an object")
         .put_read_only(global, "prototype", prototype)?;
     engine::define_has_instance(global, &file_ctor, file_has_instance)?;
+    engine::set_host_serializer(global, serialize_host);
     let stdio = |fd: i32| {
         Blob::find_or_create_file_from_path(PathOrFileDescriptor::Fd(bun_sys::Fd::from_uv(fd)))
             .to_js(global)
@@ -1074,10 +1210,23 @@ pub fn exports(global: &JSGlobalObject) -> JsResult<Vec<(&'static str, JSValue)>
     Ok(vec![
         ("Blob", blob),
         ("File", file_ctor),
+        ("FormData", form_data::constructor(global)?),
         ("file", JSFunction::create(global, "file", file, 2)),
         ("write", JSFunction::create(global, "write", write, 3)),
         ("stdin", stdio(0)?),
         ("stdout", stdio(1)?),
         ("stderr", stdio(2)?),
+        (
+            "createObjectURL",
+            JSFunction::create(global, "createObjectURL", object_url_registry::create_object_url, 1),
+        ),
+        (
+            "revokeObjectURL",
+            JSFunction::create(global, "revokeObjectURL", object_url_registry::revoke_object_url, 1),
+        ),
+        (
+            "resolveObjectURL",
+            JSFunction::create(global, "resolveObjectURL", object_url_registry::resolve_object_url, 1),
+        ),
     ])
 }
