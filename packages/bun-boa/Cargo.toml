@@ -40,6 +40,7 @@ bun_options_types = { path = "../../src/options_types", optional = true }
 bun_paths = { path = "../../src/paths" }
 bun_sys = { path = "../../src/sys" }
 bun_sema = { path = "../../src/sema" }
+bun_sourcemap = { path = "../../src/sourcemap" }
 bun_semver_js = { path = "../../src/semver_js" }
 bun_sqlite_js = { path = "../../src/sqlite_js" }
 bun_sema_driver = { path = "../../src/sema/driver" }

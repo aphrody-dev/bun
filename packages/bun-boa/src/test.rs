@@ -235,6 +235,42 @@ fn mock_module(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     Ok(JsValue::undefined())
 }
 
+/// `originalPosition(path, line, column)`: `[line, column]` in the file as it is written, of a 1-based position in
+/// the code the loader printed for it; `undefined` without a source map.
+fn original_position(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let path = path_arg(args, context)?;
+    let line = args.get_or_undefined(1).to_u32(context)?;
+    let column = args.get_or_undefined(2).to_u32(context)?;
+    Ok(match crate::source_maps::original_position(&path, line, column) {
+        Some((line, column)) => boa_engine::object::builtins::JsArray::from_iter([line.into(), column.into()], context).into(),
+        None => JsValue::undefined(),
+    })
+}
+
+/// `originalSource(path)`: the file as it is written, if the loader transpiled it.
+fn original_source(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let path = path_arg(args, context)?;
+    Ok(crate::source_maps::original_source(&path).map_or(JsValue::undefined(), |source| JsString::from(&*source).into()))
+}
+
+/// `originalLines(path, first, last)`: the 1-based lines `first..=last` of the file as it is written, for an error's
+/// preview: what of a long file one error shows.
+fn original_lines(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let path = path_arg(args, context)?;
+    let first = args.get_or_undefined(1).to_u32(context)?.max(1) as usize;
+    let last = args.get_or_undefined(2).to_u32(context)? as usize;
+    let Some(source) = crate::source_maps::original_source(&path) else {
+        return Ok(JsValue::undefined());
+    };
+    let lines: Vec<JsValue> = source
+        .split('\n')
+        .skip(first - 1)
+        .take(last.saturating_sub(first - 1))
+        .map(|line| JsString::from(line).into())
+        .collect();
+    Ok(boa_engine::object::builtins::JsArray::from_iter(lines, context).into())
+}
+
 /// Bun's `enable_ansi_colors_stderr`: a terminal, unless NO_COLOR, or FORCE_COLOR.
 fn colors() -> bool {
     let set = |name| std::env::var_os(name).is_some_and(|v| !v.is_empty() && v != "0");
@@ -299,6 +335,9 @@ fn install_natives(options: &Options, failures_before: u64, context: &mut Contex
         ("readFile", read_file, 1),
         ("writeFile", write_file, 2),
         ("mockModule", mock_module, 3),
+        ("originalPosition", original_position, 3),
+        ("originalSource", original_source, 1),
+        ("originalLines", original_lines, 3),
     ] {
         native.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);
     }

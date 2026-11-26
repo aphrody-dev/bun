@@ -44,11 +44,23 @@ pub struct Transpiled {
     pub code: Vec<u8>,
     /// A CommonJS module, printed as `(function (exports, require, module, __filename, __dirname[, importMeta]) { … })`.
     pub commonjs: bool,
+    /// From the printed code back to `contents`.
+    pub source_map: Option<bun_sourcemap::ParsedSourceMap>,
 }
 
 /// As Bun's runtime transpiles a module: an ES module that names `require`, `__filename` or `__dirname` reads
 /// them from `import.meta`, and a CommonJS module is a function the loader calls.
 pub fn transpile_module(path: &[u8], contents: &[u8]) -> Result<Transpiled, String> {
+    transpile_printing::<false>(path, contents)
+}
+
+/// As [`transpile_module`], the same code, with its source map: what `source_maps` makes once a position of the
+/// file is asked for, so that a module that throws nothing costs no map.
+pub fn transpile_with_source_map(path: &[u8], contents: &[u8]) -> Result<Transpiled, String> {
+    transpile_printing::<true>(path, contents)
+}
+
+fn transpile_printing<const SOURCE_MAP: bool>(path: &[u8], contents: &[u8]) -> Result<Transpiled, String> {
     let loader = loader_for(path);
     let _store = StoreScope::enter();
     let arena = Arena::new();
@@ -73,13 +85,15 @@ pub fn transpile_module(path: &[u8], contents: &[u8]) -> Result<Transpiled, Stri
     let list = core::mem::replace(&mut ast.symbols, bun_alloc::ArenaVec::new_in(alloc));
     let symbols = bun_ast::symbol::Map::init_with_one_list(list.into_iter().collect());
     let mut printer = bun_js_printer::BufferPrinter::init(bun_js_printer::BufferWriter::init());
+    let chunk = core::cell::Cell::new(None);
     let options = bun_js_printer::Options {
         require_ref: Some(ast.require_ref),
         import_meta_ref: ast.import_meta_ref,
         target: bun_ast::Target::Bun,
+        source_map_handler: SOURCE_MAP.then_some(&chunk as &dyn bun_js_printer::OnSourceMapChunk),
         ..Default::default()
     };
-    bun_js_printer::print_ast::<false, false>(
+    bun_js_printer::print_ast::<false, SOURCE_MAP>(
         &mut printer,
         &arena,
         &ast,
@@ -88,8 +102,14 @@ pub fn transpile_module(path: &[u8], contents: &[u8]) -> Result<Transpiled, Stri
         options,
     )
     .map_err(|err| format!("{}: {err}", String::from_utf8_lossy(path)))?;
+    // The positions of the printed code, mapped back to the file as it is written (`;`-separated VLQ mappings).
+    let source_map = chunk.take().and_then(|chunk: bun_sourcemap::Chunk| {
+        let options = bun_sourcemap::mapping::ParseOptions { allow_names: false, sort: true };
+        bun_sourcemap::mapping::parse(chunk.buffer.list.as_slice(), None, 1, options).ok()
+    });
     Ok(Transpiled {
         code: printer.ctx.buffer.list,
         commonjs,
+        source_map,
     })
 }

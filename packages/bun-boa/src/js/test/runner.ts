@@ -3,6 +3,7 @@
 // become), Execution.rs (running them, hooks, timeouts, done callbacks, retries) and ScopeFunctions.rs (`test`,
 // `describe` and their modifiers), with what test_command.rs prints for each test.
 import { markup, show } from "./format.ts";
+import { framesOf, sourcePreview } from "./source.ts";
 import { native, runtime, type ExpectAssertions, type Sequence as ExpectSequence } from "./state.ts";
 
 type Fn = (...args: any[]) => any;
@@ -263,6 +264,7 @@ class ExecutionSequence {
       vitest: false,
       concurrent,
       softErrors: [],
+      pendingMatchers: [],
     };
   }
   get entryMode(): ScopeMode {
@@ -309,6 +311,7 @@ class ExecutionSequence {
     this.expect.expectCalls = 0;
     this.expect.assertions = { kind: "none" };
     this.expect.softErrors = [];
+    this.expect.pendingMatchers = [];
   }
 }
 
@@ -525,7 +528,16 @@ async function runEntry(sequence: ExecutionSequence, current: SequenceEntry) {
     runtime.sequence = sequence.expect;
   }
   const started = runCallback(entry);
-  const outcome = started instanceof Promise ? await withTimeout(started, entry.timeout) : started;
+  let outcome = started instanceof Promise ? await withTimeout(started, entry.timeout) : started;
+  // `waits_for_matchers`: a matcher that the callback did not await still ends inside its entry.
+  while (outcome !== "timeout" && sequence.expect.pendingMatchers.length) {
+    const pending = sequence.expect.pendingMatchers.splice(0);
+    const settled = await withTimeout(
+      Promise.allSettled(pending).then(() => undefined),
+      entry.timeout,
+    );
+    if (settled === "timeout") outcome = "timeout";
+  }
   // expect.soft() failures: each is an error of the test, which fails once its callback is done.
   for (const error of sequence.expect.softErrors.splice(0)) if (failSequence(sequence, atTest)) printError(error);
   if (outcome === "timeout") {
@@ -753,14 +765,14 @@ export function errorText(error: unknown): string {
     }
   })();
   const stack = typeof e.stack === "string" ? e.stack : "";
-  // The frames of the user's code: not bun:test's, nor those of builtins and natives.
-  const frames = stack
-    .split("\n")
-    .map(line => line.trim())
-    .filter(line => line.startsWith("at ") && !/\((?:bun:|builtin:\/\/|native\)|unknown at )/.test(line));
+  // The frames of the user's code, at their positions in the files as they are written: not bun:test's, nor those
+  // of builtins and natives.
+  const frames = framesOf(stack).filter(frame => !/\((?:bun:|builtin:\/\/|native\)|unknown at )/.test(frame.text));
   const label = name === "Error" ? "error" : name;
-  let out = pretty(`<r><red>${label}<r><d>:<r> <b>`) + message + pretty("<r>") + "\n";
-  for (const frame of frames) out += pretty(`<r>      <d>${frame}<r>\n`);
+  // The lines where it was thrown, of the first frame in a file the loader read.
+  let out = frames.length ? sourcePreview(frames[0], pretty) : "";
+  out += pretty(`<r><red>${label}<r><d>:<r> <b>`) + message + pretty("<r>") + "\n";
+  for (const frame of frames) out += pretty(`<r>      <d>${frame.text}<r>\n`);
   return out;
 }
 

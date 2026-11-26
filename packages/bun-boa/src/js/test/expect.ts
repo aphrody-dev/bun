@@ -128,6 +128,8 @@ const RAN = Symbol("ran");
 const labelOf = (e: Expect): string | undefined => e[LABEL];
 
 function countExpect(n = 1) {
+  // A matcher that runs again once a promise settled was counted the first time.
+  if (journal?.replaying) return;
   const sequence = runtime.sequence;
   if (sequence && !sequence.concurrent) sequence.expectCalls += n;
   else runtime.strayExpects += n;
@@ -214,7 +216,95 @@ interface MatcherDef {
 
 const matchers: Record<string, MatcherDef> = {};
 
+// ── expect_deferred.rs ───────────────────────────────────────────────────────
+// A matcher that hits a pending promise returns a promise of its own, and runs again from the top once the pending
+// one settles. The run again replays what the user code it called answered the first time (`Pass::once`).
+class Deferred {
+  constructor(readonly promise: Promise<unknown>) {}
+}
+interface Journal {
+  answers: [threw: boolean, value: unknown][];
+  cursor: number;
+  replaying: boolean;
+}
+let journal: Journal | undefined;
+
+/** `Pass::once`: calls user code the first time, and answers as it did when the matcher runs again. */
+function once(ask: () => unknown): unknown {
+  const j = journal;
+  if (j?.replaying && j.cursor < j.answers.length) {
+    const [threw, value] = j.answers[j.cursor++];
+    if (threw) throw value;
+    return value;
+  }
+  let threw = false;
+  let value: unknown;
+  try {
+    value = ask();
+  } catch (error) {
+    threw = true;
+    value = error;
+  }
+  if (j) {
+    j.answers.push([threw, value]);
+    j.cursor++;
+  }
+  if (threw) throw value;
+  return value;
+}
+
+/** `Pass::wait_for`: the running matcher returns a promise, and runs again once `promise` settles. */
+function waitFor(promise: Promise<unknown>): never {
+  promise.then(
+    () => {},
+    () => {},
+  );
+  throw new Deferred(promise);
+}
+
+function runDeferring(attempt: () => unknown): unknown {
+  const j: Journal = { answers: [], cursor: 0, replaying: false };
+  const within = () => {
+    const outer = journal;
+    journal = j;
+    try {
+      return attempt();
+    } finally {
+      journal = outer;
+    }
+  };
+  try {
+    return within();
+  } catch (error) {
+    if (!(error instanceof Deferred)) throw error;
+    const settled = (async (deferred: Deferred) => {
+      for (;;) {
+        await deferred.promise.then(
+          () => {},
+          () => {},
+        );
+        j.cursor = 0;
+        j.replaying = true;
+        try {
+          const result = within();
+          return isThenable(result) ? await result : result;
+        } catch (again) {
+          if (!(again instanceof Deferred)) throw again;
+          deferred = again;
+        }
+      }
+    })(error);
+    // The test ends once the matchers it left waiting are done (`pending_matchers`).
+    runtime.sequence?.pendingMatchers.push(settled);
+    return settled;
+  }
+}
+
 function runMatcher(e: Expect, name: string, def: MatcherDef, args: unknown[]) {
+  return runDeferring(() => runMatcherOnce(e, name, def, args));
+}
+
+function runMatcherOnce(e: Expect, name: string, def: MatcherDef, args: unknown[]) {
   const flags = e[FLAGS];
   e[RAN] = true;
   const run = (received: unknown) => {
@@ -916,16 +1006,17 @@ define("toThrow", EXPECTED, (m, expectedArg) => {
     else throw thrown("Expected value must be a function");
   } else {
     try {
-      const value = (received as Fn)();
+      const value = once(() => (received as Fn)());
       outcome = { threw: false, value };
       if (isPromise(value)) {
         const state = native.promiseState(value);
         if (state === 2) {
           value.catch(() => {});
           outcome = { threw: true, value: native.promiseResult(value) };
-        }
+        } else if (state === 0) waitFor(value);
       }
     } catch (error) {
+      if (error instanceof Deferred) throw error;
       outcome = { threw: true, value: error };
     }
   }
