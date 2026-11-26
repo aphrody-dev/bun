@@ -17,6 +17,7 @@ pub fn cpp(global: &bun_js::JSGlobalObject, file: &str, symbol: &str) -> Option<
     let symbol = symbol.strip_prefix("js2native_wrap_").unwrap_or(symbol);
     match file {
         "NodeAsyncHooks.cpp" => node::async_hooks::native(global, symbol),
+        "NodeVM.cpp" => node::vm::native(global, symbol),
         _ => None,
     }
 }

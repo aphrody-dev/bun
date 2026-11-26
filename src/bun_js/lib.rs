@@ -26,6 +26,7 @@ mod host_fn;
 mod internal_field;
 pub mod module;
 mod object;
+mod realm;
 mod strong;
 mod value;
 
