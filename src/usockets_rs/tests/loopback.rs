@@ -226,24 +226,6 @@ extern "C" fn Bun__internal_dispatch_ready_poll(_loop: *mut Loop, _poll: *mut c_
     unreachable!("no bun_io polls in these tests")
 }
 
-/// `bun_threading`'s lock on the loop's u32, for a binary without it: a spin lock.
-#[unsafe(no_mangle)]
-#[linkage = "weak"]
-unsafe extern "C" fn Bun__lock(lock: *mut u32) {
-    // SAFETY: the loop's lock word.
-    let lock = unsafe { core::sync::atomic::AtomicU32::from_ptr(lock) };
-    while lock.compare_exchange_weak(0, 1, core::sync::atomic::Ordering::Acquire, core::sync::atomic::Ordering::Relaxed).is_err() {
-        std::thread::yield_now();
-    }
-}
-
-#[unsafe(no_mangle)]
-#[linkage = "weak"]
-unsafe extern "C" fn Bun__unlock(lock: *mut u32) {
-    // SAFETY: as above.
-    unsafe { core::sync::atomic::AtomicU32::from_ptr(lock) }.store(0, core::sync::atomic::Ordering::Release);
-}
-
 unsafe extern "C" fn noop(_: *mut Loop) {}
 
 struct Harness {
@@ -336,6 +318,10 @@ fn a_name_goes_through_the_resolver() {
     let h = Harness::new();
     let (_ls, port) = listen_tcp(&h);
     assert_eq!(connect(&h, c"localhost", port), 0, "a name connects through a us_connecting_socket_t");
+    h.run_until(received_echo);
+    // The second connect finds the result in the cache, and still races ::1 and 127.0.0.1.
+    EVENTS.with(|e| e.borrow_mut().clear());
+    assert_eq!(connect(&h, c"localhost", port), 0);
     h.run_until(received_echo);
     h.close_all();
 }

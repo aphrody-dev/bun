@@ -11,6 +11,8 @@ workspace = "../../packages/bun-boa"
 path = "lib.rs"
 
 [dependencies]
+bun_dns = { path = "../dns" }
+bun_threading = { path = "../threading" }
 bun_uws_sys = { path = "../uws_sys" }
 libc = "0.2"
 pki-types = { package = "rustls-pki-types", version = "1", features = ["std"] }

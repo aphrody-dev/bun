@@ -36,8 +36,6 @@ not_linked! {
         EVP_AEAD_CTX_free EVP_AEAD_CTX_new EVP_AEAD_CTX_open_gather EVP_AEAD_CTX_seal_scatter EVP_aead_aes_128_gcm
         EVP_aead_aes_256_gcm EVP_aead_chacha20_poly1305 AES_encrypt AES_set_encrypt_key CRYPTO_chacha_20
         ERR_clear_error ERR_get_error HKDF_expand HKDF_extract;
-    "bun_runtime's DNS cache (src/runtime/dns_jsc/dns.rs), which HTTP/3's connect reads":
-        Bun__addrinfo_get Bun__addrinfo_freeRequest;
     "bun_runtime's TLS over a duplex stream (src/runtime/socket/UpgradedDuplex.rs)":
         UpgradedDuplex__close UpgradedDuplex__encode_and_write UpgradedDuplex__flush UpgradedDuplex__is_closed
         UpgradedDuplex__is_established UpgradedDuplex__is_shutdown UpgradedDuplex__pause_stream

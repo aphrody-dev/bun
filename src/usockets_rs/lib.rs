@@ -5,9 +5,12 @@
 //! What it has: the loop on epoll (wakeups, ready-poll dispatch, the timeout sweep, `Bun__internal_dispatch_ready_poll`
 //! for `bun_io`'s polls), TCP and Unix-socket clients (connect, read, write, timeouts, shutdown, close) and listeners
 //! (`listen.rs`), sockets on an fd and IPC fd passing, adoption (`adopt.rs`), TLS clients on rustls (`tls.rs`), and
-//! name resolution on a thread of its own. It has no UDP or QUIC (those entry points fail), and no kqueue.
+//! name resolution through a cache of results on a thread pool (`dns.rs`, `Bun__addrinfo_*`). It has no UDP or QUIC (those entry points fail), and no kqueue.
 #![cfg(any(target_os = "linux", target_os = "android"))]
 #![allow(non_camel_case_types, clippy::missing_safety_doc)]
+
+// Defines `Bun__lock` and `Bun__unlock`, which nothing here names in Rust.
+extern crate bun_threading;
 
 mod adopt;
 mod bsd;
@@ -210,10 +213,10 @@ pub struct us_connecting_socket_t {
     pub(crate) port: u16,
     pub(crate) error: c_int,
     /// What the resolver thread found, written before it queues this on `dns_ready_head`.
-    /// A `Box<dns::Resolved>`, erased: C sees this struct.
-    pub(crate) resolved: *mut c_void,
-    /// The addresses not tried yet, from `resolved`.
-    pub(crate) next_address: usize,
+    /// A ref on the `dns::Request` (erased: C sees this struct), or null once given back.
+    pub(crate) addrinfo_req: *const c_void,
+    /// The addresses of its result not tried yet.
+    pub(crate) addrinfo_head: *const libc::addrinfo,
     pub(crate) alloc_size: usize,
 }
 
