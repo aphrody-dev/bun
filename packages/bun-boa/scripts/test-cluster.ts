@@ -13,7 +13,12 @@ const archive = `${dir}/archive.tar.zst`;
 const workspace = `${dir}/workspace`;
 const ssh = (host: string, ...cmd: string[]) => $`ssh -o BatchMode=yes ${host} ${cmd}`;
 
-await Promise.all(hosts.map(host => ssh(host, "mkdir", "-p", `${workspace}/tests`, `${dir}/extract`)));
+// nextest only checks that the remapped workspace has a Cargo.toml; an empty one does.
+await Promise.all(
+  hosts.map(host =>
+    ssh(host, "mkdir", "-p", `${workspace}/tests`, `${dir}/extract`, "&&", "touch", `${workspace}/Cargo.toml`),
+  ),
+);
 await $`bun ${import.meta.dir}/remote.ts cargo nextest archive ${features} --archive-file ${archive}`.env({
   ...Bun.env,
   BUN_BUILD_HOST: "n1",
