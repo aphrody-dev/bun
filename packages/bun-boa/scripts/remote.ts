@@ -8,7 +8,8 @@ import { join } from "node:path";
 
 const host = process.env.BUN_BUILD_HOST ?? "n1";
 const xfs = "/srv/xbuild";
-const remoteRepo = `${xfs}/src/bun-nojsc`;
+// one remote tree (and target dir) per concurrent user: BUN_REMOTE_REPO=bun-nojsc-<name>
+const remoteRepo = `${xfs}/src/${Bun.env.BUN_REMOTE_REPO ?? "bun-nojsc"}`;
 const repo = join(import.meta.dir, "../../..");
 const args = Bun.argv.slice(2);
 if (!args.length) throw new Error("usage: bun run remote <command…>");
@@ -37,7 +38,7 @@ await $`rsync -az --files-from=${list} ${`${repo}/`} ${`${host}:${remoteRepo}/`}
 
 const env = {
   CARGO_HOME: `${xfs}/cargo-home`,
-  CARGO_TARGET_DIR: `${xfs}/target/bun-boa`,
+  CARGO_TARGET_DIR: `${xfs}/target/${Bun.env.BUN_REMOTE_REPO ? `bun-boa-${Bun.env.BUN_REMOTE_REPO}` : "bun-boa"}`,
   BUN_CODEGEN_DIR: `${remoteRepo}/build/debug/codegen`,
   RUSTC_WRAPPER: "sccache",
   SCCACHE_CONF: `${xfs}/sccache-dist-client.toml`,
