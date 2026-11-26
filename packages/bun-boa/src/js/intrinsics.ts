@@ -12,6 +12,7 @@
   nativeName(id: number): string;
   className(id: number): string | undefined;
   brand(value: unknown): string | undefined;
+  functionName(value: unknown): string | undefined;
   promiseState(promise: Promise<unknown>): 0 | 1 | 2;
   promiseResult(promise: Promise<unknown>): unknown;
   proxyField(proxy: object, field: 0 | 1): object | null | undefined;
@@ -628,7 +629,15 @@
       if (inspecting) return String(value);
       inspecting = true;
       try {
-        return (createInternalModuleById(id) as any).inspect(value, options);
+        const text: string = (createInternalModuleById(id) as any).inspect(value, options);
+        // JavaScriptCore's formatter names a function as `getName` does, a bound one by its target: `[Function: f]`.
+        const name = typeof value === "function" ? native.functionName(value) : undefined;
+        const shown = typeof value === "function" ? (value as Function).name : undefined;
+        if (name && typeof shown === "string" && name !== shown) {
+          const head = text.slice(0, text.indexOf(": ") + 2);
+          if (text.startsWith(`${head}${shown}]`)) return head + name + text.slice(head.length + shown.length);
+        }
+        return text;
       } finally {
         inspecting = false;
       }
