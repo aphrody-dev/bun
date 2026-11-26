@@ -537,7 +537,8 @@ fn tls_config(global: &JSGlobalObject, options: &JSValue) -> bun_js::JsResult<Op
 }
 
 fn port_of(global: &JSGlobalObject, options: &JSValue) -> bun_js::JsResult<u16> {
-    if let Some(port) = options.get(global, "port")?.filter(JSValue::is_truthy) {
+    // `port: 0` is an ephemeral port, not the default.
+    if let Some(port) = options.get(global, "port")?.filter(|port| !port.is_undefined_or_null()) {
         let number = port.to_number(global)?;
         if !number.is_finite() || number.fract() != 0.0 || !(0.0..=65535.0).contains(&number) {
             return Err(ErrorCode::OUT_OF_RANGE.throw(
