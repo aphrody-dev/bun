@@ -229,19 +229,19 @@ index 062218a..11f7343 100644
 +    pub(crate) fn lock(&mut self) -> CollectionLock {
 +        self.compact();
 +        CollectionLock::new(&mut self.lock)
++    }
++
++    /// Returns `true` if a lock on the map is alive.
++    fn is_locked(&self) -> bool {
++        self.lock
++            .as_ref()
++            .is_some_and(|lock| Rc::strong_count(lock) > 1)
      }
  
 -    /// Decreases the lock counter and, if 0, removes all empty entries.
 -    pub(crate) fn unlock(&mut self) {
 -        self.lock -= 1;
 -        if self.lock == 0 {
-+    /// Returns `true` if a lock on the map is alive.
-+    fn is_locked(&self) -> bool {
-+        self.lock
-+            .as_ref()
-+            .is_some_and(|lock| Rc::strong_count(lock) > 1)
-+    }
-+
 +    /// Removes all empty entries, unless the map is locked.
 +    fn compact(&mut self) {
 +        if self.empty_count > 0 && !self.is_locked() {
@@ -535,19 +535,19 @@ index 6c60426..b2b8edc 100644
 +    pub(crate) fn lock(&mut self) -> CollectionLock {
 +        self.compact();
 +        CollectionLock::new(&mut self.lock)
++    }
++
++    /// Returns `true` if a lock on the set is alive.
++    fn is_locked(&self) -> bool {
++        self.lock
++            .as_ref()
++            .is_some_and(|lock| Rc::strong_count(lock) > 1)
      }
  
 -    /// Decreases the lock counter and, if 0, removes all empty entries.
 -    pub(crate) fn unlock(&mut self) {
 -        self.lock -= 1;
 -        if self.lock == 0 {
-+    /// Returns `true` if a lock on the set is alive.
-+    fn is_locked(&self) -> bool {
-+        self.lock
-+            .as_ref()
-+            .is_some_and(|lock| Rc::strong_count(lock) > 1)
-+    }
-+
 +    /// Removes all empty entries, unless the set is locked.
 +    fn compact(&mut self) {
 +        if self.empty_count > 0 && !self.is_locked() {

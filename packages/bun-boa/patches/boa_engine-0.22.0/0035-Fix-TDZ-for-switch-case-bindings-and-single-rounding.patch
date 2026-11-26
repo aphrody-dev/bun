@@ -1,20 +1,23 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Skand <skand443@gmail.com>
 Date: Mon, 16 Nov 2026 19:19:49 +0000
-Subject: [PATCH] Fix: TDZ for  switch-case bindings and single-rounding 
- parseInt  for long decimals.
+Subject: [PATCH] Fix: TDZ for switch-case bindings and single-rounding
+ parseInt for long decimals.
 
 Port of https://github.com/boa-dev/boa/pull/5676.
 
 Adapted to the patched engine: GetName/GetNameGlobal/GetNameAndLocator read through get_binding_live (module live bindings) and missing_binding_error wraps that; name.rs had no JsExpect import to keep. The ByteCompiler has no pending_return_slot field, so switch_depth sits after const_binding_cache.
+
+#5641's class_name_is_uninitialized_in_computed_keys (earlier in this series) now expects the TDZ message this PR gives, as upstream will once both land.
 ---
  src/builtins/number/globals.rs       | 12 +++++-
  src/builtins/number/tests.rs         |  9 +++++
  src/bytecompiler/mod.rs              | 21 +++++++---
  src/bytecompiler/statement/switch.rs |  2 +
+ src/tests/class.rs                   |  2 +-
  src/tests/control_flow/mod.rs        | 57 ++++++++++++++++++++++++++++
  src/vm/opcode/get/name.rs            | 44 ++++++++++++---------
- 6 files changed, 122 insertions(+), 23 deletions(-)
+ 7 files changed, 123 insertions(+), 24 deletions(-)
 
 diff --git a/src/builtins/number/globals.rs b/src/builtins/number/globals.rs
 index 39c8c92..1f67b05 100644
@@ -134,6 +137,19 @@ index 35e4422..ab51432 100644
  
          if !default_label_set {
              self.patch_jump(default_label);
+diff --git a/src/tests/class.rs b/src/tests/class.rs
+index 68f9a47..b4e9c7a 100644
+--- a/src/tests/class.rs
++++ b/src/tests/class.rs
+@@ -74,7 +74,7 @@ fn class_name_is_uninitialized_in_computed_keys() {
+         run_test_actions([TestAction::assert_native_error(
+             source,
+             crate::JsNativeErrorKind::Reference,
+-            "C is not defined",
++            "access of uninitialized binding",
+         )]);
+     }
+ }
 diff --git a/src/tests/control_flow/mod.rs b/src/tests/control_flow/mod.rs
 index 13b4b7f..8f5823f 100644
 --- a/src/tests/control_flow/mod.rs

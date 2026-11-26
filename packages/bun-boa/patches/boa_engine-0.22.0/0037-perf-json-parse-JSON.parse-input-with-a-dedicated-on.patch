@@ -246,15 +246,8 @@ index 3ed12f6..82b9999 100644
 -            })
 -        } else {
 -            None
-+        // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
-+        //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
-+        // 3-10. The value the script `(jsonString);` would evaluate to, built
-+        //    directly by a JSON parser (with the source tree for the reviver).
-+        let (unfiltered, source_tree) = match json_string.variant() {
-+            JsStrVariant::Latin1(units) => parse::parse(units, has_reviver, context)?,
-+            JsStrVariant::Utf16(units) => parse::parse(units, has_reviver, context)?,
-         };
- 
+-        };
+-
 -        let code_block = {
 -            let in_with = context.vm.frame().environments.has_object_environment();
 -            let spanned_source_text = SpannedSourceText::new_source_only(
@@ -275,8 +268,15 @@ index 3ed12f6..82b9999 100644
 -            );
 -            compiler.compile_statement_list(script.statements(), true, false);
 -            Gc::new(compiler.finish())
--        };
--
++        // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
++        //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
++        // 3-10. The value the script `(jsonString);` would evaluate to, built
++        //    directly by a JSON parser (with the source tree for the reviver).
++        let (unfiltered, source_tree) = match json_string.variant() {
++            JsStrVariant::Latin1(units) => parse::parse(units, has_reviver, context)?,
++            JsStrVariant::Utf16(units) => parse::parse(units, has_reviver, context)?,
+         };
+ 
 -        let realm = context.realm().clone();
 -
 -        let env_fp = context.vm.frame().environments.len() as u32;

@@ -89,6 +89,26 @@ pub fn resolve(specifier: &str, from_dir: &Path) -> Option<PathBuf> {
 }
 
 impl BunModuleLoader {
+    /// The modules built into the binary: `bun:test` and `bun`.
+    pub fn builtin(&self, name: &str, context: &mut Context) -> Option<JsResult<Module>> {
+        let source: &[u8] = match name {
+            "bun:test" => include_bytes!("js/test.ts"),
+            "bun" => include_bytes!("js/bun_module.ts"),
+            _ => return None,
+        };
+        let key = PathBuf::from(name);
+        if let Some(module) = self.modules.borrow().get(&key) {
+            return Some(Ok(module.clone()));
+        }
+        let module = crate::transpile::transpile(format!("{name}.ts").as_bytes(), source)
+            .map_err(|err| JsNativeError::syntax().with_message(err).into())
+            .and_then(|js| Module::parse(Source::from_bytes(&js).with_path(&key), None, context));
+        if let Ok(module) = &module {
+            self.modules.borrow_mut().insert(key, module.clone());
+        }
+        Some(module)
+    }
+
     pub fn load(&self, path: &Path, context: &mut Context) -> JsResult<Module> {
         if let Some(module) = self.modules.borrow().get(path) {
             return Ok(module.clone());
@@ -119,6 +139,9 @@ impl ModuleLoader for BunModuleLoader {
         context: &RefCell<&mut Context>,
     ) -> impl Future<Output = JsResult<Module>> {
         let specifier = request.specifier().to_std_string_escaped();
+        if let Some(module) = self.builtin(&specifier, &mut context.borrow_mut()) {
+            return std::future::ready(module);
+        }
         let from_dir = referrer
             .path()
             .and_then(Path::parent)

@@ -1,4 +1,5 @@
-//! `bun [run] <file> [args…]`, `bun -e <code>`, `bun run <script>`, `bun fmt`, `bun lint`, `bun --version`, `bun --revision`.
+//! `bun [run] <file> [args…]`, `bun -e <code>`, `bun run <script>`, `bun fmt`, `bun lint`, `bun test`, `bun --version`,
+//! `bun --revision`.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -17,6 +18,7 @@ Commands:
   run       dev                  Run a package.json script
   fmt       ./src                Format files with Bun's formatter
   lint      ./src                Lint files with Bun's linter
+  test      [filters]            Run tests with bun:test
   --version                      Print the version
   --revision                     Print the version with its git revision
 ";
@@ -166,6 +168,7 @@ pub fn main() -> i32 {
         },
         Some("fmt") => crate::fmt::main(&args[1..]),
         Some("lint") => crate::lint::main(&args[1..]),
+        Some("test") => crate::test::main(&args[1..]),
         #[cfg(feature = "build")]
         Some("build") => crate::build::main(&args[1..]),
         Some("run") => match args.get(1) {
