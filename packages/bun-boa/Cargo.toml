@@ -55,8 +55,9 @@ debug = "line-tables-only"
 opt-level = 2
 
 [profile.release]
-lto = "thin"
-codegen-units = 16
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 panic = "abort"
 
 # The series in patches/<crate>-<version>/, applied to the crates.io tarballs by `bun run vendor`: kitesurf's
