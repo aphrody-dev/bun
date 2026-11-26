@@ -610,3 +610,13 @@ using true
     assert_eq!(stdout, expected, "stderr: {stderr}");
     assert!(out.status.success(), "stderr: {stderr}");
 }
+
+/// TypeScript drops the imports it does not use, as Bun's runtime transpiler does: a type-only name and a name
+/// imported twice.
+#[test]
+fn typescript_drops_unused_imports() {
+    let out = bun().args(["run", "unused_imports.ts"]).current_dir(fixtures().join("modules")).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    assert_eq!(stdout, "string mapped\n", "stderr: {stderr}");
+    assert!(out.status.success(), "stderr: {stderr}");
+}
