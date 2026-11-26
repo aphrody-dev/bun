@@ -45,6 +45,12 @@ pub trait JsClass: Trace + Finalize + Sized + 'static {
         Err(ErrorCode::ILLEGAL_CONSTRUCTOR.throw(global, format_args!("Illegal constructor")))
     }
 
+    /// After `construct`, on the new instance: the rest of a constructor that needs the object itself, as a
+    /// stream's that gives its controller the stream. An exception discards the instance.
+    fn initialize(_this: &ClassRef<Self>, _global: &JSGlobalObject, _frame: &CallFrame<'_>) -> JsResult<()> {
+        Ok(())
+    }
+
     /// Adds the methods, accessors and static members.
     fn define(class: &mut ClassBuilder<'_, Self>) -> JsResult<()>;
 }
@@ -460,7 +466,11 @@ fn construct<T: JsClass>(
                 None => prototype_of::<T>(global)?,
             };
             let payload = T::construct(global, frame)?;
-            Ok(instance(prototype, payload))
+            let object = instance(prototype, payload);
+            if let Some(this) = object.as_class_ref::<T>() {
+                T::initialize(&this, global, frame)?;
+            }
+            Ok(object)
         },
         new_target,
         args,
