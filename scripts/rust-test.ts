@@ -61,6 +61,8 @@ const crates = [
   "bun_paths",
   "bun_png",
   "bun_pod",
+  "bun_qpack",
+  "bun_quic",
   "bun_removable_features",
   "bun_resolve_builtins",
   "bun_resolver",
