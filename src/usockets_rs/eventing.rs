@@ -1,4 +1,4 @@
-//! The loop: eventing/epoll_kqueue.c and the loop half of loop.c.
+//! The loop: eventing/epoll_kqueue.c and the loop half of loop.c, on `epoll` (Linux) or `kqueue` (macOS, FreeBSD).
 
 use core::ffi::{c_int, c_uint, c_void};
 use core::ptr;
@@ -6,7 +6,16 @@ use core::sync::atomic::Ordering;
 
 use crate::*;
 
-/// `struct us_internal_callback_t` of the loop's wakeup: an eventfd, edge-triggered.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[path = "eventing/epoll.rs"]
+mod backend;
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[path = "eventing/kqueue.rs"]
+mod backend;
+
+pub(crate) use backend::ReadyEvent;
+
+/// `struct us_internal_callback_t` of the loop's wakeup.
 #[repr(C, align(16))]
 pub struct us_internal_async {
     p: us_poll_t,
@@ -15,8 +24,6 @@ pub struct us_internal_async {
 }
 
 const UNSET_BITS_49_UNTIL_64: u64 = 0x0000_FFFF_FFFF_FFFF;
-/// The kernel's `sigset_t` (`_NSIG / 8`), not glibc's.
-const KERNEL_SIGSET_SIZE: usize = 8;
 const LIBUS_TIMEOUT_GRANULARITY_NS: i64 = LIBUS_TIMEOUT_GRANULARITY * 1_000_000_000;
 
 pub(crate) fn us_internal_monotonic_ns() -> u64 {
@@ -50,26 +57,6 @@ fn polling_bits(events: c_int) -> u8 {
         | (if events & LIBUS_SOCKET_WRITABLE != 0 { POLL_TYPE_POLLING_OUT } else { 0 })
 }
 
-fn epoll_events(events: c_int) -> u32 {
-    let mut e = events as u32;
-    if events & (LIBUS_SOCKET_READABLE | LIBUS_SOCKET_WRITABLE) == 0 {
-        // Neither direction: EPOLLHUP and EPOLLERR still report, which is what closes a half-open socket.
-        e |= (libc::EPOLLHUP | libc::EPOLLERR) as u32;
-    }
-    e
-}
-
-fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, event: &mut libc::epoll_event) -> c_int {
-    loop {
-        // SAFETY: `event` is an epoll_event to read.
-        let rc = unsafe { libc::epoll_ctl(epfd, op, fd, event) };
-        if rc == -1 && errno() == libc::EINTR {
-            continue;
-        }
-        return rc;
-    }
-}
-
 /// Counts in `num_polls` unless `fallthrough`.
 pub(crate) unsafe fn us_create_poll(loop_: *mut us_loop_t, fallthrough: bool, size: usize) -> *mut u8 {
     if !fallthrough {
@@ -91,8 +78,7 @@ pub(crate) unsafe fn us_poll_start_rc(p: *mut us_poll_t, loop_: *mut us_loop_t, 
     // SAFETY: the caller passes a live poll and its loop.
     unsafe {
         (*p).poll_type = us_internal_poll_type(p) | polling_bits(events);
-        let mut event = libc::epoll_event { events: epoll_events(events), u64: p as u64 };
-        epoll_ctl((*loop_).fd, libc::EPOLL_CTL_ADD, (*p).fd, &mut event)
+        backend::start(p, loop_, events)
     }
 }
 
@@ -104,22 +90,24 @@ pub(crate) unsafe fn us_poll_change(p: *mut us_poll_t, loop_: *mut us_loop_t, ev
             return 0;
         }
         (*p).poll_type = us_internal_poll_type(p) | polling_bits(events);
-        let mut event = libc::epoll_event { events: epoll_events(events), u64: p as u64 };
-        let mut rc = epoll_ctl((*loop_).fd, libc::EPOLL_CTL_MOD, (*p).fd, &mut event);
-        // A paused socket that hung up left epoll; this is its resume coming back.
-        if rc == -1 && errno() == libc::ENOENT {
-            rc = us_poll_start_rc(p, loop_, events);
-        }
-        rc
+        backend::change(p, loop_, old_events, events)
     }
 }
 
 pub(crate) unsafe fn us_poll_stop(p: *mut us_poll_t, loop_: *mut us_loop_t) {
     // SAFETY: the caller passes a live poll and its loop.
     unsafe {
-        let mut event = libc::epoll_event { events: 0, u64: 0 };
-        epoll_ctl((*loop_).fd, libc::EPOLL_CTL_DEL, (*p).fd, &mut event);
+        backend::stop(p, loop_, us_poll_events(p));
         us_internal_loop_update_pending_ready_polls(loop_, p.cast(), ptr::null_mut());
+    }
+}
+
+/// `us_poll_resize`'s second half: `p` is the new block of a poll that kept its fd and its events.
+pub(crate) unsafe fn us_poll_repoint(p: *mut us_poll_t, loop_: *mut us_loop_t, events: c_int) {
+    // SAFETY: the caller passes the poll that it moved, and its loop.
+    unsafe {
+        (*p).poll_type = us_internal_poll_type(p) | polling_bits(events);
+        backend::repoint(p, loop_, events);
     }
 }
 
@@ -129,10 +117,14 @@ pub(crate) unsafe fn us_internal_loop_update_pending_ready_polls(loop_: *mut us_
     unsafe {
         let start = (*loop_).current_ready_poll.max(0) as usize;
         let end = (*loop_).num_ready_polls.max(0) as usize;
+        let mut remaining = backend::ENTRIES_PER_POLL;
         for i in start..end {
-            if (*loop_).ready_polls.0[i].u64 == old_poll as u64 {
-                (*loop_).ready_polls.0[i].u64 = new_poll as u64;
+            if remaining == 0 {
                 break;
+            }
+            if backend::ready_ptr(&(*loop_).ready_polls.0[i]) == old_poll as u64 {
+                backend::set_ready_ptr(&mut (*loop_).ready_polls.0[i], new_poll as u64);
+                remaining -= 1;
             }
         }
     }
@@ -152,7 +144,7 @@ pub unsafe extern "C" fn us_create_loop(
     let loop_ = xcalloc(size).cast::<us_loop_t>();
     // SAFETY: `loop_` is zeroed memory for a loop, which zero is a valid state of.
     unsafe {
-        (*loop_).fd = libc::epoll_create1(libc::EPOLL_CLOEXEC);
+        (*loop_).fd = backend::create_fd();
         if (*loop_).fd == -1 {
             xfree(loop_.cast(), size);
             return ptr::null_mut();
@@ -162,21 +154,17 @@ pub unsafe extern "C" fn us_create_loop(
         data.recv_buf = xcalloc(LIBUS_RECV_BUFFER_LENGTH + LIBUS_RECV_BUFFER_PADDING * 2);
         data.pre_cb = pre_cb;
         data.post_cb = post_cb;
-        let efd = libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC);
-        if efd == -1 {
+        let a = us_create_poll(loop_, true, core::mem::size_of::<us_internal_async>()).cast::<us_internal_async>();
+        (*a).p.poll_type = POLL_TYPE_CALLBACK | POLL_TYPE_POLLING_IN;
+        (*a).loop_ = loop_;
+        (*a).cb = wakeup_cb;
+        if !backend::async_init(loop_, a) {
+            xfree(a.cast(), core::mem::size_of::<us_internal_async>());
             xfree(data.recv_buf, LIBUS_RECV_BUFFER_LENGTH + LIBUS_RECV_BUFFER_PADDING * 2);
             libc::close((*loop_).fd);
             xfree(loop_.cast(), size);
             return ptr::null_mut();
         }
-        let a = us_create_poll(loop_, true, core::mem::size_of::<us_internal_async>()).cast::<us_internal_async>();
-        (*a).p.fd = efd;
-        (*a).p.poll_type = POLL_TYPE_CALLBACK;
-        (*a).loop_ = loop_;
-        (*a).cb = wakeup_cb;
-        (*a).p.poll_type |= POLL_TYPE_POLLING_IN;
-        let mut event = libc::epoll_event { events: (libc::EPOLLIN | libc::EPOLLET) as u32, u64: a as u64 };
-        epoll_ctl((*loop_).fd, libc::EPOLL_CTL_ADD, efd, &mut event);
         data.wakeup_async = a;
     }
     loop_
@@ -188,7 +176,7 @@ pub unsafe extern "C" fn us_loop_free(loop_: *mut us_loop_t) {
     unsafe {
         us_internal_free_closed_sockets(loop_);
         let a = (*loop_).data.wakeup_async;
-        libc::close((*a).p.fd);
+        backend::async_close(loop_, a);
         xfree(a.cast(), core::mem::size_of::<us_internal_async>());
         xfree((*loop_).data.recv_buf, LIBUS_RECV_BUFFER_LENGTH + LIBUS_RECV_BUFFER_PADDING * 2);
         libc::close((*loop_).fd);
@@ -210,7 +198,7 @@ pub extern "C" fn uws_get_loop() -> *mut us_loop_t {
         if cell.get().is_null() {
             // SAFETY: no hint, no ext.
             let loop_ = unsafe { us_create_loop(ptr::null_mut(), Some(noop), Some(noop), Some(noop), 0) };
-            assert!(!loop_.is_null(), "uws_get_loop: epoll_create1 or eventfd failed (errno {})", errno());
+            assert!(!loop_.is_null(), "uws_get_loop: the loop's descriptor or its wakeup failed (errno {})", errno());
             cell.set(loop_);
         }
         cell.get()
@@ -222,24 +210,7 @@ pub unsafe extern "C" fn us_wakeup_loop(loop_: *mut us_loop_t) {
     // SAFETY: the caller passes a live loop; any thread may.
     unsafe {
         (*loop_).pending_wakeups.fetch_add(1, Ordering::Release);
-        let fd = (*(*loop_).data.wakeup_async).p.fd;
-        loop {
-            let val: u64 = 1;
-            if libc::write(fd, (&raw const val).cast(), 8) >= 0 {
-                return;
-            }
-            match errno() {
-                libc::EINTR => continue,
-                libc::EAGAIN => {
-                    let mut drained: u64 = 0;
-                    if libc::read(fd, (&raw mut drained).cast(), 8) > 0 || matches!(errno(), libc::EAGAIN | libc::EINTR) {
-                        continue;
-                    }
-                    return;
-                }
-                _ => return,
-            }
-        }
+        backend::async_wakeup((*loop_).data.wakeup_async);
     }
 }
 
@@ -410,84 +381,7 @@ unsafe fn us_internal_loop_post(loop_: *mut us_loop_t) {
 
 // ── waiting and dispatching ────────────────────────────────────────────────
 
-/// epoll_pwait2 (ns timeouts), or epoll_pwait with milliseconds rounded up where the kernel lacks it. EINTR waits
-/// for the rest of the time.
-unsafe fn bun_epoll_pwait2(loop_: *mut us_loop_t, timeout: Option<libc::timespec>) -> c_int {
-    static HAS_EPOLL_PWAIT2: core::sync::atomic::AtomicI8 = core::sync::atomic::AtomicI8::new(-1);
-    let deadline = timeout
-        .filter(|t| t.tv_sec != 0 || t.tv_nsec != 0)
-        .map(|t| us_internal_monotonic_ns() + t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64);
-    let mut remaining = timeout;
-    // SAFETY: the caller passes a live loop; the kernel writes at most LIBUS_MAX_READY_POLLS events.
-    unsafe {
-        let events = (*loop_).ready_polls.0.as_mut_ptr();
-        loop {
-            let ret = if HAS_EPOLL_PWAIT2.load(Ordering::Relaxed) != 0 {
-                let mut mask: libc::sigset_t = core::mem::zeroed();
-                libc::sigemptyset(&mut mask);
-                let ts = remaining.as_ref().map_or(ptr::null(), |t| t as *const libc::timespec);
-                let r = libc::syscall(
-                    libc::SYS_epoll_pwait2,
-                    (*loop_).fd,
-                    events,
-                    LIBUS_MAX_READY_POLLS as c_int,
-                    ts,
-                    &mask as *const libc::sigset_t,
-                    KERNEL_SIGSET_SIZE,
-                ) as c_int;
-                if r == -1 && matches!(errno(), libc::ENOSYS | libc::EPERM | libc::EOPNOTSUPP | libc::EACCES | libc::EFAULT) {
-                    HAS_EPOLL_PWAIT2.store(0, Ordering::Relaxed);
-                    continue;
-                }
-                r
-            } else {
-                let ms = remaining.map_or(-1, |t| {
-                    let ns = t.tv_sec as i128 * 1_000_000_000 + t.tv_nsec as i128;
-                    ((ns.max(0) + 999_999) / 1_000_000).min(i32::MAX as i128) as c_int
-                });
-                libc::epoll_wait((*loop_).fd, events, LIBUS_MAX_READY_POLLS as c_int, ms)
-            };
-            if ret != -1 || errno() != libc::EINTR {
-                return ret.max(0);
-            }
-            if let Some(deadline) = deadline {
-                let now = us_internal_monotonic_ns();
-                if now >= deadline {
-                    return 0;
-                }
-                let left = deadline - now;
-                remaining = Some(libc::timespec { tv_sec: (left / 1_000_000_000) as _, tv_nsec: (left % 1_000_000_000) as _ });
-            }
-        }
-    }
-}
-
-unsafe fn us_internal_dispatch_ready_polls(loop_: *mut us_loop_t) {
-    // SAFETY: the caller passes a live loop whose ready polls were just filled; stopping a poll scrubs it from them.
-    unsafe {
-        (*loop_).current_ready_poll = 0;
-        while (*loop_).current_ready_poll < (*loop_).num_ready_polls {
-            let ready = (*loop_).ready_polls.0[(*loop_).current_ready_poll as usize];
-            let poll = ready.u64;
-            if poll != 0 {
-                if poll & UNSET_BITS_49_UNTIL_64 != poll {
-                    Bun__internal_dispatch_ready_poll(loop_, poll as *mut c_void);
-                } else {
-                    let p = poll as *mut us_poll_t;
-                    let mut events = ready.events as c_int;
-                    let error = c_int::from(events & libc::EPOLLERR != 0);
-                    let eof = if events & libc::EPOLLHUP != 0 { LIBUS_POLL_HANGUP } else { 0 };
-                    events &= us_poll_events(p);
-                    if events != 0 || error != 0 || eof != 0 {
-                        us_internal_dispatch_ready_poll(p, error, eof, events);
-                    }
-                }
-            }
-            (*loop_).current_ready_poll += 1;
-        }
-    }
-}
-
+/// The poll's event, decoded by the backend: loop.c's `us_internal_dispatch_ready_poll`.
 unsafe fn us_internal_dispatch_ready_poll(p: *mut us_poll_t, error: c_int, eof: c_int, events: c_int) {
     // SAFETY: the caller passes a live poll of this crate.
     unsafe {
@@ -539,15 +433,15 @@ pub unsafe extern "C" fn us_loop_run_bun_tick(loop_: *mut us_loop_t, timeout: *c
         }
         (*loop_).pending_wakeups.swap(0, Ordering::Acquire);
 
-        (*loop_).num_ready_polls = bun_epoll_pwait2(loop_, timeout);
+        (*loop_).num_ready_polls = backend::wait(loop_, timeout);
         (*loop_).current_ready_poll = 0;
-        us_internal_dispatch_ready_polls(loop_);
+        backend::dispatch_ready_polls(loop_);
         // A full batch may have left more ready: take them without waiting.
         let mut drain_count = 48;
         while (*loop_).num_ready_polls == LIBUS_MAX_READY_POLLS as c_int && drain_count > 1 && (*loop_).num_polls > 0 {
             drain_count -= 1;
-            (*loop_).num_ready_polls = bun_epoll_pwait2(loop_, Some(libc::timespec { tv_sec: 0, tv_nsec: 0 }));
-            us_internal_dispatch_ready_polls(loop_);
+            (*loop_).num_ready_polls = backend::wait(loop_, Some(libc::timespec { tv_sec: 0, tv_nsec: 0 }));
+            backend::dispatch_ready_polls(loop_);
         }
         us_internal_sweep_if_due(loop_);
 

@@ -37,7 +37,7 @@ pub unsafe extern "C" fn us_socket_adopt(
                 ptr::copy_nonoverlapping(s.cast::<u8>(), new_s.cast::<u8>(), old_size);
                 (*new_s).alloc_size = new_size;
                 let events = us_poll_events(&(*s).p);
-                repoint_poll(loop_, &mut (*new_s).p, events);
+                us_poll_repoint(&mut (*new_s).p, loop_, events);
                 us_internal_loop_update_pending_ready_polls(loop_, s.cast(), new_s.cast());
                 // The SSL goes with the socket.
                 (*s).ssl = ptr::null_mut();
@@ -59,18 +59,6 @@ pub unsafe extern "C" fn us_socket_adopt(
         (*new_s).long_timeout = 255;
         group_link_socket(group, new_s);
         new_s
-    }
-}
-
-/// The poll's registration now names this block.
-unsafe fn repoint_poll(loop_: *mut us_loop_t, p: *mut us_poll_t, events: c_int) {
-    // SAFETY: the caller's live loop and the poll it moved; `us_poll_change` only writes when the events differ.
-    unsafe {
-        (*p).poll_type = us_internal_poll_type(p);
-        if us_poll_change(p, loop_, events) == 0 && events == 0 {
-            us_poll_stop(p, loop_);
-            us_poll_start_rc(p, loop_, 0);
-        }
     }
 }
 

@@ -183,15 +183,18 @@ pub unsafe extern "C" fn us_socket_long_timeout(s: *mut us_socket_t, minutes: c_
     }
 }
 
-/// Uncorks: TCP_CORK off sends what it held back.
+/// Uncorks: TCP_CORK off sends what it held back. Only Linux corks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn us_socket_flush(s: *mut us_socket_t) {
     // SAFETY: the caller passes a live socket.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     if unsafe { us_socket_is_shut_down(s) } == 0 {
         let enabled: c_int = 0;
         // SAFETY: `enabled` is an int to read.
         unsafe { libc::setsockopt(fd_of(s), libc::IPPROTO_TCP, libc::TCP_CORK, (&raw const enabled).cast(), 4) };
     }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = s;
 }
 
 #[unsafe(no_mangle)]
@@ -209,17 +212,27 @@ pub unsafe extern "C" fn us_socket_keepalive(s: *mut us_socket_t, enabled: c_int
         return 0;
     }
     let fd = fd_of(s);
-    // SAFETY: each option reads an int.
-    unsafe {
-        if libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, (&raw const enabled).cast(), 4) != 0 {
-            return errno();
-        }
-        if enabled != 0 && delay != 0 {
-            let delay = delay as c_int;
-            if libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, (&raw const delay).cast(), 4) != 0 {
-                return errno();
-            }
-        }
+    #[cfg(not(target_os = "macos"))]
+    const TCP_KEEPIDLE: c_int = libc::TCP_KEEPIDLE;
+    // macOS's name for it.
+    #[cfg(target_os = "macos")]
+    const TCP_KEEPIDLE: c_int = libc::TCP_KEEPALIVE;
+    let set = |level: c_int, name: c_int, value: c_int| {
+        // SAFETY: `value` is an int to read.
+        unsafe { libc::setsockopt(fd, level, name, (&raw const value).cast(), 4) == 0 }
+    };
+    if !set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, enabled) {
+        return errno();
+    }
+    // A delay of 0 keeps the kernel's idle time. Probes every second, ten of them, as on Windows.
+    if enabled == 0 || delay == 0 {
+        return 0;
+    }
+    if !set(libc::IPPROTO_TCP, TCP_KEEPIDLE, delay as c_int)
+        || !set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 1)
+        || !set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 10)
+    {
+        return errno();
     }
     0
 }
@@ -502,7 +515,11 @@ unsafe fn close_and_notify(s: *mut us_socket_t, code: c_int, reason: *mut c_void
         }
         let loop_ = (*(*s).group).loop_;
         group_unlink_socket((*s).group, s);
+        // kqueue drops the knotes of an fd that closes.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         us_poll_stop(&mut (*s).p, loop_);
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        us_internal_loop_update_pending_ready_polls(loop_, s.cast(), ptr::null_mut());
         if code == LIBUS_SOCKET_CLOSE_CODE_CONNECTION_RESET {
             // RST, not TIME_WAIT.
             let l = libc::linger { l_onoff: 1, l_linger: 0 };
@@ -564,6 +581,11 @@ pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut 
 
         if events & LIBUS_SOCKET_WRITABLE != 0 && error == 0 && !(*s).send_rejected {
             (*s).last_write_failed = false;
+            // kqueue's write filter is one-shot: it is gone now, and the poll still reads as before.
+            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+            {
+                (*s).p.poll_type = us_internal_poll_type(&(*s).p) | ((*s).p.poll_type & POLL_TYPE_POLLING_IN);
+            }
             s = if (*s).ssl.is_null() { us_dispatch_writable(s) } else { crate::tls::on_writable(s) };
             s = follow_adopted(s);
             if s.is_null() || (*s).is_closed {
@@ -571,6 +593,9 @@ pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut 
             }
             if !(*s).last_write_failed || us_socket_is_shut_down(s) != 0 {
                 us_poll_change(&mut (*s).p, loop_, us_poll_events(&(*s).p) & LIBUS_SOCKET_READABLE);
+            } else {
+                #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+                us_poll_change(&mut (*s).p, loop_, us_poll_events(&(*s).p) | LIBUS_SOCKET_WRITABLE);
             }
         }
 
@@ -640,6 +665,7 @@ pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut 
         let eof_deferrable = eof != 0 && !s.is_null() && error == 0 && !(*s).is_closed && !(*s).read_eof;
         if eof_deferrable && (*s).is_paused {
             // EPOLLHUP cannot be masked: leave epoll while paused; resume puts the fd back.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             if hangup {
                 us_poll_stop(&mut (*s).p, loop_);
                 (*s).p.poll_type = us_internal_poll_type(&(*s).p);

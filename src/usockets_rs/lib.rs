@@ -2,12 +2,12 @@
 //! the semantics of `loop.c`, `socket.c`, `context.cpp`, `bsd.cpp` and `eventing/epoll_kqueue.c`. Events go to the
 //! `us_dispatch_*` exports of the binary that links this crate, as from the C library.
 //!
-//! What it has: the loop on epoll (wakeups, ready-poll dispatch, the timeout sweep, `Bun__internal_dispatch_ready_poll`
-//! for `bun_io`'s polls), TCP and Unix-socket clients (connect, read, write, timeouts, shutdown, close) and listeners
-//! (`listen.rs`), sockets on an fd and IPC fd passing, adoption (`adopt.rs`), TLS on rustls for clients and servers
-//! with SNI (`tls.rs`, `sni.rs`), and name resolution through a cache of results on a thread pool (`dns.rs`,
-//! `Bun__addrinfo_*`). It has no UDP or QUIC (those entry points fail), and no kqueue.
-#![cfg(any(target_os = "linux", target_os = "android"))]
+//! What it has: the loop on epoll or kqueue (wakeups, ready-poll dispatch, the timeout sweep,
+//! `Bun__internal_dispatch_ready_poll` for `bun_io`'s polls), TCP and Unix-socket clients (connect, read, write,
+//! timeouts, shutdown, close) and listeners (`listen.rs`), sockets on an fd and IPC fd passing, adoption
+//! (`adopt.rs`), TLS on rustls for clients and servers with SNI (`tls.rs`, `sni.rs`), and name resolution through a
+//! cache of results on a thread pool (`dns.rs`, `Bun__addrinfo_*`). It has no UDP or QUIC (those entry points fail).
+#![cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "freebsd"))]
 #![allow(non_camel_case_types, clippy::missing_safety_doc)]
 
 // Defines `Bun__lock` and `Bun__unlock`, which nothing here names in Rust.
@@ -27,8 +27,14 @@ mod unsupported;
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::sync::atomic::AtomicU32;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub const LIBUS_SOCKET_READABLE: c_int = libc::EPOLLIN;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub const LIBUS_SOCKET_WRITABLE: c_int = libc::EPOLLOUT;
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub const LIBUS_SOCKET_READABLE: c_int = 1;
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub const LIBUS_SOCKET_WRITABLE: c_int = 2;
 
 pub const LIBUS_RECV_BUFFER_LENGTH: usize = 524288;
 pub const LIBUS_RECV_BUFFER_PADDING: usize = 32;
@@ -65,7 +71,8 @@ pub(crate) const POLL_TYPE_POLLING_IN: u8 = 16;
 pub(crate) const POLL_TYPE_KIND_MASK: u8 = 0b111;
 pub(crate) const POLL_TYPE_POLLING_MASK: u8 = 0b11000;
 
-/// `struct us_poll_t`: what every entry of the loop's epoll set points at, unless `bun_io` tagged the pointer.
+/// `struct us_poll_t`: what every entry of the loop's epoll or kqueue set points at, unless `bun_io` tagged the
+/// pointer.
 #[repr(C, align(16))]
 pub struct us_poll_t {
     pub(crate) fd: c_int,
@@ -105,7 +112,7 @@ pub struct us_internal_loop_data_t {
 }
 
 #[repr(C, align(16))]
-pub(crate) struct ReadyPolls(pub(crate) [libc::epoll_event; LIBUS_MAX_READY_POLLS]);
+pub(crate) struct ReadyPolls(pub(crate) [eventing::ReadyEvent; LIBUS_MAX_READY_POLLS]);
 
 /// `struct us_loop_t` of eventing/epoll_kqueue.h, which `bun_uws_sys::Loop` mirrors.
 #[repr(C, align(16))]
@@ -272,14 +279,27 @@ unsafe extern "C" {
     pub(crate) fn Bun__unlock(lock: *mut u32);
 }
 
+fn errno_location() -> *mut c_int {
+    // SAFETY: the calling thread's errno.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        libc::__errno_location()
+    }
+    // SAFETY: as above.
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    unsafe {
+        libc::__error()
+    }
+}
+
 pub(crate) fn errno() -> c_int {
     // SAFETY: the calling thread's errno.
-    unsafe { *libc::__errno_location() }
+    unsafe { *errno_location() }
 }
 
 pub(crate) fn set_errno(value: c_int) {
     // SAFETY: as above.
-    unsafe { *libc::__errno_location() = value };
+    unsafe { *errno_location() = value };
 }
 
 /// `us_xcalloc`: zeroed, aligned to `LIBUS_EXT_ALIGNMENT`, or the process stops as out of memory.
