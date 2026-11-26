@@ -548,3 +548,27 @@ fn promise_jobs_carry_the_async_context() {
         assert_eq!(global.async_context().as_string().as_deref(), Some("outside"));
     });
 }
+
+#[test]
+fn internal_fields() {
+    JSGlobalObject::with_new(|global| {
+        let object = JSObject::create(global);
+        assert!(object.get_internal_field(global, 1).unwrap().is_undefined());
+        object
+            .put_internal_field(global, 1, JSValue::js_number(7.0))
+            .unwrap();
+        assert_eq!(
+            object.get_internal_field(global, 1).unwrap().get_number(),
+            Some(7.0)
+        );
+        assert!(object.get_internal_field(global, 0).unwrap().is_undefined());
+        // Script reads the same fields, through the realm's WeakMap.
+        global
+            .to_js_value()
+            .put(global, "fields", global.internal_fields());
+        global.to_js_value().put(global, "object", object.to_js());
+        let seen = eval(global, "fields.get(object)[1]");
+        assert_eq!(seen.get_number(), Some(7.0));
+        assert!(eval(global, "fields.get({})").is_undefined());
+    });
+}

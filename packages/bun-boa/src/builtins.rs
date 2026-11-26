@@ -337,6 +337,13 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     ops.property(js_string!("specifiers"), specifiers, Attribute::all())
         .property(js_string!("native"), native, Attribute::all());
     let ops = ops.build();
+    let internal_fields = bun_js::JSGlobalObject::from_context(context).internal_fields();
+    ops.set(
+        js_string!("internalFields"),
+        internal_fields.into_engine(),
+        true,
+        context,
+    )?;
     context.register_global_property(JsString::from(OPS), ops.clone(), Attribute::all())?;
     let source =
         crate::transpile::transpile(b"bun:intrinsics.ts", include_bytes!("js/intrinsics.ts"))

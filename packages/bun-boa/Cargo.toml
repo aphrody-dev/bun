@@ -3,7 +3,7 @@
 [workspace]
 resolver = "2"
 # bun_js and the crates on it are members: Bun's root workspace does not build Boa.
-members = ["cdp", "../../src/bun_js", "../../src/runtime_js", "../../src/semver_js"]
+members = ["cdp", "../../src/bun_js", "../../src/runtime_js", "../../src/semver_js", "../../src/sqlite_js"]
 
 [package]
 name = "bun-boa"
@@ -41,6 +41,7 @@ bun_paths = { path = "../../src/paths" }
 bun_sys = { path = "../../src/sys" }
 bun_sema = { path = "../../src/sema" }
 bun_semver_js = { path = "../../src/semver_js" }
+bun_sqlite_js = { path = "../../src/sqlite_js" }
 bun_sema_driver = { path = "../../src/sema/driver" }
 bun_sema_standalone = { path = "../../src/sema/standalone" }
 bun_threading = { path = "../../src/threading" }
