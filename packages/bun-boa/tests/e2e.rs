@@ -170,6 +170,26 @@ fn lint_reports_and_passes() {
     assert!(out.status.success(), "{:?}", text(&out));
 }
 
+/// A rule whose option is a regular expression: only the identifier that the pattern rejects is reported, so the
+/// pattern ran, through `bun_yarr`'s C ABI on regress (`src/yarr.rs`).
+#[test]
+fn lint_runs_regular_expressions_through_yarr() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lint-regex");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("ids.ts"), "export const snake_ok = 1;\nexport const BadName = 2;\n").unwrap();
+    let rule = r#"{"id-match":["error","^[a-z]+(_[a-z]+)*$"]}"#;
+    let out = bun().args(["lint", "--rule", rule, "ids.ts"]).current_dir(&dir).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    let all = format!("{stdout}{stderr}");
+    assert!(all.contains("id-match") && all.contains("BadName"), "{all}");
+    assert!(!all.contains("snake_ok"), "{all}");
+    assert_eq!(out.status.code(), Some(1), "{all}");
+    let rule = r#"{"id-match":["error","^([a-z]+|[A-Z][a-zA-Z]+)(_[a-z]+)*$"]}"#;
+    let out = bun().args(["lint", "--rule", rule, "ids.ts"]).current_dir(&dir).output().unwrap();
+    assert!(out.status.success(), "{:?}", text(&out));
+}
+
 #[test]
 fn runs_package_json_scripts() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("scripts");
@@ -196,4 +216,20 @@ fn runs_package_json_scripts() {
     assert_eq!(text(&out).0, "42\n", "{:?}", text(&out));
     let out = bun().arg("run").current_dir(&dir).output().unwrap();
     assert!(text(&out).0.contains("bun run hi"), "{:?}", text(&out));
+}
+
+#[test]
+fn a_path_is_a_file_not_a_script() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("script-path");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"scripts":{"./x.js":"echo script","x.js":"echo script"}}"#).unwrap();
+    std::fs::write(dir.join("x.js"), "console.log('file');\n").unwrap();
+    for args in [&["./x.js"][..], &["run", "./x.js"]] {
+        let out = bun().args(args).current_dir(&dir).output().unwrap();
+        assert_eq!(text(&out).0, "file\n", "{args:?}: {:?}", text(&out));
+    }
+    // A bare name is still a script first.
+    let out = bun().args(["run", "x.js"]).current_dir(&dir).output().unwrap();
+    assert_eq!(text(&out).0, "script\n", "{:?}", text(&out));
 }

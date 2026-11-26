@@ -55,6 +55,11 @@ fn sh(name: &str, script: &str, dir: &Path, package: &serde_json::Value) -> i32 
     }
 }
 
+/// Whether `bun run` takes `name` as a file path rather than a script name.
+pub fn is_path(name: &str) -> bool {
+    name == "." || name == ".." || name.starts_with("./") || name.starts_with("../") || name.starts_with('/')
+}
+
 /// `None` if there is no script named `name`.
 pub fn run(name: &str, args: &[String]) -> Option<i32> {
     let cwd = std::env::current_dir().ok()?;

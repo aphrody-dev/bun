@@ -147,12 +147,40 @@ pub unsafe extern "C" fn Bun__normalizeUTF16(form: u8, text: *const u16, length:
     use icu_normalizer::{ComposingNormalizerBorrowed as C, DecomposingNormalizerBorrowed as D};
     // SAFETY: the caller's.
     let text = if length == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(text, length) } };
-    let normalized = match form {
-        0 => C::new_nfc().normalize_utf16(text),
-        1 => D::new_nfd().normalize_utf16(text),
-        2 => C::new_nfkc().normalize_utf16(text),
-        _ => D::new_nfkd().normalize_utf16(text),
+    let normalize = |run: &[u16]| -> Vec<u16> {
+        match form {
+            0 => C::new_nfc().normalize_utf16(run).into_owned(),
+            1 => D::new_nfd().normalize_utf16(run).into_owned(),
+            2 => C::new_nfkc().normalize_utf16(run).into_owned(),
+            _ => D::new_nfkd().normalize_utf16(run).into_owned(),
+        }
     };
+    // ICU4X turns an unpaired surrogate into U+FFFD; ICU4C's `unorm2_normalize`, which this stands in for,
+    // keeps it. It is a starter that nothing composes with, so a boundary: normalize the well-formed runs
+    // between them and keep each as it is.
+    let mut normalized = Vec::with_capacity(text.len());
+    let mut run_start = 0;
+    let mut i = 0;
+    while i < text.len() {
+        let unit = text[i];
+        let paired = match unit {
+            0xD800..=0xDBFF => text.get(i + 1).is_some_and(|&next| (0xDC00..=0xDFFF).contains(&next)),
+            0xDC00..=0xDFFF => false,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        if paired {
+            i += 2;
+            continue;
+        }
+        normalized.extend(normalize(&text[run_start..i]));
+        normalized.push(unit);
+        i += 1;
+        run_start = i;
+    }
+    normalized.extend(normalize(&text[run_start..]));
     if normalized.len() <= capacity && capacity > 0 {
         // SAFETY: the caller's.
         unsafe { core::ptr::copy_nonoverlapping(normalized.as_ptr(), out, normalized.len()) };
@@ -166,6 +194,39 @@ mod tests {
         let mut buf = [0; 124];
         let n = f(&mut buf);
         String::from_utf8(buf[..n].to_vec()).unwrap()
+    }
+
+    fn normalize(form: u8, text: &[u16]) -> Vec<u16> {
+        let mut out = vec![0u16; 64];
+        // SAFETY: `text` and `out` have those lengths.
+        let n = unsafe { super::Bun__normalizeUTF16(form, text.as_ptr(), text.len(), out.as_mut_ptr(), out.len()) };
+        out.truncate(n as usize);
+        out
+    }
+
+    #[test]
+    fn normalization() {
+        let u = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        // "e" + COMBINING ACUTE <-> "é"; "ﬁ" -> "fi" only for the K forms.
+        assert_eq!(normalize(0, &u("e\u{301}")), u("\u{e9}"));
+        assert_eq!(normalize(1, &u("\u{e9}")), u("e\u{301}"));
+        assert_eq!(normalize(2, &u("\u{fb01}")), u("fi"));
+        assert_eq!(normalize(0, &u("\u{fb01}")), u("\u{fb01}"));
+        assert_eq!(normalize(3, &u("\u{1e9b}\u{323}")), u("s\u{323}\u{307}"));
+        // Pairs stay pairs.
+        assert_eq!(normalize(0, &u("\u{1f600}")), u("\u{1f600}"));
+        // Unpaired surrogates stay as they are, as '\uD800'.normalize() in JSC.
+        for form in 0..4 {
+            assert_eq!(normalize(form, &[0xD800]), [0xD800]);
+            assert_eq!(normalize(form, &[0xDC00, 0x61]), [0xDC00, 0x61]);
+        }
+        assert_eq!(normalize(0, &[0x65, 0x301, 0xD800, 0x65, 0x301, 0xDFFF]), [0xE9, 0xD800, 0xE9, 0xDFFF]);
+        assert_eq!(normalize(1, &[0xD83D, 0xE9]), [0xD83D, 0x65, 0x301]);
+        // Too little room: the length it needs, nothing written.
+        let mut out = [0u16; 1];
+        let text = u("\u{e9}");
+        // SAFETY: as above.
+        assert_eq!(unsafe { super::Bun__normalizeUTF16(1, text.as_ptr(), 1, out.as_mut_ptr(), 1) }, 2);
     }
 
     #[test]

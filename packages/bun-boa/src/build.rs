@@ -7,12 +7,17 @@ use bun_bundler::{options, transpiler};
 use bun_options_types::schema::api;
 
 pub fn main(args: &[String]) -> i32 {
-    let (mut entries, mut outdir, mut outfile, mut minify) = (Vec::new(), None, None, false);
+    let (mut entries, mut outdir, mut outfile, mut minify): (_, Option<String>, Option<String>, _) = (Vec::new(), None, None, false);
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--outdir" => outdir = it.next().cloned(),
-            "--outfile" => outfile = it.next().cloned(),
+            "--outdir" | "--outfile" => {
+                let Some(value) = it.next().filter(|v| !v.starts_with('-')) else {
+                    eprintln!("error: {arg} needs a value");
+                    return 1;
+                };
+                *(if arg == "--outdir" { &mut outdir } else { &mut outfile }) = Some(value.clone());
+            }
             "--minify" => minify = true,
             flag if flag.starts_with("--outdir=") => outdir = Some(flag["--outdir=".len()..].into()),
             flag if flag.starts_with("--outfile=") => outfile = Some(flag["--outfile=".len()..].into()),
@@ -22,6 +27,10 @@ pub fn main(args: &[String]) -> i32 {
             }
             entry => entries.push(Box::<[u8]>::from(entry.as_bytes())),
         }
+    }
+    if outdir.is_some() && outfile.is_some() {
+        eprintln!("error: Cannot use both --outdir and --outfile");
+        return 1;
     }
     if entries.is_empty() {
         eprintln!("error: Missing entrypoints. What would you like to bundle?");
@@ -45,16 +54,25 @@ pub fn main(args: &[String]) -> i32 {
                 return 1;
             }
         };
-    this.options.entry_points = entries.clone();
+    this.options.entry_points = entries.clone().into();
     this.options.minify_identifiers = minify;
     this.options.minify_whitespace = minify;
     this.options.minify_syntax = minify;
-    if let Some(dir) = &outdir {
-        this.options.output_dir = dir.as_bytes().into();
-    }
     if outdir.is_none() && entries.len() > 1 {
         eprintln!("error: Must use --outdir when specifying more than one entry point.");
         return 1;
+    }
+    // As build_command.rs: --outfile names the entry chunk, and its directory is the outdir of everything else
+    // (sourcemaps, assets), so no output is dropped or sent to stdout.
+    if let Some(file) = &outfile {
+        let path = std::path::Path::new(file);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| file.clone());
+        this.options.entry_naming = format!("./{name}").into_bytes().into();
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        outdir = Some(dir.to_string_lossy().into_owned());
+    }
+    if let Some(dir) = &outdir {
+        this.options.output_dir = dir.as_bytes().into();
     }
     this.options.root_dir = options::default_root_dir(&this.options.entry_points).into();
     if this.configure_defines().is_err() {
@@ -90,10 +108,9 @@ pub fn main(args: &[String]) -> i32 {
     };
     for file in output.iter() {
         let options::OutputFileValue::Buffer { bytes } = &file.value else { continue };
-        let dest = match (&outdir, &outfile) {
-            (_, Some(outfile)) if output.len() == 1 => std::path::PathBuf::from(outfile),
-            (Some(dir), _) => std::path::Path::new(dir).join(String::from_utf8_lossy(&file.dest_path).as_ref()),
-            (None, _) => {
+        let dest = match &outdir {
+            Some(dir) => std::path::Path::new(dir).join(String::from_utf8_lossy(&file.dest_path).as_ref()),
+            None => {
                 use std::io::Write;
                 let _ = std::io::stdout().write_all(bytes);
                 continue;

@@ -117,8 +117,12 @@ fn eval(code: &str, rest: &[String]) -> i32 {
     }
 }
 
-/// A `package.json` script of that name first, as `bun run` does, then a file.
+/// A `package.json` script of that name first, as `bun run` does, then a file. A path (`./x`, `../x`, `/x`)
+/// is always a file, without reading `package.json`, as `RunCommand` does.
 fn script_or_file(name: &str, rest: &[String]) -> i32 {
+    if crate::scripts::is_path(name) {
+        return run_file(name, rest);
+    }
     crate::scripts::run(name, rest).unwrap_or_else(|| run_file(name, rest))
 }
 
