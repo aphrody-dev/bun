@@ -6,8 +6,8 @@ use boa_engine::builtins::promise::PromiseState;
 use boa_engine::builtins::proxy::Proxy;
 use boa_engine::object::ObjectInitializer;
 use boa_engine::object::builtins::{
-    JsArray, JsArrayBuffer, JsDataView, JsMap, JsPromise, JsRegExp, JsSet, JsTypedArray, JsWeakMap,
-    JsWeakSet,
+    JsArray, JsArrayBuffer, JsDataView, JsMap, JsPromise, JsRegExp, JsSet, JsSharedArrayBuffer,
+    JsTypedArray, JsWeakMap, JsWeakSet,
 };
 use boa_engine::property::Attribute;
 use boa_engine::{
@@ -39,6 +39,18 @@ pub struct Builtin {
     pub source: Option<&'static str>,
     /// The parameters of `source`, without their `__intrinsic__` prefix.
     pub intrinsics: &'static [&'static str],
+}
+
+/// A builtin function of src/js/builtins: `Buffer.from` is `JSBufferConstructor` `from`.
+pub struct Function {
+    pub file: &'static str,
+    pub name: &'static str,
+    /// `(function (<intrinsics>) { return (function (…) { … }) })`.
+    pub source: &'static str,
+    /// The parameters of `source`, without their `__intrinsic__` prefix.
+    pub intrinsics: &'static [&'static str],
+    /// A `$getter`: its function is named `get <name>`.
+    pub getter: bool,
 }
 
 include!(concat!(env!("OUT_DIR"), "/builtins.rs"));
@@ -122,6 +134,29 @@ fn compile(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsV
     };
     let path = std::path::PathBuf::from(format!("builtin://{}", MODULES[id].id));
     context.eval(Source::from_bytes(source).with_path(&path))
+}
+
+/// `compileFunction(id)`: the function of the builtin function's intrinsics.
+fn compile_function(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = index(args, context)?;
+    let Some(function) = FUNCTIONS.get(id) else {
+        return Ok(JsValue::undefined());
+    };
+    let path = std::path::PathBuf::from(format!(
+        "builtin://{}/{}",
+        function.file, function.name
+    ));
+    context.eval(Source::from_bytes(function.source).with_path(&path))
+}
+
+fn function_intrinsic_names(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = index(args, context)?;
+    let names = FUNCTIONS.get(id).map_or(&[][..], |f| f.intrinsics);
+    Ok(strings(names.iter().copied(), context))
 }
 
 fn strings<'a>(values: impl IntoIterator<Item = &'a str>, context: &mut Context) -> JsValue {
@@ -223,6 +258,8 @@ fn brand(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
         "DataView"
     } else if JsArrayBuffer::from_object(o()).is_ok() {
         "ArrayBuffer"
+    } else if JsSharedArrayBuffer::from_object(o()).is_ok() {
+        "SharedArrayBuffer"
     } else if object.is_array() {
         "Array"
     } else {
@@ -291,15 +328,6 @@ fn make_error(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<
     Ok(code.fmt(global, format_args!("{message}")).into_engine())
 }
 
-/// `errorCode(code)`: the `code` of `Bun::ErrorCode` number `code` ("ERR_INVALID_ARG_TYPE").
-fn error_code(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let code = index(args, context)?;
-    Ok(bun_js::ErrorCode::ALL
-        .get(code)
-        .map_or(js_string!(), |code| JsString::from(code.code()))
-        .into())
-}
-
 /// `asyncContext()`: what `$getInternalField($asyncContext, 0)` reads, the realm's async context in bun_js.
 fn async_context(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     Ok(bun_js::JSGlobalObject::from_context(context).async_context().into_engine())
@@ -330,11 +358,28 @@ fn create_require(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
 
 const OPS: &str = "__bun_intrinsics_ops__";
 
-/// Installs the builtin modules: evaluates js/intrinsics.ts with the native operations above.
+fn eval_script(path: &[u8], source: &[u8], context: &mut Context) -> JsResult<JsValue> {
+    let source = crate::transpile::transpile(path, source)
+        .map_err(|err| JsNativeError::syntax().with_message(err))?;
+    context.eval(Source::from_bytes(&source))
+}
+
+/// Installs the builtin modules: evaluates js/intrinsics.ts with the native operations above. Before it,
+/// js/buffer.ts puts on them what installs `Buffer` on the natives of `bun_runtime_js`.
 pub fn install(context: &mut Context) -> JsResult<()> {
     let specifiers = strings(MODULES.iter().map(|m| m.specifier), context);
     let native: Vec<JsValue> = MODULES.iter().map(|m| m.source.is_none().into()).collect();
     let native = JsArray::from_iter(native, context);
+    let error_codes = strings(bun_js::ErrorCode::ALL.iter().map(|code| code.code()), context);
+    let functions = FUNCTIONS
+        .iter()
+        .map(|f| format!("{}.{}", f.file, f.name))
+        .collect::<Vec<_>>();
+    let functions = strings(functions.iter().map(String::as_str), context);
+    let getters: Vec<JsValue> = FUNCTIONS.iter().map(|f| f.getter.into()).collect();
+    let getters = JsArray::from_iter(getters, context);
+    let global = bun_js::JSGlobalObject::from_context(context);
+    let buffer = bun_runtime_js::node::buffer::natives(global);
     let mut ops = ObjectInitializer::new(context);
     for (name, f, len) in [
         (
@@ -352,11 +397,12 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ("promiseResult", promise_result, 1),
         ("proxyField", proxy_field, 2),
         ("makeError", make_error, 2),
-        ("errorCode", error_code, 1),
         ("asyncContext", async_context, 0),
         ("setAsyncContext", set_async_context, 1),
         ("isAsyncContextTracked", is_async_context_tracked, 0),
         ("createRequire", create_require, 1),
+        ("compileFunction", compile_function, 1),
+        ("functionIntrinsicNames", function_intrinsic_names, 1),
     ] {
         ops.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);
     }
@@ -366,6 +412,10 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         .map_err(|error| global.into_engine_error(error))?;
     ops.property(js_string!("specifiers"), specifiers, Attribute::all())
         .property(js_string!("native"), native, Attribute::all())
+        .property(js_string!("errorCodes"), error_codes, Attribute::all())
+        .property(js_string!("functions"), functions, Attribute::all())
+        .property(js_string!("getters"), getters, Attribute::all())
+        .property(js_string!("buffer"), buffer.into_engine(), Attribute::all())
         .property(
             js_string!("StringDecoder"),
             string_decoder.into_engine(),
@@ -395,10 +445,12 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         context,
     )?;
     context.register_global_property(JsString::from(OPS), ops.clone(), Attribute::all())?;
-    let source =
-        crate::transpile::transpile(b"bun:intrinsics.ts", include_bytes!("js/intrinsics.ts"))
-            .map_err(|err| JsNativeError::syntax().with_message(err))?;
-    context.eval(Source::from_bytes(&source))?;
+    eval_script(b"bun:buffer.ts", include_bytes!("js/buffer.ts"), context)?;
+    eval_script(
+        b"bun:intrinsics.ts",
+        include_bytes!("js/intrinsics.ts"),
+        context,
+    )?;
     let installed = ops.get(js_string!("installed"), context)?;
     let installed = installed
         .as_object()

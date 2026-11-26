@@ -669,3 +669,17 @@ ECONNREFUSED
     assert_eq!(stdout, expected, "stderr: {stderr}");
     assert!(out.status.success(), "stderr: {stderr}");
 }
+
+/// `Buffer` and `node:buffer`: js/buffer.ts on the encoders of bun_runtime_js, and Bun's builtin functions of
+/// src/js/builtins (`Buffer.from`, `toJSON`); node:string_decoder over `Buffer`.
+#[test]
+fn buffer_is_nodes() {
+    let out = bun()
+        .args(["test", "buffer.test.ts"])
+        .current_dir(fixtures().join("buffer"))
+        .output()
+        .unwrap();
+    let all = format!("{}{}", text(&out).0, text(&out).1);
+    assert!(all.contains(" 8 pass") && all.contains(" 0 fail"), "{all}");
+    assert!(out.status.success(), "{all}");
+}

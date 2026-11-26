@@ -4,8 +4,9 @@
     clippy::disallowed_types,
     clippy::disallowed_macros
 )]
-//! `builtins.rs` in `OUT_DIR`: Bun's builtin modules (src/js) as Boa runs them, from what
-//! src/codegen/bundle-modules.ts writes to `build/debug/js-boa` (packages/bun-boa/scripts/setup.ts asks it to).
+//! `builtins.rs` in `OUT_DIR`: Bun's builtin modules (src/js) and builtin functions (src/js/builtins) as Boa runs
+//! them, from what src/codegen/bundle-modules.ts writes to `build/debug/js-boa` (packages/bun-boa/scripts/setup.ts
+//! asks it to).
 //!
 //! A module is `(function (){"use strict"; … })` whose free `__intrinsic__<name>` identifiers JavaScriptCore reads
 //! as private names. Here each becomes a parameter of a function around it, which src/builtins.rs calls with the
@@ -115,6 +116,27 @@ fn main() {
     out.push_str("];\n\npub static CLASSES: &[&str] = &[\n");
     for class in registry["classes"].as_array().expect("classes") {
         writeln!(out, "    {:?},", class.as_str().expect("class")).unwrap();
+    }
+    out.push_str("];\n\npub static FUNCTIONS: &[Function] = &[\n");
+    // The builtin functions of src/js/builtins (`Buffer.from`, `toJSON`, …), each as a function of its intrinsics.
+    let functions = dir.join("functions.json");
+    println!("cargo:rerun-if-changed={}", functions.display());
+    let functions = fs::read_to_string(&functions)
+        .unwrap_or_else(|e| panic!("{}: {e} — run packages/bun-boa/scripts/setup.ts first", functions.display()));
+    let functions: serde_json::Value = serde_json::from_str(&functions).expect("functions.json is JSON");
+    for function in functions.as_array().expect("functions") {
+        let file = function["file"].as_str().expect("file");
+        let name = function["name"].as_str().expect("name");
+        let source = function["source"].as_str().expect("source");
+        let names: Vec<&str> = free_intrinsics(source).into_iter().collect();
+        let params: Vec<String> = names.iter().map(|name| format!("{PREFIX}{name}")).collect();
+        let wrapped = format!("(function ({}) {{ return {} }})", params.join(", "), source.trim_end());
+        writeln!(
+            out,
+            "    Function {{ file: {file:?}, name: {name:?}, source: {wrapped:?}, intrinsics: &{names:?}, getter: {} }},",
+            function["getter"].as_bool() == Some(true),
+        )
+        .unwrap();
     }
     out.push_str("];\n");
     fs::write(

@@ -648,3 +648,49 @@ fn initialize_sees_the_instance() {
         );
     });
 }
+
+#[test]
+fn array_buffers_and_string_units() {
+    use bun_js::{StringUnits, TypedArrayType};
+    JSGlobalObject::with_new(|global| {
+        let view = eval(global, "globalThis.u16 = new Uint16Array([1, 0x203]).subarray(1); u16");
+        let bytes = view.as_array_buffer(global).unwrap().unwrap();
+        assert_eq!(bytes.typed_array_type(), TypedArrayType::Uint16Array);
+        assert_eq!((bytes.byte_offset(), bytes.byte_len(), bytes.len()), (2, 2, 1));
+        assert_eq!(bytes.with_bytes(<[u8]>::to_vec), [3, 2]);
+        bytes.with_bytes_mut(|b| b[0] = 9);
+        assert_eq!(eval(global, "u16[0]").as_number(), f64::from(0x209));
+
+        let data = eval(global, "new DataView(new ArrayBuffer(4), 1, 2)");
+        let data = data.as_array_buffer(global).unwrap().unwrap();
+        assert_eq!((data.typed_array_type(), data.byte_len()), (TypedArrayType::DataView, 2));
+        let buffer = eval(global, "u16.buffer").as_array_buffer(global).unwrap().unwrap();
+        assert_eq!((buffer.typed_array_type(), buffer.byte_len()), (TypedArrayType::ArrayBuffer, 4));
+        assert!(buffer.same_buffer(&bytes) && !buffer.same_buffer(&data));
+        let shared = eval(global, "globalThis.shared = new Uint8Array(new SharedArrayBuffer(4), 1, 2); shared");
+        let shared = shared.as_array_buffer(global).unwrap().unwrap();
+        assert!(shared.is_shared());
+        shared.with_bytes_mut(|b| b.copy_from_slice(&[7, 8]));
+        assert_eq!(eval(global, "[...new Uint8Array(shared.buffer)].join()").as_string().as_deref(), Some("0,7,8,0"));
+
+        let detached = eval(global, "const d = new Uint8Array(4); d.buffer.transfer(); d");
+        let detached = detached.as_array_buffer(global).unwrap().unwrap();
+        assert!(detached.is_detached() && detached.with_bytes(<[u8]>::is_empty));
+        assert!(eval(global, "({})").as_array_buffer(global).unwrap().is_none());
+
+        let made = JSValue::create_uint8_array(global, &[1, 2, 3]).unwrap();
+        let made = made.as_array_buffer(global).unwrap().unwrap();
+        assert_eq!(made.with_bytes(<[u8]>::to_vec), [1, 2, 3]);
+
+        let units = |value: &JSValue| {
+            value.with_string_units(|units| match units {
+                StringUnits::Latin1(units) => format!("latin1 {units:?}"),
+                StringUnits::Utf16(units) => format!("utf16 {units:?}"),
+            })
+        };
+        assert_eq!(units(&JSValue::from_latin1(&[0xe9])).as_deref(), Some("latin1 [233]"));
+        assert_eq!(JSValue::from_latin1(&[0xe9]).as_string().as_deref(), Some("é"));
+        assert_eq!(units(&eval(global, "'€'")).as_deref(), Some("utf16 [8364]"));
+        assert_eq!(units(&JSValue::js_number(1.0)), None);
+    });
+}

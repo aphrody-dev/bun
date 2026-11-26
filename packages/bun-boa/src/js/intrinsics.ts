@@ -18,7 +18,8 @@
   proxyField(proxy: object, field: 0 | 1): object | null | undefined;
   makeError(code: number, message: string): Error;
   createRequire(dir: string): (specifier: string) => unknown;
-  errorCode(code: number): string;
+  /** The `code` of each `Bun::ErrorCode`, by its number ("ERR_INVALID_ARG_TYPE"). */
+  errorCodes: string[];
   /** The realm's async context (bun_js): what `$asyncContext`'s internal field 0 holds. */
   asyncContext(): unknown;
   setAsyncContext(value: unknown): void;
@@ -30,6 +31,14 @@
   specifiers: string[];
   native: boolean[];
   StringDecoder: new (encoding?: unknown) => object;
+  /** The builtin functions of src/js/builtins, as `<file>.<name>`, and which of them are `$getter`s. */
+  functions: string[];
+  getters: boolean[];
+  compileFunction(id: number): (...intrinsics: unknown[]) => Function;
+  functionIntrinsicNames(id: number): string[];
+  /** bun_runtime_js's natives of `Buffer`, and what js/buffer.ts installs it with. */
+  buffer: object;
+  installBuffer(env: object): Record<string, unknown>;
   installed?: { require(id: number): unknown; esm(id: number): [string, unknown][] };
 }) {
   const G = globalThis as any;
@@ -234,9 +243,11 @@
     ERR_USE_AFTER_CLOSE: what => `${what} was closed`,
     ERR_INVALID_URL_SCHEME: scheme => `The URL must be of scheme ${scheme}`,
     ERR_DIR_CLOSED: () => "Directory handle was closed",
+    ERR_BUFFER_OUT_OF_BOUNDS: name =>
+      name ? `"${name}" is outside of buffer bounds` : "Attempt to access memory outside buffer bounds",
   };
   function makeErrorWithCode(code: number, ...args: unknown[]) {
-    const format = MESSAGES[native.errorCode(code)];
+    const format = MESSAGES[native.errorCodes[code]];
     return native.makeError(code, format ? format(...args) : args.map(arg => stringOf(arg)).join(" "));
   }
   function makeAbortError(message = "The operation was aborted", options?: { cause?: unknown }) {
@@ -278,6 +289,8 @@
   // `this`, so this function stands in front of the Rust class (src/runtime_js/node/string_decoder.rs).
   function stringDecoder(Native: new (encoding?: unknown) => object) {
     const StringDecoder = function StringDecoder(this: unknown) {
+      // `StringDecoder(encoding)` is given an undefined `this`, not globalThis.
+      "use strict";
       const encoding = arguments[0];
       if (new.target) return Reflect.construct(Native, [encoding], new.target);
       const decoder: any = new Native(encoding);
@@ -302,7 +315,7 @@
   const NATIVE_MODULES: Record<string, () => unknown> = {
     "bun": () => G.Bun,
     "node:process": () => G.process,
-    "node:buffer": () => ({ Buffer: G.Buffer, kMaxLength: 2 ** 32, constants: { MAX_LENGTH: 2 ** 32 } }),
+    "node:buffer": () => bufferModule,
     "node:util/types": () => utilTypes,
     // Node's lib/constants.js: the os constants flattened, then fs's and crypto's.
     "node:constants": () => {
@@ -394,8 +407,8 @@
     isProxy: (v: unknown) => brand(v) === "Proxy",
     isDataView: (v: unknown) => brand(v) === "DataView",
     isArrayBuffer: (v: unknown) => brand(v) === "ArrayBuffer",
-    isAnyArrayBuffer: (v: unknown) => brand(v) === "ArrayBuffer" || v instanceof SharedArrayBuffer,
-    isSharedArrayBuffer: (v: unknown) => v instanceof SharedArrayBuffer,
+    isAnyArrayBuffer: (v: unknown) => brand(v) === "ArrayBuffer" || brand(v) === "SharedArrayBuffer",
+    isSharedArrayBuffer: (v: unknown) => brand(v) === "SharedArrayBuffer",
     isArrayBufferView: (v: unknown) => ArrayBuffer.isView(v),
     isTypedArray,
     isUint8Array: (v: unknown) => tag(v) === "Uint8Array",
@@ -601,6 +614,8 @@
     getProxyInternalField: (proxy: object, field: 0 | 1) => native.proxyField(proxy, field),
     inherits: (id: number, value: unknown) => {
       const name = native.className(id);
+      // JSArrayBuffer is the class of a SharedArrayBuffer too.
+      if (name === "ArrayBuffer") return utilTypes.isAnyArrayBuffer(value);
       return name !== undefined && typeof G[name] === "function" && value instanceof G[name];
     },
     toClass(fn: Function, name: string, base?: Function | null) {
@@ -682,6 +697,34 @@
         configurable: true,
       });
   }
+
+  // ───────────────────────── builtin functions and Buffer ─────────────────────────
+  // A builtin function of src/js/builtins, made of the intrinsics it names, as JavaScriptCore links one.
+  function builtinFunction(file: string, name: string): Function {
+    const id = native.functions.indexOf(`${file}.${name}`);
+    if (id < 0) throw new Error(`${file}.${name} is not a builtin function`);
+    const fn = ReflectApply(native.compileFunction(id), undefined, native.functionIntrinsicNames(id).map(intrinsic));
+    if (native.getters[id]) defineProperty(fn, "name", { value: `get ${name}`, configurable: true });
+    return fn;
+  }
+  const codeNumber = (code: string) => {
+    const number = native.errorCodes.indexOf(code);
+    if (number < 0) throw new Error(`${code} is not an error code`);
+    return number;
+  };
+  // `Buffer` exists before any module of src/js is compiled: `$Buffer` is it.
+  const bufferModule = native.installBuffer({
+    natives: native.buffer,
+    makeError: (code: string, ...args: unknown[]) => makeErrorWithCode(codeNumber(code), ...args),
+    error: (code: string, message: string) => native.makeError(codeNumber(code), message),
+    specificType,
+    brand,
+    provide(Buffer: Function) {
+      intrinsics.Buffer = Buffer;
+      defineProperty(G, "Buffer", { value: Buffer, writable: true, enumerable: false, configurable: true });
+    },
+    builtinFunction,
+  });
 
   native.installed = {
     require: createInternalModuleById,

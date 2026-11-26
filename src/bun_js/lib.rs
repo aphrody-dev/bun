@@ -34,6 +34,7 @@ mod strong;
 mod value;
 mod value_ext;
 
+pub use array_buffer::{ArrayBuffer, StringUnits, TypedArrayType};
 pub use async_context::{AsyncContextJobExecutor, carry_async_context};
 pub use bun_core::JsError;
 pub use call_frame::CallFrame;

@@ -1,4 +1,5 @@
-//! Web APIs: `src/runtime/webcore` on `bun_js`. The Fetch standard: `Headers`, `Request`, `Response`, `fetch()`.
+//! Web APIs: `src/runtime/webcore` on `bun_js`. The Fetch standard: `Headers`, `Request`, `Response`, `fetch()`; the
+//! encoders of `Buffer`.
 
 #[path = "Blob.rs"]
 pub mod blob;
@@ -8,6 +9,7 @@ pub mod object_url_registry;
 pub mod form_data;
 #[path = "Body.rs"]
 pub mod body;
+pub mod encoding;
 pub mod fetch;
 pub mod headers;
 #[path = "Request.rs"]
