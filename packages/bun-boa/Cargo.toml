@@ -55,6 +55,15 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 2
 
+# Unoptimized, every operation on a vector is a call that passes it through the stack.
+[profile.dev.package.bun_simd]
+opt-level = 3
+debug-assertions = false
+[profile.dev.package.bun_simd_kernels]
+opt-level = 3
+[profile.dev.package.bun_simdutf_sys]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "fat"

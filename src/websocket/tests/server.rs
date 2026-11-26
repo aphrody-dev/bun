@@ -12,14 +12,6 @@ extern "Rust" fn __bun_crash_handler_out_of_memory() -> ! {
     panic!("out of memory");
 }
 
-/// Stands in for simdutf.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn simdutf__validate_utf8(text: *const u8, len: usize) -> bool {
-    // SAFETY: the caller passes a slice, as a pointer and a length.
-    let text = unsafe { core::slice::from_raw_parts(text, len) };
-    text.utf8_chunks().all(|chunk| chunk.invalid().is_empty())
-}
-
 mod reader {
     use super::*;
 

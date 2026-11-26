@@ -55,9 +55,9 @@ export const boringssl: Dependency = {
         // defines all of them. Off under ASAN so BoringSSL stays on the
         // intercepted libc heap instead of mimalloc.
         ...(!cfg.asan && { BORINGSSL_REQUIRE_MEMORY_HOOKS: true }),
-        // Certificates/CRLs/public keys in PEM decode through simdutf
-        // (src/simdutf_sys/bun-simdutf.cpp) instead of the constant-time path
-        // that private keys keep.
+        // Certificates/CRLs/public keys in PEM decode through
+        // src/simdutf_sys/pem.rs instead of the constant-time path that
+        // private keys keep.
         BORINGSSL_PEM_FAST_PUBLIC_BASE64: true,
         ...(cfg.windows && {
           _HAS_EXCEPTIONS: 0,

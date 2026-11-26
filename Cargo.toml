@@ -555,6 +555,8 @@ debug-assertions = false
 debug-assertions = true
 [profile.dev.package.bun_simd_kernels]
 opt-level = 3
+[profile.dev.package.bun_simdutf_sys]
+opt-level = 3
 [profile.dev.package.bun_hash]
 opt-level = 3
 codegen-units = 1
@@ -563,6 +565,8 @@ codegen-units = 1
 [profile.release.package.bun_simd]
 debug-assertions = false
 [profile.release.package.bun_simd_kernels]
+codegen-units = 1
+[profile.release.package.bun_simdutf_sys]
 codegen-units = 1
 [profile.release.package.bun_hash]
 codegen-units = 1

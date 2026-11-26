@@ -1,6 +1,7 @@
 // when we don't want to use @cInclude, we can just stick wrapper functions here
 #include "root.h"
 #include "OwnedFd.h"
+#include <wtf/SIMDUTF.h>
 #include <cstdio>
 #include <cstdlib>
 
@@ -34,9 +35,12 @@
 #include <wtf/Threading.h>
 #endif // !OS(WINDOWS)
 
+// WebKit's simdutf answers false to everything on a CPU that none of its kernels supports.
 // Runs before Output and the Windows env block are initialized, so it uses the CRT.
-extern "C" [[noreturn]] void bun_abort_missing_simd()
+extern "C" void bun_abort_unless_simdutf_runs()
 {
+    if (simdutf::validate_ascii("a", 1))
+        return;
 #if CPU(X86_64)
     fputs("error: this CPU is missing SSE4.2 support, which Bun requires.\n"
           "  If this is a VM, enable host CPU passthrough (e.g. -cpu host for QEMU/KVM).\n",
