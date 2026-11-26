@@ -233,6 +233,10 @@ fn try_from_js_object_clone(
         return clone_regexp(object, regexp, seen, context);
     } else if let Ok(_dataview) = JsDataView::from_object(object.clone()) {
         return Err(js_error!(TypeError: "Data views are not supported yet."));
+    } else if let Some(serialized) = super::host::serialize(object, context)? {
+        let store = JsValueStore::new(ValueStoreInner::Host(serialized));
+        seen.insert(object, store.clone());
+        return Ok(store);
     } else if object.is_callable() {
         // Functions are invalid.
         return Err(unsupported_type());

@@ -10,7 +10,10 @@ use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
 mod from;
+mod host;
 mod to;
+
+pub use host::{HostSerialized, HostSerializer, set_host_serializer};
 
 /// Maximum nesting depth allowed while converting between a [`JsValue`] and a
 /// [`JsValueStore`].
@@ -140,6 +143,9 @@ enum ValueStoreInner {
         byte_length: u64,
         byte_offset: u64,
     },
+
+    /// A platform object, as its embedder's serialization steps made it.
+    Host(Box<dyn HostSerialized>),
 
     /// Typed Array, including its kind and data.
     TypedArray {

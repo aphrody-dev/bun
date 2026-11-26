@@ -246,5 +246,12 @@ fn try_value_into_js_inner(
         ValueStoreInner::TypedArray { kind, buffer } => {
             try_into_js_typed_array(store, *kind, buffer, seen, context)
         }
+        ValueStoreInner::Host(serialized) => {
+            let value = serialized.deserialize(context)?;
+            if let Some(object) = value.as_object() {
+                seen.insert(store, object.clone());
+            }
+            Ok(value)
+        }
     }
 }
