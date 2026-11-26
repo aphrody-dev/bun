@@ -222,7 +222,7 @@ unsafe fn connect_resolved(
 unsafe fn with_tls(s: *mut us_socket_t, ssl_ctx: *mut c_void, host: Option<&CStr>) -> *mut us_socket_t {
     if !s.is_null() && !ssl_ctx.is_null() {
         // SAFETY: a socket just made, and the caller's context.
-        unsafe { crate::tls::attach(s, ssl_ctx.cast(), host) };
+        unsafe { crate::tls::attach_client(s, ssl_ctx.cast(), host) };
     }
     s
 }
@@ -427,7 +427,7 @@ pub(crate) unsafe fn us_internal_socket_after_open(s: *mut us_socket_t, error: c
         if (*s).ssl.is_null() {
             us_dispatch_open(s, 1, ptr::null_mut(), 0);
         } else {
-            crate::tls::on_open(s);
+            crate::tls::on_open(s, true, ptr::null_mut(), 0);
         }
     }
 }

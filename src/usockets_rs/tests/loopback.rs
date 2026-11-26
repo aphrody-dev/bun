@@ -83,12 +83,23 @@ unsafe extern "C" {
     fn us_socket_close(s: *mut Socket, code: c_int, reason: *mut c_void) -> *mut Socket;
     fn us_socket_kind(s: *mut Socket) -> u8;
     fn us_socket_ext(s: *mut Socket) -> *mut c_void;
+    fn us_socket_get_native_handle(s: *mut Socket) -> *mut c_void;
+
+    fn us_ssl_ctx_from_options(options: bun_uws_sys::BunSocketContextOptions, err: *mut c_int) -> *mut c_void;
+    fn SSL_CTX_free(ctx: *mut c_void);
+    fn SSL_get_SSL_CTX(ssl: *mut c_void) -> *mut c_void;
+    fn SSL_set_tlsext_host_name(ssl: *mut c_void, name: *const c_char) -> c_int;
+    fn SSL_get_servername(ssl: *mut c_void, kind: c_int) -> *const c_char;
+    fn SSL_session_reused(ssl: *mut c_void) -> c_int;
+    fn us_listen_socket_add_server_name(ls: *mut c_void, pattern: *const c_char, ctx: *mut c_void);
 }
 
 const SERVER: u8 = 100;
 const CLIENT: u8 = 101;
 const ADOPTED: u8 = 102;
 const IPC: u8 = 103;
+const TLS_SERVER: u8 = 110;
+const TLS_CLIENT: u8 = 111;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Event {
@@ -99,6 +110,8 @@ enum Event {
     ConnectError(c_int),
     ConnectingError(c_int),
     End(u8),
+    /// The kind, whether it succeeded, the verify error, and whether the session was resumed.
+    Handshake(u8, bool, c_int, bool),
 }
 
 thread_local! {
@@ -106,6 +119,10 @@ thread_local! {
     /// Where an accepted socket is adopted to, if anywhere.
     static ADOPT_INTO: RefCell<Option<usize>> = const { RefCell::new(None) };
     static ADOPTED_EXT: RefCell<Option<usize>> = const { RefCell::new(None) };
+    /// The SNI that TLS clients send.
+    static SNI: RefCell<Option<CString>> = const { RefCell::new(None) };
+    /// What the last TLS server's handshake saw: the client's name, and its SSL's context.
+    static SERVER_SAW: RefCell<Option<(Option<String>, usize)>> = const { RefCell::new(None) };
 }
 
 fn record(event: Event) {
@@ -130,6 +147,12 @@ unsafe extern "C" fn us_dispatch_open(s: *mut Socket, is_client: c_int, _ip: *mu
     if kind == CLIENT {
         write(s, b"hello");
     }
+    if kind == TLS_CLIENT
+        && let Some(name) = SNI.with(|n| n.borrow().clone())
+    {
+        // SAFETY: a TLS socket's SSL.
+        unsafe { SSL_set_tlsext_host_name(us_socket_get_native_handle(s), name.as_ptr()) };
+    }
     if kind == SERVER
         && let Some(group) = ADOPT_INTO.with(|a| *a.borrow())
     {
@@ -150,9 +173,9 @@ unsafe extern "C" fn us_dispatch_data(s: *mut Socket, data: *mut c_char, len: c_
     let (kind, data) = unsafe { (us_socket_kind(s), core::slice::from_raw_parts(data.cast::<u8>(), len as usize).to_vec()) };
     record(Event::Data(kind, data.clone()));
     match kind {
-        SERVER | ADOPTED => write(s, &[b"echo:".as_slice(), &data].concat()),
+        SERVER | ADOPTED | TLS_SERVER => write(s, &[b"echo:".as_slice(), &data].concat()),
         // SAFETY: as above.
-        CLIENT => unsafe {
+        CLIENT | TLS_CLIENT => unsafe {
             us_socket_close(s, 0, ptr::null_mut());
         },
         _ => {}
@@ -218,7 +241,28 @@ extern "C" fn us_dispatch_connecting_error(c: *mut c_void, code: c_int) -> *mut 
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn us_dispatch_handshake(_s: *mut Socket, _ok: c_int, _err: VerifyError) {}
+unsafe extern "C" fn us_dispatch_handshake(s: *mut Socket, ok: c_int, err: VerifyError) {
+    // SAFETY: the loop's live TLS socket and its SSL.
+    unsafe {
+        let kind = us_socket_kind(s);
+        let ssl = us_socket_get_native_handle(s);
+        record(Event::Handshake(kind, ok != 0, err.error, SSL_session_reused(ssl) != 0));
+        if kind == TLS_SERVER {
+            let name = SSL_get_servername(ssl, 0);
+            let name = (!name.is_null()).then(|| core::ffi::CStr::from_ptr(name).to_string_lossy().into_owned());
+            SERVER_SAW.with(|saw| *saw.borrow_mut() = Some((name, SSL_get_SSL_CTX(ssl) as usize)));
+        }
+        if kind == TLS_CLIENT && ok != 0 {
+            write(s, b"hello");
+        }
+    }
+}
+
+/// The owner of adopted TLS server sockets: none here.
+#[unsafe(no_mangle)]
+extern "C" fn us_dispatch_socket_server_name(_s: *mut Socket, _name: *const c_char, _abort: *mut c_int) -> *mut c_void {
+    ptr::null_mut()
+}
 
 #[unsafe(no_mangle)]
 #[linkage = "weak"]
@@ -397,4 +441,201 @@ fn ipc_passes_an_fd_with_its_message() {
     let data_at = events.iter().position(|e| *e == Event::Data(IPC, b"x".to_vec())).unwrap();
     assert!(fd_at < data_at, "on_fd comes before the message it came with: {events:?}");
     h.close_all();
+}
+
+// ── TLS ────────────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+struct Tls<'a> {
+    cert: Option<&'a str>,
+    key: Option<&'a str>,
+    ca: Option<&'a str>,
+    passphrase: Option<&'a str>,
+    request_cert: bool,
+    reject_unauthorized: bool,
+}
+
+fn fixture(name: &str) -> CString {
+    let path = format!("{}/tests/fixtures/tls/{name}", env!("CARGO_MANIFEST_DIR"));
+    CString::new(std::fs::read(path).unwrap()).unwrap()
+}
+
+/// An SSL context from these options, through `us_ssl_ctx_from_options` as `bun_uws_sys` calls it; null if it
+/// failed.
+fn tls_ctx(tls: Tls<'_>) -> *mut c_void {
+    let [cert, key, ca] = [tls.cert, tls.key, tls.ca].map(|name| name.map(fixture));
+    let [cert, key, ca] = [&cert, &key, &ca].map(|pem| pem.as_ref().map(|pem| pem.as_ptr()));
+    let passphrase = tls.passphrase.map(|p| CString::new(p).unwrap());
+    let mut options = bun_uws_sys::BunSocketContextOptions::default();
+    if let Some(cert) = &cert {
+        options.cert = cert;
+        options.cert_count = 1;
+    }
+    if let Some(key) = &key {
+        options.key = key;
+        options.key_count = 1;
+    }
+    if let Some(ca) = &ca {
+        options.ca = ca;
+        options.ca_count = 1;
+    }
+    options.passphrase = passphrase.as_ref().map_or(ptr::null(), |p| p.as_ptr());
+    options.request_cert = c_int::from(tls.request_cert);
+    options.reject_unauthorized = c_int::from(tls.reject_unauthorized);
+    let mut error = 0;
+    // SAFETY: options whose strings outlive the call.
+    unsafe { us_ssl_ctx_from_options(options, &mut error) }
+}
+
+fn server_ctx() -> *mut c_void {
+    let ctx = tls_ctx(Tls { cert: Some("server.crt"), key: Some("server-key.txt"), ..Tls::default() });
+    assert!(!ctx.is_null());
+    ctx
+}
+
+fn client_ctx() -> *mut c_void {
+    let ctx = tls_ctx(Tls { ca: Some("ca.crt"), ..Tls::default() });
+    assert!(!ctx.is_null());
+    ctx
+}
+
+fn listen_tls(h: &Harness, ctx: *mut c_void) -> (*mut c_void, c_int) {
+    let mut error = 0;
+    // SAFETY: the harness's group and a live context.
+    let ls = unsafe { us_socket_group_listen(h.server, TLS_SERVER, ctx, c"127.0.0.1".as_ptr(), 0, 0, 0, &mut error) };
+    assert!(!ls.is_null(), "listen: errno {error}");
+    // SAFETY: a live listener.
+    (ls, unsafe { us_listen_socket_port(ls) })
+}
+
+fn connect_tls(h: &Harness, ctx: *mut c_void, port: c_int) {
+    let mut resolved = 0;
+    // SAFETY: the harness's group and a live context.
+    let s = unsafe {
+        us_socket_group_connect(h.client, TLS_CLIENT, ctx, c"127.0.0.1".as_ptr(), port, ptr::null(), 0, 0, 0, &mut resolved)
+    };
+    assert!(!s.is_null());
+}
+
+fn received_tls_echo(events: &[Event]) -> bool {
+    events.contains(&Event::Data(TLS_CLIENT, b"echo:hello".to_vec())) && events.contains(&Event::Close(TLS_CLIENT))
+}
+
+fn handshakes(kind: u8) -> Vec<Event> {
+    events().into_iter().filter(|e| matches!(e, Event::Handshake(k, ..) if *k == kind)).collect()
+}
+
+fn free_ctxs(ctxs: &[*mut c_void]) {
+    for &ctx in ctxs {
+        // SAFETY: the test's refs.
+        unsafe { SSL_CTX_free(ctx) };
+    }
+}
+
+#[test]
+fn tls_server_and_client_echo() {
+    let h = Harness::new();
+    SNI.with(|n| *n.borrow_mut() = None);
+    let server = tls_ctx(Tls {
+        cert: Some("server.crt"),
+        key: Some("server-key-encrypted.txt"),
+        passphrase: Some("hunter2"),
+        ..Tls::default()
+    });
+    assert!(!server.is_null(), "the key opens with its passphrase");
+    let wrong = Tls { cert: Some("server.crt"), key: Some("server-key-encrypted.txt"), passphrase: Some("nope"), ..Tls::default() };
+    assert!(tls_ctx(wrong).is_null());
+    let client = client_ctx();
+    let (_ls, port) = listen_tls(&h, server);
+    connect_tls(&h, client, port);
+    h.run_until(received_tls_echo);
+    assert!(events().contains(&Event::Data(TLS_SERVER, b"hello".to_vec())), "{:?}", events());
+    assert_eq!(handshakes(TLS_CLIENT), [Event::Handshake(TLS_CLIENT, true, 0, false)]);
+    // A server that asks for no certificate gets none: X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT, as BoringSSL's.
+    assert_eq!(handshakes(TLS_SERVER), [Event::Handshake(TLS_SERVER, true, 2, false)]);
+    h.run_until(|e| e.contains(&Event::End(TLS_SERVER)) && e.contains(&Event::Close(TLS_SERVER)));
+
+    // Without the CA the handshake still finishes, and the owner reads why the chain does not verify.
+    EVENTS.with(|e| e.borrow_mut().clear());
+    let untrusting = tls_ctx(Tls::default());
+    connect_tls(&h, untrusting, port);
+    h.run_until(received_tls_echo);
+    assert_eq!(handshakes(TLS_CLIENT), [Event::Handshake(TLS_CLIENT, true, 20, false)]);
+    h.close_all();
+    free_ctxs(&[server, client, untrusting]);
+}
+
+#[test]
+fn client_certificates_reach_the_server() {
+    let h = Harness::new();
+    SNI.with(|n| *n.borrow_mut() = None);
+    let server = tls_ctx(Tls {
+        cert: Some("server.crt"),
+        key: Some("server-key.txt"),
+        ca: Some("ca.crt"),
+        request_cert: true,
+        reject_unauthorized: true,
+        ..Tls::default()
+    });
+    let client = tls_ctx(Tls { cert: Some("client.crt"), key: Some("client-key.txt"), ca: Some("ca.crt"), ..Tls::default() });
+    assert!(!server.is_null() && !client.is_null());
+    let (_ls, port) = listen_tls(&h, server);
+    connect_tls(&h, client, port);
+    h.run_until(received_tls_echo);
+    assert_eq!(handshakes(TLS_SERVER), [Event::Handshake(TLS_SERVER, true, 0, false)]);
+
+    // reject_unauthorized with request_cert: a client without a certificate fails the server's handshake.
+    EVENTS.with(|e| e.borrow_mut().clear());
+    let anonymous = client_ctx();
+    connect_tls(&h, anonymous, port);
+    h.run_until(|e| e.iter().any(|e| matches!(e, Event::Handshake(TLS_SERVER, false, ..))) && e.contains(&Event::Close(TLS_CLIENT)));
+    assert!(!events().contains(&Event::Data(TLS_SERVER, b"hello".to_vec())), "{:?}", events());
+    h.close_all();
+    free_ctxs(&[server, client, anonymous]);
+}
+
+#[test]
+fn sessions_resume_through_the_context() {
+    let h = Harness::new();
+    SNI.with(|n| *n.borrow_mut() = None);
+    let (server, client) = (server_ctx(), client_ctx());
+    let (_ls, port) = listen_tls(&h, server);
+    connect_tls(&h, client, port);
+    h.run_until(received_tls_echo);
+    EVENTS.with(|e| e.borrow_mut().clear());
+    connect_tls(&h, client, port);
+    h.run_until(received_tls_echo);
+    assert_eq!(handshakes(TLS_CLIENT), [Event::Handshake(TLS_CLIENT, true, 0, true)]);
+    assert!(handshakes(TLS_SERVER).iter().all(|e| matches!(e, Event::Handshake(_, true, _, true))), "{:?}", events());
+    h.close_all();
+    free_ctxs(&[server, client]);
+}
+
+#[test]
+fn sni_picks_the_context_of_the_name() {
+    let h = Harness::new();
+    let server = server_ctx();
+    let named = tls_ctx(Tls { cert: Some("sni.crt"), key: Some("sni-key.txt"), ..Tls::default() });
+    assert!(!named.is_null());
+    let client = client_ctx();
+    let (ls, port) = listen_tls(&h, server);
+    // SAFETY: a live TLS listener and context.
+    unsafe { us_listen_socket_add_server_name(ls, c"*.sni.test".as_ptr(), named) };
+
+    SNI.with(|n| *n.borrow_mut() = Some(c"a.sni.test".to_owned()));
+    connect_tls(&h, client, port);
+    h.run_until(received_tls_echo);
+    assert_eq!(handshakes(TLS_CLIENT), [Event::Handshake(TLS_CLIENT, true, 0, false)], "*.sni.test's certificate");
+    assert_eq!(SERVER_SAW.with(|s| s.borrow().clone()), Some((Some("a.sni.test".to_owned()), named as usize)));
+
+    // A name that no pattern has gets the listener's context, whose certificate is not for it.
+    EVENTS.with(|e| e.borrow_mut().clear());
+    SNI.with(|n| *n.borrow_mut() = Some(c"other.test".to_owned()));
+    connect_tls(&h, client, port);
+    h.run_until(received_tls_echo);
+    assert_eq!(handshakes(TLS_CLIENT), [Event::Handshake(TLS_CLIENT, true, 62, false)]);
+    assert_eq!(SERVER_SAW.with(|s| s.borrow().clone()), Some((Some("other.test".to_owned()), server as usize)));
+    SNI.with(|n| *n.borrow_mut() = None);
+    h.close_all();
+    free_ctxs(&[server, named, client]);
 }

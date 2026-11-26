@@ -4,8 +4,9 @@
 //!
 //! What it has: the loop on epoll (wakeups, ready-poll dispatch, the timeout sweep, `Bun__internal_dispatch_ready_poll`
 //! for `bun_io`'s polls), TCP and Unix-socket clients (connect, read, write, timeouts, shutdown, close) and listeners
-//! (`listen.rs`), sockets on an fd and IPC fd passing, adoption (`adopt.rs`), TLS clients on rustls (`tls.rs`), and
-//! name resolution through a cache of results on a thread pool (`dns.rs`, `Bun__addrinfo_*`). It has no UDP or QUIC (those entry points fail), and no kqueue.
+//! (`listen.rs`), sockets on an fd and IPC fd passing, adoption (`adopt.rs`), TLS on rustls for clients and servers
+//! with SNI (`tls.rs`, `sni.rs`), and name resolution through a cache of results on a thread pool (`dns.rs`,
+//! `Bun__addrinfo_*`). It has no UDP or QUIC (those entry points fail), and no kqueue.
 #![cfg(any(target_os = "linux", target_os = "android"))]
 #![allow(non_camel_case_types, clippy::missing_safety_doc)]
 
@@ -18,6 +19,7 @@ mod context;
 mod dns;
 mod listen;
 mod eventing;
+mod sni;
 mod socket;
 mod tls;
 mod unsupported;
@@ -258,6 +260,9 @@ unsafe extern "C" {
     pub(crate) fn us_dispatch_connect_error(s: *mut us_socket_t, code: c_int) -> *mut us_socket_t;
     pub(crate) fn us_dispatch_connecting_error(c: *mut us_connecting_socket_t, code: c_int) -> *mut us_connecting_socket_t;
     pub(crate) fn us_dispatch_handshake(s: *mut us_socket_t, success: c_int, err: us_bun_verify_error_t);
+    /// The context for a name, for a server-side socket adopted into TLS: a ref, or null. `*abort` 1 drops the
+    /// connection, 2 waits for `us_socket_sni_resolve`.
+    pub(crate) fn us_dispatch_socket_server_name(s: *mut us_socket_t, hostname: *const c_char, abort: *mut c_int) -> *mut tls::SslCtx;
 
     /// `bun_io`'s polls, whose pointers in the epoll set are tagged.
     pub(crate) fn Bun__internal_dispatch_ready_poll(loop_: *mut us_loop_t, poll: *mut c_void);

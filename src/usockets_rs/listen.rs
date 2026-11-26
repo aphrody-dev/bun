@@ -18,11 +18,6 @@ unsafe fn start_listener(
 ) -> *mut us_listen_socket_t {
     // SAFETY: the caller's initialized group and listening fd.
     unsafe {
-        if !ssl_ctx.is_null() {
-            crate::bsd::close(fd);
-            *error = libc::EPROTONOSUPPORT;
-            return ptr::null_mut();
-        }
         let loop_ = (*group).loop_;
         let size = core::mem::size_of::<us_listen_socket_t>();
         let ls = us_create_poll(loop_, false, size).cast::<us_listen_socket_t>();
@@ -43,7 +38,12 @@ unsafe fn start_listener(
         (*ls).accept_group = group;
         (*ls).accept_kind = kind;
         (*ls).socket_ext_size = socket_ext_size.max(0) as c_uint;
-        (*ls).accept_paused = options & LIBUS_SOCKET_OPEN_PAUSED != 0 && (*ls).ssl_ctx.is_null();
+        (*ls).ssl_ctx = ssl_ctx.cast();
+        (*ls).server_names = ptr::null_mut();
+        if !ssl_ctx.is_null() {
+            crate::tls::SSL_CTX_up_ref(ssl_ctx.cast());
+        }
+        (*ls).accept_paused = options & LIBUS_SOCKET_OPEN_PAUSED != 0 && ssl_ctx.is_null();
         (*ls).next = (*group).head_listen_sockets.cast();
         (*group).head_listen_sockets = ls.cast();
         crate::context::group_touched(group);
@@ -142,6 +142,7 @@ pub unsafe extern "C" fn us_listen_socket_close(ls: *mut us_listen_socket_t) {
         let loop_ = (*(*s).group).loop_;
         us_poll_stop(&mut (*s).p, loop_);
         crate::bsd::close((*s).p.fd);
+        crate::sni::listener_free(ls);
         let mut link = (&raw mut (*group).head_listen_sockets).cast::<*mut us_listen_socket_t>();
         while !(*link).is_null() {
             if *link == ls {
@@ -229,7 +230,12 @@ pub(crate) unsafe fn on_readable(ls: *mut us_listen_socket_t) {
             crate::socket::group_link_socket(group, s);
 
             let (mut ip, ip_len) = crate::bsd::ip_bytes(&addr);
-            us_dispatch_open(s, 0, ip.as_mut_ptr().cast(), ip_len as c_int);
+            if (*ls).ssl_ctx.is_null() {
+                us_dispatch_open(s, 0, ip.as_mut_ptr().cast(), ip_len as c_int);
+            } else {
+                crate::tls::attach_server(s, (*ls).ssl_ctx, ls);
+                crate::tls::on_open(s, false, ip.as_mut_ptr().cast(), ip_len as c_int);
+            }
             s = crate::socket::follow_adopted(s);
             // With TCP_DEFER_ACCEPT the request is already there.
             if (*ls).deferred_accept && !s.is_null() && !(*s).is_closed {

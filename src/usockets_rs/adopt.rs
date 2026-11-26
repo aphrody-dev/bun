@@ -111,7 +111,7 @@ pub unsafe extern "C" fn us_socket_from_fd(
         crate::bsd::set_nonblocking_cloexec(fd);
         group_link_socket(group, s);
         if !ssl_ctx.is_null() {
-            crate::tls::attach(s, ssl_ctx.cast(), None);
+            crate::tls::attach_client(s, ssl_ctx.cast(), None);
         }
         s
     }

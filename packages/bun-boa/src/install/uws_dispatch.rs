@@ -125,3 +125,10 @@ us_dispatch_shims! {
     fn us_dispatch_handshake(s: *mut us_socket_t, ok: c_int, err: us_bun_verify_error_t) -> ()
         = vt.on_handshake(s, ok, err, core::ptr::null_mut()) or ();
 }
+
+/// bun_runtime's `Listener.rs` answers for TLS server sockets with an SNICallback, which this build never makes: no
+/// context, so the listener's are used.
+#[unsafe(no_mangle)]
+extern "C" fn us_dispatch_socket_server_name(_s: *mut us_socket_t, _hostname: *const core::ffi::c_char, _abort: *mut c_int) -> *mut c_void {
+    core::ptr::null_mut()
+}
