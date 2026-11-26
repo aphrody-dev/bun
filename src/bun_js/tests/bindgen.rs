@@ -355,7 +355,9 @@ fn a_dictionary_that_is_returned_and_any_values() {
 #[test]
 fn natives_as_bindgen_answers_them() {
     realm(|global| {
-        let native = |symbol| generated::native(global, "fixture.bind.ts", symbol);
+        let native = |symbol| {
+            generated::native(global, "fixture.bind.ts", symbol).map(|made| made.expect("made"))
+        };
         assert!(native("nothing").is_none());
         assert!(generated::native(global, "other.bind.ts", "add").is_none());
         let add = native("add").expect("add");

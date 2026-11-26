@@ -519,7 +519,7 @@ function rustForFile(file: SchemaFile): string {
     // As C++'s `$bindgen`: a class with `construct`, an illegal one included, has its constructor exported.
     if (type.construct) {
       exports.push(`(${rustString(type.name)}, bun_js::class::constructor::<${type.rustPath}>(global)?),`);
-      natives.push(`${rustString(type.name)} => return bun_js::class::constructor::<${type.rustPath}>(global).ok(),`);
+      natives.push(`${rustString(type.name)} => return Some(bun_js::class::constructor::<${type.rustPath}>(global)),`);
     }
   }
   // As C++'s `$bindgen(file, name)`: every function by its key, those of a namespace too.
@@ -558,13 +558,12 @@ ${indent(namespaces.join("\n"), 12)}
     }
 
     /// What \`$bindgen("${file.origin.stem}.bind.ts", symbol)\` answers: the function, namespace or class constructor the
-    /// schema exports as \`symbol\`, made anew each time, as C++ does. \`None\` for a symbol it does not export, or if making
-    /// a class's constructor threw, which is then pending on \`global\`.
-    pub fn native(global: &JSGlobalObject, symbol: &str) -> Option<JSValue> {
-        Some(match symbol {
+    /// schema exports as \`symbol\`, made anew each time, as C++ does. \`None\` for a symbol it does not export.
+    pub fn native(global: &JSGlobalObject, symbol: &str) -> Option<JsResult<JSValue>> {
+        Some(Ok(match symbol {
 ${indent(natives.join("\n"), 12)}
             _ => return None,
-        })
+        }))
     }
 }
 `;
@@ -606,7 +605,7 @@ export function rustForCrate(files: readonly SchemaFile[]): string {
 ${modules}
 /// What \`$bindgen(file, symbol)\` answers: \`file\` is the schema's file name (\`node_path.bind.ts\`), \`symbol\` what it
 /// exports. See each module's \`native\`.
-pub fn native(global: &bun_js::JSGlobalObject, file: &str, symbol: &str) -> Option<bun_js::JSValue> {
+pub fn native(global: &bun_js::JSGlobalObject, file: &str, symbol: &str) -> Option<bun_js::JsResult<bun_js::JSValue>> {
     match file {
 ${indent(byFile.join("\n"), 8)}
         _ => None,

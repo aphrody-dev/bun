@@ -35,7 +35,8 @@ fn realm(f: impl FnOnce(&JSGlobalObject)) {
                     "node_path.bind.ts",
                     &symbol,
                 )
-                .unwrap_or_else(|| panic!("node_path.bind.ts exports {symbol}"));
+                .unwrap_or_else(|| panic!("node_path.bind.ts exports {symbol}"))
+                .expect("made");
                 platform.put(global, name, native);
             }
             this.put(global, object, platform.to_js());
@@ -93,8 +94,8 @@ fn natives_by_file_and_symbol() {
         // A type is not a value.
         assert!(node_path::native(global, "ParsedPath").is_none());
         // Each call makes a new function, as C++'s js2native does.
-        let first = node_path::native(global, "joinPosix").unwrap();
-        let second = node_path::native(global, "joinPosix").unwrap();
+        let first = node_path::native(global, "joinPosix").unwrap().unwrap();
+        let second = node_path::native(global, "joinPosix").unwrap().unwrap();
         assert!(!first.is_strict_equal(second, global).unwrap());
     });
 }
