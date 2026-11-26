@@ -37,7 +37,7 @@ await Bun.write(list, changed.join("\n") + "\n");
 await $`rsync -az --files-from=${list} ${`${repo}/`} ${`${host}:${remoteRepo}/`}`;
 // Files the branch deleted still exist at the base commit the host checked out: delete them there too.
 const deleted = (await $`git -C ${repo} diff --name-only --diff-filter=D ${head}`.text()).split("\n").filter(Boolean);
-if (deleted.length) await $`ssh -o BatchMode=yes ${host} ${`cd ${remoteRepo} && xargs -0 rm -f`}`.stdin(Buffer.from(deleted.join("\0")));
+if (deleted.length) await $`ssh -o BatchMode=yes ${host} ${`cd ${remoteRepo} && xargs -0 rm -f`} < ${Buffer.from(deleted.join("\0"))}`;
 
 const env = {
   CARGO_HOME: `${xfs}/cargo-home`,
