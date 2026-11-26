@@ -314,6 +314,9 @@ pub enum RuntimeLimitError {
     /// Error for reaching the maximum stack size
     #[error("reached the maximum stack size on this execution")]
     StackSize,
+    /// The embedder asked the execution to stop ([`Context::set_interrupt`](crate::Context::set_interrupt)).
+    #[error("the execution was terminated")]
+    Terminated,
 }
 
 /// Internal panic error.
