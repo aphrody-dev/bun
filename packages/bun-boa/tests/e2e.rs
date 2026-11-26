@@ -665,6 +665,9 @@ busy 1
 exit 7
 error ["worker failed","TypeError"]
 broadcast hi!
+node main true 0
+node ["ping",{"n":1},false,true]
+node exit 0
 "#;
     assert_eq!(stdout, expected, "stderr: {stderr}");
     assert!(out.status.success(), "stderr: {stderr}");

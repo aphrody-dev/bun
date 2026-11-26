@@ -45,3 +45,13 @@ a.postMessage("hi");
 log("broadcast", await heard);
 a.close();
 b.terminate();
+
+// node:worker_threads: workerData, parentPort, isMainThread and threadId on both sides, and the exit code.
+const { Worker: NodeWorker, isMainThread, threadId } = await import("node:worker_threads");
+log("node main", isMainThread, threadId);
+const source = `const wt = require("worker_threads");
+wt.parentPort.once("message", m => wt.parentPort.postMessage([m, wt.workerData, wt.isMainThread, wt.threadId > 0]));`;
+const node = new NodeWorker(new URL("data:text/javascript," + encodeURIComponent(source)), { workerData: { n: 1 } });
+node.postMessage("ping");
+log("node", await new Promise(resolve => node.once("message", resolve)));
+log("node exit", await new Promise(resolve => node.once("exit", resolve)));
