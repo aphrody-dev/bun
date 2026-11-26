@@ -244,6 +244,38 @@ impl<'g, T: JsClass> ClassBuilder<'g, T> {
         )
     }
 
+    /// A function on the prototype that finds its payload itself (`frame.this()`), for a class whose methods also
+    /// take an object that is not an instance, as C++ that downcasts `this` its own way does.
+    pub fn prototype_function(
+        &mut self,
+        name: &'static str,
+        length: usize,
+        attributes: Attributes,
+        f: JSHostFn,
+    ) -> JsResult<()> {
+        let function = self.function(name, length, native_function(f));
+        self.define_on(
+            &self.prototype,
+            name,
+            Self::value_descriptor(function.into(), attributes),
+        )
+    }
+
+    /// A read-only accessor on the prototype whose getter finds its payload itself.
+    pub fn prototype_getter(
+        &mut self,
+        name: &'static str,
+        attributes: Attributes,
+        getter: JSHostFn,
+    ) -> JsResult<()> {
+        let descriptor = PropertyDescriptor::builder()
+            .get(self.function(&format!("get {name}"), 0, native_function(getter)))
+            .enumerable(attributes.enumerable)
+            .configurable(attributes.configurable)
+            .build();
+        self.define_on(&self.prototype, name, descriptor)
+    }
+
     /// A method on the prototype keyed by the private name `symbol`, which a builtin reads as `this.$<symbol>`: on
     /// Boa the property `__intrinsic__<symbol>`, read-only and not enumerable. `name` is the function's.
     pub fn private_method(

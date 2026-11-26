@@ -1,4 +1,4 @@
-//! The bytes of typed arrays, `DataView`s and their buffers.
+//! The bytes of typed arrays, `DataView`s and their buffers, and the `Buffer`s Rust makes.
 
 use boa_engine::object::builtins::{
     JsArrayBuffer, JsDataView, JsSharedArrayBuffer, JsTypedArray, JsUint8Array,
@@ -39,6 +39,20 @@ impl JSValue {
             return Ok(bytes.get(offset..offset + length).map(<[u8]>::to_vec));
         }
         Ok(None)
+    }
+
+    /// A `Buffer` of `bytes`, as `bun_jsc`'s `create_buffer`: a `Uint8Array` whose prototype is
+    /// `Buffer.prototype`, where the realm has `Buffer`; a plain `Uint8Array` otherwise.
+    pub fn create_buffer(global: &JSGlobalObject, bytes: &[u8]) -> JsResult<JSValue> {
+        let array = JsUint8Array::from_iter(bytes.iter().copied(), global.cx());
+        let array: JsObject = global.lift(array)?.into();
+        let buffer = global.to_js_value().get(global, "Buffer")?;
+        if let Some(prototype) = buffer.map(|buffer| buffer.get(global, "prototype")).transpose()? {
+            if let Some(prototype) = prototype.and_then(|prototype| prototype.0.as_object()) {
+                array.set_prototype(Some(prototype));
+            }
+        }
+        Ok(JSValue(array.into()))
     }
 }
 

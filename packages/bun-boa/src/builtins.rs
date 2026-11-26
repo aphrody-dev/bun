@@ -334,8 +334,17 @@ pub fn install(context: &mut Context) -> JsResult<()> {
     ] {
         ops.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);
     }
+    // The native classes of the modules js/intrinsics.ts makes (`node:string_decoder`).
+    let global = bun_js::JSGlobalObject::from_context(ops.context());
+    let string_decoder = bun_runtime_js::node::string_decoder::constructor(global)
+        .map_err(|error| global.into_engine_error(error))?;
     ops.property(js_string!("specifiers"), specifiers, Attribute::all())
-        .property(js_string!("native"), native, Attribute::all());
+        .property(js_string!("native"), native, Attribute::all())
+        .property(
+            js_string!("StringDecoder"),
+            string_decoder.into_engine(),
+            Attribute::all(),
+        );
     let ops = ops.build();
     let internal_fields = bun_js::JSGlobalObject::from_context(context).internal_fields();
     ops.set(
