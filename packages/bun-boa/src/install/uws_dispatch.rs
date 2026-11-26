@@ -1,7 +1,7 @@
-//! Socket event dispatch (src/runtime/socket/uws_dispatch.rs) for the sockets of this build: the HTTP client
-//! thread's, and those with a vtable on their group. uSockets (`bun_usockets_rs`) calls these `us_dispatch_*`.
+//! The HTTP client thread's sockets (src/runtime/socket/uws_handlers.rs's `HTTPClient`), whose kinds
+//! `bun_runtime_js::socket::uws_dispatch` sends here.
 
-use core::ffi::{c_int, c_void};
+use core::ffi::c_void;
 
 use bun_uws_sys::socket::NewSocketHandler;
 use bun_uws_sys::socket_group::VTable;
@@ -60,75 +60,15 @@ impl<const SSL: bool> VHandler for HTTPClient<SSL> {
     }
 }
 
-fn table(kind: SocketKind, group_vtable: impl FnOnce() -> Option<&'static VTable>) -> &'static VTable {
+fn kinds(kind: SocketKind) -> Option<&'static VTable> {
     match kind {
-        SocketKind::HttpClient => vtable::make::<HTTPClient<false>>(),
-        SocketKind::HttpClientTls => vtable::make::<HTTPClient<true>>(),
-        SocketKind::Dynamic => group_vtable().expect("group vtable"),
-        other => panic!("a {other:?} socket: only bun_runtime makes those"),
+        SocketKind::HttpClient => Some(vtable::make::<HTTPClient<false>>()),
+        SocketKind::HttpClientTls => Some(vtable::make::<HTTPClient<true>>()),
+        _ => None,
     }
 }
 
-fn vt(s: *mut us_socket_t) -> &'static VTable {
-    let s = us_socket_t::opaque_mut(s);
-    let kind = s.kind();
-    table(kind, || s.raw_group().vtable.get())
-}
-
-fn vtc(c: *mut ConnectingSocket) -> &'static VTable {
-    let c = ConnectingSocket::opaque_mut(c);
-    let kind = c.kind();
-    // SAFETY: a connecting socket with a kind has a group.
-    table(kind, || unsafe { (*c.raw_group()).vtable.get() })
-}
-
-macro_rules! us_dispatch_shims {
-    ($(
-        fn $name:ident($recv:ident: *mut $Recv:ty $(, $a:ident: $t:ty)* $(,)?) -> $ret:ty
-            = $lookup:ident.$field:ident($($call:expr),* $(,)?) or $default:expr;
-    )*) => {$(
-        /// # Safety
-        /// uSockets passes a live socket, and buffers that are valid for the call.
-        #[unsafe(no_mangle)]
-        #[allow(clippy::unused_unit)]
-        unsafe extern "C" fn $name($recv: *mut $Recv $(, $a: $t)*) -> $ret {
-            match $lookup($recv).$field {
-                // SAFETY: the vtable's callback for this kind, whose signature this shim has.
-                Some(f) => unsafe { f($($call),*) },
-                None => $default,
-            }
-        }
-    )*};
-}
-
-us_dispatch_shims! {
-    fn us_dispatch_open(s: *mut us_socket_t, is_client: c_int, ip: *mut u8, ip_len: c_int) -> *mut us_socket_t
-        = vt.on_open(s, is_client, ip, ip_len) or s;
-    fn us_dispatch_data(s: *mut us_socket_t, data: *mut u8, len: c_int) -> *mut us_socket_t
-        = vt.on_data(s, data, len) or s;
-    fn us_dispatch_fd(s: *mut us_socket_t, fd: c_int) -> *mut us_socket_t
-        = vt.on_fd(s, fd) or s;
-    fn us_dispatch_writable(s: *mut us_socket_t) -> *mut us_socket_t
-        = vt.on_writable(s) or s;
-    fn us_dispatch_close(s: *mut us_socket_t, code: c_int, reason: *mut c_void) -> *mut us_socket_t
-        = vt.on_close(s, code, reason) or s;
-    fn us_dispatch_timeout(s: *mut us_socket_t) -> *mut us_socket_t
-        = vt.on_timeout(s) or s;
-    fn us_dispatch_long_timeout(s: *mut us_socket_t) -> *mut us_socket_t
-        = vt.on_long_timeout(s) or s;
-    fn us_dispatch_end(s: *mut us_socket_t) -> *mut us_socket_t
-        = vt.on_end(s) or s;
-    fn us_dispatch_connect_error(s: *mut us_socket_t, code: c_int) -> *mut us_socket_t
-        = vt.on_connect_error(s, code) or s;
-    fn us_dispatch_connecting_error(c: *mut ConnectingSocket, code: c_int) -> *mut ConnectingSocket
-        = vtc.on_connecting_error(c, code) or c;
-    fn us_dispatch_handshake(s: *mut us_socket_t, ok: c_int, err: us_bun_verify_error_t) -> ()
-        = vt.on_handshake(s, ok, err, core::ptr::null_mut()) or ();
-}
-
-/// bun_runtime's `Listener.rs` answers for TLS server sockets with an SNICallback, which this build never makes: no
-/// context, so the listener's are used.
-#[unsafe(no_mangle)]
-extern "C" fn us_dispatch_socket_server_name(_s: *mut us_socket_t, _hostname: *const core::ffi::c_char, _abort: *mut c_int) -> *mut c_void {
-    core::ptr::null_mut()
+/// Sends the HTTP client's sockets here; before the package manager starts its thread.
+pub fn register() {
+    bun_runtime_js::socket::uws_dispatch::register_kinds(kinds);
 }

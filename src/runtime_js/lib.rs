@@ -1,11 +1,14 @@
 #![warn(unused_must_use)]
+// A weak `Bun__internal_dispatch_ready_poll` (socket/mod.rs).
+#![feature(linkage)]
 //! `bun_runtime`'s JS-visible APIs on `bun_js`, the engine boundary on Boa: the bodies of the `.bind.ts` schemas that
 //! the JavaScriptCore build implements in `src/runtime`, over the same engine-free crates.
 //!
 //! [`generated_bindgen::native`] is what `$bindgen(file, symbol)` answers, [`cpp`] what `$cpp(file, symbol)` and
 //! `$newCppFunction(file, symbol, length)` do, [`bun_object`] what else of `Bun` this crate implements.
 //!
-//! - [`event_loop`]: Boa's job executor with Bun's turn, over `bun_http_rs`'s reactor.
+//! - [`event_loop`]: Boa's job executor with Bun's turn, on the thread's uSockets loop.
+//! - [`socket`]: the `us_dispatch_*` of uSockets in Rust.
 //! - [`timer`]: `setTimeout`, `setInterval`, `setImmediate`.
 //! - [`webcore`]: `Blob`, `Headers`, `Request`, `Response`, `fetch()` on `bun_http_rs`'s client.
 //! - [`server`]: `Bun.serve()` on `bun_http_rs`'s server.
@@ -16,6 +19,7 @@ pub mod event_loop;
 pub mod generated_bindgen;
 pub mod node;
 pub mod server;
+pub mod socket;
 pub mod sys_js;
 pub mod test_runner;
 pub mod timer;

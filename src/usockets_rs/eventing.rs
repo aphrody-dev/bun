@@ -214,6 +214,43 @@ pub unsafe extern "C" fn us_wakeup_loop(loop_: *mut us_loop_t) {
     }
 }
 
+/// A poll that runs `cb(loop)` while `fd`, which the caller keeps open, is readable: the `us_internal_callback_t`
+/// that the loop's wakeup is, on a descriptor of the caller's (the epoll set of another reactor, for one). It is a
+/// poll of the loop, so a tick waits for it; it is not `active`, so it keeps nothing alive. Null if epoll refuses
+/// the descriptor.
+///
+/// # Safety
+/// `loop_` is this thread's live loop and `fd` an open descriptor that outlives the poll.
+pub unsafe fn us_internal_create_callback_poll(loop_: *mut us_loop_t, fd: c_int, cb: LoopCb) -> *mut us_internal_async {
+    let size = core::mem::size_of::<us_internal_async>();
+    // SAFETY: the contract of this function; the poll is zeroed memory of `size` bytes.
+    unsafe {
+        let a = us_create_poll(loop_, false, size).cast::<us_internal_async>();
+        (*a).p.fd = fd;
+        (*a).p.poll_type = POLL_TYPE_CALLBACK;
+        (*a).loop_ = loop_;
+        (*a).cb = Some(cb);
+        if us_poll_start_rc(&raw mut (*a).p, loop_, LIBUS_SOCKET_READABLE) == -1 {
+            us_poll_free(a.cast(), size, loop_);
+            return ptr::null_mut();
+        }
+        a
+    }
+}
+
+/// Stops and frees what [`us_internal_create_callback_poll`] made; the descriptor stays open.
+///
+/// # Safety
+/// `a` is a live callback poll of this thread's loop.
+pub unsafe fn us_internal_callback_poll_free(a: *mut us_internal_async) {
+    // SAFETY: the contract of this function.
+    unsafe {
+        let loop_ = (*a).loop_;
+        us_poll_stop(&raw mut (*a).p, loop_);
+        us_poll_free(a.cast(), core::mem::size_of::<us_internal_async>(), loop_);
+    }
+}
+
 // ── the sweep ──────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]

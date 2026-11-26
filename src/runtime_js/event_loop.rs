@@ -1,6 +1,7 @@
 //! Bun's event loop on Boa: Boa's job executor, with Bun's turn (src/jsc/event_loop.rs, `auto_tick` in
-//! src/runtime/jsc_hooks.rs): tasks and microtasks, then the immediates queued before the turn, then a wait for I/O
-//! (no longer than the next timer, not at all if work is queued), then the timers that are due. Microtasks run after
+//! src/runtime/jsc_hooks.rs): tasks and microtasks, then the immediates queued before the turn, then a tick of the
+//! thread's uSockets loop (no longer than the next timer, not at all if work is queued), then the timers that are
+//! due. `bun_http_rs`'s reactor is one poll of that loop, turned after each tick. Microtasks run after
 //! each callback. The process stays alive while a timer, an immediate or an I/O handle (a listening server, a request
 //! in flight) is ref'd.
 
@@ -59,8 +60,54 @@ struct Timers {
     refed_immediates: usize,
 }
 
+/// The loop's one wait: the thread's uSockets loop (`bun_uws_sys::Loop::get()`, which Bun's sockets and its HTTP
+/// client tick), with `bun_http_rs`'s mio epoll set in it as one poll while fetch and `Bun.serve` are on that reactor.
+struct Wait {
+    loop_: &'static bun_uws_sys::ThreadLoop,
+    reactor: *mut bun_usockets_rs::us_internal_async,
+}
+
+/// The reactor's turn after the tick does what its readiness asks.
+unsafe extern "C" fn reactor_ready(_: *mut bun_usockets_rs::us_loop_t) {}
+
+impl Wait {
+    fn new(reactor: &Reactor) -> std::io::Result<Wait> {
+        let loop_ = bun_uws_sys::Loop::get();
+        let raw = std::ptr::from_ref::<bun_uws_sys::Loop>(loop_).cast_mut().cast();
+        // SAFETY: this thread's loop, and the reactor's epoll set, which lives as long as the event loop.
+        let poll = unsafe { bun_usockets_rs::us_internal_create_callback_poll(raw, reactor.as_raw_fd(), reactor_ready) };
+        if poll.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Wait { loop_, reactor: poll })
+    }
+
+    /// Waits until a socket or the reactor is ready, no longer than `timeout` (`None`: as long as it takes), and runs
+    /// what uSockets dispatches.
+    fn wait(&self, timeout: Option<Duration>) {
+        let timeout = timeout.map(|t| bun_core::Timespec {
+            sec: t.as_secs() as i64,
+            nsec: i64::from(t.subsec_nanos()),
+        });
+        self.loop_.tick_with_timeout(timeout.as_ref(), bun_uws_sys::NOW_NS_UNKNOWN);
+    }
+
+    /// Whether a socket keeps the loop alive (uSockets' `active` count, which the reactor's poll is not in).
+    fn is_active(&self) -> bool {
+        self.loop_.is_active()
+    }
+}
+
+impl Drop for Wait {
+    fn drop(&mut self) {
+        // SAFETY: the poll made in `new`, on this thread's loop.
+        unsafe { bun_usockets_rs::us_internal_callback_poll_free(self.reactor) };
+    }
+}
+
 pub struct EventLoop {
     reactor: Rc<Reactor>,
+    wait: Wait,
     microtasks: RefCell<VecDeque<PromiseJob>>,
     async_jobs: RefCell<VecDeque<NativeAsyncJob>>,
     tasks: RefCell<VecDeque<Queued>>,
@@ -73,8 +120,10 @@ pub struct EventLoop {
 
 impl EventLoop {
     pub fn new() -> std::io::Result<Rc<EventLoop>> {
+        let reactor = Reactor::new()?;
         Ok(Rc::new(EventLoop {
-            reactor: Reactor::new()?,
+            wait: Wait::new(&reactor)?,
+            reactor,
             microtasks: RefCell::default(),
             async_jobs: RefCell::default(),
             tasks: RefCell::default(),
@@ -113,6 +162,7 @@ impl EventLoop {
             || timers.refed > 0
             || timers.refed_immediates > 0
             || self.reactor.is_alive()
+            || self.wait.is_active()
     }
 
     fn report(&self, error: JsError) {
@@ -173,19 +223,26 @@ impl EventLoop {
         Ok(())
     }
 
-    /// Bun's `autoTick`: the immediates queued before it, a wait for I/O, the timers that are due.
+    /// Bun's `autoTick`: the immediates queued before it, one uSockets tick no longer than the next timer, the
+    /// reactor's ready sources, the timers that are due.
     fn auto_tick(&self, context: &mut Context) -> JsResult<()> {
         self.run_immediates(context)?;
         let timeout = if self.has_queued_work() || !self.timers.borrow().immediate_queue.is_empty() {
             Some(Duration::ZERO)
         } else {
-            self.next_deadline().map(|at| at.saturating_duration_since(Instant::now()))
+            let now = Instant::now();
+            [self.next_deadline(), self.reactor.next_deadline()]
+                .into_iter()
+                .flatten()
+                .min()
+                .map(|at| at.saturating_duration_since(now))
         };
-        if !self.reactor.is_alive() && timeout.is_none() {
+        if !self.reactor.is_alive() && !self.wait.is_active() && timeout.is_none() {
             return Ok(());
         }
+        self.wait.wait(timeout);
         self.reactor
-            .turn(timeout)
+            .turn(Some(Duration::ZERO))
             .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
         self.reactor.take_woken();
         self.tick(context)?;
