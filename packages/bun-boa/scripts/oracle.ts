@@ -29,6 +29,8 @@ type Record = {
   len_b?: number;
   a?: string;
   b?: string;
+  da?: string;
+  db?: string;
 };
 type Fingerprint = {
   id: string;
@@ -41,6 +43,8 @@ type Fingerprint = {
   example: string;
   a: string;
   b: string;
+  da: string;
+  db: string;
 };
 
 const DIR = "/srv/xbuild/scratch/oracle";
@@ -148,12 +152,25 @@ function around(text: Buffer, at: number): string {
   return text.subarray(start, Math.min(end, start + 160)).toString();
 }
 
+function lineFrom(text: Buffer, at: number): Buffer {
+  const end = text.indexOf(10, at);
+  return text.subarray(at, end < 0 ? text.length : end);
+}
+
+// Grouped by the differing span alone (the line minus what both sides share before and after it), so one
+// divergence is one fingerprint whatever identifiers surround it.
 function compare(id: string, checkpoint: Checkpoint, a: Output, b: Output): Record {
   for (const stream of ["stdout", "stderr", "exit"] as const) {
     if (a[stream] === b[stream]) continue;
     const [x, y] = [Buffer.from(a[stream]), Buffer.from(b[stream])];
     const at = firstDifference(x, y);
+    const [la, lb] = [lineFrom(x, at), lineFrom(y, at)];
+    let suffix = 0;
+    while (suffix < la.length && suffix < lb.length && la[la.length - 1 - suffix] === lb[lb.length - 1 - suffix])
+      suffix++;
     return {
+      da: la.subarray(0, la.length - suffix).subarray(0, 80).toString(),
+      db: lb.subarray(0, lb.length - suffix).subarray(0, 80).toString(),
       id,
       checkpoint,
       match: false,
@@ -325,7 +342,7 @@ async function coordinate() {
   for (const r of records) {
     if (r.match) continue;
     const id = Bun.hash
-      .wyhash(`${r.checkpoint}\0${r.stream}\0${mask(r.a!)}\0${mask(r.b!)}`)
+      .wyhash(`${r.checkpoint}\0${r.stream}\0${mask(r.da!)}\0${mask(r.db!)}`)
       .toString(16)
       .padStart(16, "0");
     const group = groups.get(id);
@@ -342,6 +359,8 @@ async function coordinate() {
         example: r.id,
         a: r.a!,
         b: r.b!,
+        da: r.da!,
+        db: r.db!,
       });
   }
   const fingerprints = [...groups.values()].sort((a, b) => b.count - a.count || a.id.localeCompare(b.id));
@@ -363,6 +382,8 @@ async function coordinate() {
         meta: {
           date: new Date().toISOString(),
           ...revisions,
+          // --no-build compares the binary of an earlier build, which may predate `boa`.
+          rebuilt: !values["no-build"],
           hosts,
           down,
           timeout_ms: TIMEOUT_MS,
