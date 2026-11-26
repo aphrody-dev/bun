@@ -48,11 +48,6 @@ not_linked! {
         EVP_sha1 EVP_sha384 EVP_sha512 EVP_sha512_256 AES_encrypt AES_set_encrypt_key CRYPTO_BUFFER_POOL_new
         CRYPTO_chacha_20 ERR_clear_error ERR_get_error HKDF_expand HKDF_extract RAND_bytes SHA1_Final SHA1_Init
         SHA1_Update;
-    "WTF's URL (src/jsc/bindings/BunString.cpp)":
-        URL__fromString URL__deinit URL__protocol URL__hostname URL__pathname URL__fragmentIdentifier
-        URL__getHref URL__getHrefJoin;
-    "WTF's date parser (src/jsc/bindings/wtf-bindings.cpp)":
-        Bun__parseDateTimeString;
     "Bun's posix_spawn (src/jsc/bindings/bun-spawn.cpp)":
         posix_spawn_bun;
     "bun_runtime's DNS cache (src/runtime/dns_jsc/dns.rs), which uSockets' connect reads":

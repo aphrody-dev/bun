@@ -33,6 +33,7 @@ install = [
   "dep:bun_spawn",
   "dep:bun_yarr",
   "dep:libc",
+  "dep:url",
 ]
 
 [dependencies]
@@ -74,6 +75,7 @@ icu_normalizer = { version = "~2.3.0", features = ["compiled_data", "utf16_iter"
 libc = { version = "0.2", optional = true }
 regress = { version = "0.12", features = ["utf16"] }
 serde_json = "1"
+url = { version = "2", optional = true }
 
 [build-dependencies]
 serde_json = "1"

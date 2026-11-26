@@ -6,6 +6,7 @@
 mod hooks;
 mod native;
 mod signals;
+mod wtf;
 
 use bun_core::{Global, Output};
 use bun_install::package_manager_real::{
