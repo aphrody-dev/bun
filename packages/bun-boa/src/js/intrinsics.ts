@@ -16,6 +16,7 @@
   promiseResult(promise: Promise<unknown>): unknown;
   proxyField(proxy: object, field: 0 | 1): object | null | undefined;
   makeError(code: number, message: string): Error;
+  createRequire(dir: string): (specifier: string) => unknown;
   errorCode(code: number): string;
   specifiers: string[];
   native: boolean[];
@@ -242,6 +243,8 @@
     "node:buffer": () => ({ Buffer: G.Buffer, kMaxLength: 2 ** 32, constants: { MAX_LENGTH: 2 ** 32 } }),
     "node:util/types": () => utilTypes,
     "node:constants": () => ({ ...processBindingConstants.os, ...processBindingConstants.fs }),
+    "bun:jsc": () => bunJSC,
+    "node:module": () => nodeModule,
   };
   function createInternalModuleById(id: number) {
     const existing = getInternalField(internalModuleRegistry, id);
@@ -259,10 +262,35 @@
     return exports;
   }
 
+  // The `$cpp` natives that are plain JavaScript here, by `file:symbol` (registry.json names them).
+  const ONLY_ENUMERABLE = 2;
+  const SKIP_SYMBOLS = 16;
+  const CPP: Record<string, () => unknown> = {
+    "UtilInspect.cpp:js2native_wrap_jsFunctionGetOwnNonIndexProperties": () => (object: object, filter: number) =>
+      Reflect.ownKeys(object).filter(
+        key =>
+          !(typeof key === "string" && /^(0|[1-9]\d*)$/.test(key) && Number(key) < 2 ** 32 - 1) &&
+          !(filter & SKIP_SYMBOLS && typeof key === "symbol") &&
+          !(filter & ONLY_ENUMERABLE && !getOwnPropertyDescriptor(object, key)?.enumerable),
+      ),
+    "NodeUtilTypesModule.cpp:js2native_wrap_jsFunctionIsMapIterator": () => utilTypes.isMapIterator,
+    "NodeUtilTypesModule.cpp:js2native_wrap_jsFunctionIsSetIterator": () => utilTypes.isSetIterator,
+    "NodeUtilTypesModule.cpp:js2native_wrap_jsFunctionIsError": () => utilTypes.isNativeError,
+    "NodeUtilTypesModule.cpp:js2native_wrap_jsFunctionIsDeepStrictEqual": () =>
+      typeof G.Bun?.deepEquals === "function"
+        ? (a: unknown, b: unknown) => G.Bun.deepEquals(a, b, true)
+        : missing("util.isDeepStrictEqual"),
+    "BunProcess.cpp:js2native_wrap_jsFunctionIsStandardOutputStream": () => () => false,
+    "BunProcess.cpp:js2native_wrap_jsFunctionReportUncaughtException": () => (error: unknown) => console.error(error),
+    "stringWidth.cpp:js2native_wrap_jsFunctionBunStringWidth": () =>
+      typeof G.Bun?.stringWidth === "function" ? G.Bun.stringWidth : (s: string) => String(s).length,
+  };
+
   const lazyValues = new Map<number, unknown>();
   function lazy(id: number) {
     if (lazyValues.has(id)) return lazyValues.get(id);
-    const value = native.lazy(id) ?? missing(native.nativeName(id));
+    const name = native.nativeName(id);
+    const value = CPP[name]?.() ?? native.lazy(id) ?? missing(name);
     lazyValues.set(id, value);
     return value;
   }
@@ -324,6 +352,86 @@
     isCryptoKey: () => false,
   };
   const processBindingConstants: Record<string, Record<string, unknown>> = { os: {}, fs: {}, crypto: {}, zlib: {} };
+
+  // ───────────────────────── bun:jsc and node:module ─────────────────────────
+  // The exports of src/jsc/modules/BunJSCModule.h. What only JavaScriptCore can say (its JIT, its heap) is a stub.
+  const identity = (value: unknown) => value;
+  const heapStats = () => ({
+    heapSize: 0,
+    heapCapacity: 0,
+    extraMemorySize: 0,
+    objectCount: 0,
+    protectedObjectCount: 0,
+    globalObjectCount: 1,
+    protectedGlobalObjectCount: 0,
+    objectTypeCounts: {},
+    protectedObjectTypeCounts: {},
+  });
+  const bunJSC: Record<string, unknown> = {
+    heapStats,
+    memoryUsage: () => ({ current: 0, peak: 0, currentCommit: 0, peakCommit: 0, pageFaults: 0 }),
+    heapSize: () => 0,
+    drainMicrotasks: () => {},
+    edenGC: () => 0,
+    fullGC: () => 0,
+    gcAndSweep: () => 0,
+    releaseWeakRefs: () => {},
+    noInline: identity,
+    noFTL: identity,
+    noOSRExitFuzzing: identity,
+    optimizeNextInvocation: identity,
+    numberOfDFGCompiles: () => 0,
+    reoptimizationRetryCount: () => 0,
+    totalCompileTime: () => 0,
+    isRope: () => false,
+    describe: (value: unknown) => stringOf(value),
+    describeArray: (value: unknown) => stringOf(value),
+    jscDescribe: (value: unknown) => stringOf(value),
+    jscDescribeArray: (value: unknown) => stringOf(value),
+    serialize: (value: unknown) => structuredClone(value),
+    deserialize: (value: unknown) => structuredClone(value),
+    estimateShallowMemoryUsageOf: () => 0,
+    percentAvailableMemoryInUse: () => 0,
+    getProtectedObjects: () => [],
+    setTimeZone: identity,
+    setTimezone: identity,
+  };
+  for (const name of [
+    "bytecodeOrderStats",
+    "callerSourceOrigin",
+    "getRandomSeed",
+    "setRandomSeed",
+    "startSamplingProfiler",
+    "samplingProfilerStackTraces",
+    "startRemoteDebugger",
+    "generateHeapSnapshotForDebugging",
+    "profile",
+    "codeCoverageForFile",
+  ])
+    bunJSC[name] = missing(`bun:jsc ${name}`);
+
+  const builtinModules = native.specifiers.filter(
+    (s, id) =>
+      /^(node|bun):/.test(s) && !native.specifiers[id].startsWith("node:_") && s !== "bun:internal-for-testing",
+  );
+  const nodeModule: Record<string, unknown> = {
+    builtinModules: [...new Set(builtinModules.map(s => (s.startsWith("node:") ? s.slice(5) : s)))].sort(),
+    isBuiltin: (name: string) => builtinModules.includes(name) || builtinModules.includes("node:" + name),
+    createRequire: (from: string | URL) => {
+      const path = String(from instanceof URL ? from.pathname : from).replace(/^file:\/\//, "");
+      return native.createRequire(path.endsWith("/") ? path : path.slice(0, path.lastIndexOf("/") + 1) || "/");
+    },
+    _cache: {},
+    _extensions: { ".js": () => {}, ".json": () => {}, ".node": () => {} },
+    globalPaths: [],
+    wrap: (script: string) => `(function (exports, require, module, __filename, __dirname) { ${script}\n});`,
+    syncBuiltinESMExports: () => {},
+    findSourceMap: () => undefined,
+    register: missing("node:module register"),
+    SourceMap: missing("node:module SourceMap"),
+  };
+  nodeModule.Module = nodeModule;
+  nodeModule.default = nodeModule;
 
   // ───────────────────────── the intrinsics ─────────────────────────
   const natives = new Proxy({} as Record<string | symbol, unknown>, {
@@ -403,6 +511,13 @@
       const name = native.className(id);
       return name !== undefined && typeof G[name] === "function" && value instanceof G[name];
     },
+    toClass(fn: Function, name: string, base?: Function | null) {
+      defineProperty(fn, "name", { value: name, configurable: true });
+      fn.prototype = Object.create(base?.prototype ?? Object.prototype, {
+        constructor: { value: fn, writable: true, configurable: true },
+      });
+      Object.setPrototypeOf(fn, base ?? Function.prototype);
+    },
     toLength: (v: unknown) => {
       const n = Math.trunc(Number(v)) || 0;
       return n <= 0 ? 0 : Math.min(n, Number.MAX_SAFE_INTEGER);
@@ -425,6 +540,25 @@
     processBindingConstants,
     requireMap: new Map(),
   };
+
+  // Bun.inspect is Rust in JavaScriptCore's build (the console's formatter). Here it is util.inspect, from
+  // src/js/internal/util/inspect.js, until that formatter runs on Boa.
+  if (G.Bun && !G.Bun.inspect) {
+    const id = native.specifiers.indexOf("internal:util/inspect");
+    let inspecting = false;
+    const inspect = function inspect(value: unknown, options?: object) {
+      if (inspecting) return String(value);
+      inspecting = true;
+      try {
+        return (createInternalModuleById(id) as any).inspect(value, options);
+      } finally {
+        inspecting = false;
+      }
+    };
+    inspect.custom = Symbol.for("nodejs.util.inspect.custom");
+    inspect.table = missing("Bun.inspect.table");
+    G.Bun.inspect = inspect;
+  }
 
   native.installed = {
     require: createInternalModuleById,

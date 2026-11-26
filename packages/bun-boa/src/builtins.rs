@@ -275,6 +275,15 @@ fn error_code(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<
         .into())
 }
 
+/// `createRequire(dir)`: `require` as a module in `dir` calls it (node:module's `createRequire`).
+fn create_require(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let dir = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped();
+    Ok(crate::loader::make_require(std::path::Path::new(&dir), context).into())
+}
+
 const OPS: &str = "__bun_intrinsics_ops__";
 
 /// Installs the builtin modules: evaluates js/intrinsics.ts with the native operations above.
@@ -299,6 +308,7 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ("proxyField", proxy_field, 2),
         ("makeError", make_error, 2),
         ("errorCode", error_code, 1),
+        ("createRequire", create_require, 1),
     ] {
         ops.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);
     }
