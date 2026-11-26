@@ -4,8 +4,8 @@ const NATIVE = "__bun_test_native__";
 export interface Native {
   /** printDiff.rs (src/runtime/test_runner/diff), compiled into bun_runtime_js. */
   diff(not: boolean, received: string, expected: string, colors: boolean): string;
-  /** 0 pending, 1 fulfilled, 2 rejected. */
-  promiseState(promise: Promise<unknown>): number;
+  /** 0 pending, 1 fulfilled, 2 rejected; `undefined` if `value` is not a promise. */
+  promiseState(value: unknown): 0 | 1 | 2 | undefined;
   promiseResult(promise: Promise<unknown>): unknown;
   readFile(path: string): string | undefined;
   writeFile(path: string, text: string): boolean;

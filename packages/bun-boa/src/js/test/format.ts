@@ -187,7 +187,8 @@ export function setMockDetector(detect: (v: unknown) => boolean) {
 }
 
 // ── own properties, as JSC's forEachProperty lists them ───────────────────────
-function ownEntries(object: any, ordered: boolean, skipIndices: boolean, callGetters: boolean) {
+/** `callGetters`: "throws" calls them and lets what they throw through, "marks" puts a getter that throws as a marker. */
+function ownEntries(object: any, ordered: boolean, skipIndices: boolean, callGetters: false | "throws" | "marks") {
   const out: { key: string | symbol; value: unknown; getter?: "get" | "set" | "both" }[] = [];
   let names: (string | symbol)[];
   try {
@@ -209,7 +210,16 @@ function ownEntries(object: any, ordered: boolean, skipIndices: boolean, callGet
     const desc = getOwnPropertyDescriptor(object, key);
     if (!desc || !desc.enumerable) continue;
     if ("value" in desc) out.push({ key, value: desc.value });
-    else if (callGetters && desc.get) out.push({ key, value: desc.get.call(object) });
+    else if (callGetters === "throws" && desc.get) out.push({ key, value: desc.get.call(object) });
+    else if (callGetters === "marks" && desc.get) {
+      let entry;
+      try {
+        entry = { key, value: desc.get.call(object) };
+      } catch {
+        entry = { key, value: undefined, getter: desc.set ? ("both" as const) : ("get" as const) };
+      }
+      out.push(entry);
+    } else if (callGetters === "marks") out.push({ key, value: undefined });
     else out.push({ key, value: undefined, getter: desc.get && desc.set ? "both" : desc.get ? "get" : "set" });
   }
   return out;
@@ -241,7 +251,13 @@ type Tag =
 
 const PRIMITIVE = new Set<Tag>(["string", "undefined", "double", "integer", "null", "boolean", "symbol", "bigint"]);
 
+/** An own accessor whose getter threw, which the console prints as JSC's `GetterSetter` cell. */
+class Accessor {
+  constructor(readonly kind: "get" | "set" | "both") {}
+}
+
 function tagOf(v: unknown, custom: boolean): Tag {
+  if (v instanceof Accessor) return "getter";
   if (v === undefined) return "undefined";
   if (v === null) return "null";
   switch (typeof v) {
@@ -442,8 +458,10 @@ class Console {
         return this.printObject(v);
       case "object":
         return this.printObject(v);
-      case "getter":
-        return;
+      case "getter": {
+        const kind = (v as Accessor).kind;
+        return this.write(this.m("<cyan>") + (kind === "both" ? "[Getter/Setter]" : kind === "get" ? "[Getter]" : "[Setter]") + this.m("<r>"));
+      }
     }
   }
 
@@ -819,9 +837,10 @@ class Console {
         return this.write(this.m("<r><cyan>") + `[${name} ...]` + this.m("<r>"));
       }
       let i = 0;
-      for (const entry of ownEntries(v, false, false, true)) {
+      for (const entry of ownEntries(v, false, false, "marks")) {
         if (entry.key === "constructor") continue;
-        alwaysNewline = this.property(entry.key, entry.value, i, v, alwaysNewline);
+        const value = entry.getter ? new Accessor(entry.getter) : entry.value;
+        alwaysNewline = this.property(entry.key, value, i, v, alwaysNewline);
         i++;
       }
       if (i === 0) {
@@ -861,8 +880,8 @@ function objectName(v: any): string | undefined {
   return undefined;
 }
 
-let promiseState: ((p: Promise<unknown>) => number) | undefined;
-export function setPromiseState(state: (p: Promise<unknown>) => number) {
+let promiseState: ((p: Promise<unknown>) => number | undefined) | undefined;
+export function setPromiseState(state: (p: Promise<unknown>) => number | undefined) {
   promiseState = state;
 }
 
@@ -1237,7 +1256,7 @@ class Pretty {
     let alwaysNewline = this.alwaysNewlineScope || this.goodTime();
     let i = 0;
     this.quoting(true, () => {
-      for (const { key, value } of ownEntries(v, true, false, true)) {
+      for (const { key, value } of ownEntries(v, true, false, "throws")) {
         if (key === "constructor") continue;
         const tag = tagOf(value, false);
         if (i === 0) {

@@ -231,13 +231,16 @@ fn brand(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsString::from(name).into())
 }
 
-/// `promiseState(promise)`: 0 pending, 1 fulfilled, 2 rejected (`JSC::JSPromise::Status`).
+/// `promiseState(value)`: 0 pending, 1 fulfilled, 2 rejected (`JSC::JSPromise::Status`), `undefined` if `value` is
+/// not a promise.
 pub(crate) fn promise_state(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    let promise = args
+    let Some(promise) = args
         .get_or_undefined(0)
         .as_object()
         .and_then(|o| JsPromise::from_object(o.clone()).ok())
-        .ok_or_else(|| JsNativeError::typ().with_message("not a promise"))?;
+    else {
+        return Ok(JsValue::undefined());
+    };
     Ok(match promise.state() {
         PromiseState::Pending => 0,
         PromiseState::Fulfilled(_) => 1,

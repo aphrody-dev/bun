@@ -174,16 +174,42 @@ function makeExpect(value: unknown, message?: unknown, flags?: Partial<Flags>): 
   return e;
 }
 
-/** `Expect::promise_to_await` + `received_from_promise`. */
-async function settledValue(e: Expect, flags: Flags, name: string, params: string): Promise<unknown> {
-  let value = e[VALUE];
-  let candidate: unknown = value;
-  if (!isThenable(candidate) && typeof candidate === "function") candidate = (candidate as Fn)();
+const handled = (promise: Promise<unknown>) => Promise.prototype.then.call(promise, undefined, () => {});
+
+/**
+ * `Expect::promise_to_await`: a promise that settles the way `await value` would, or nothing if `value` is not
+ * thenable. A settled promise is itself; anything else is adopted as `await` does, which reads `then` once (a getter
+ * that throws is a rejection) and calls it in a microtask.
+ */
+function promiseToAwait(value: unknown): Promise<unknown> | undefined {
+  const state = native.promiseState(value);
+  if (state !== undefined) {
+    handled(value as Promise<unknown>);
+    if (state !== 0) return value as Promise<unknown>;
+  }
+  const adopted = new Promise(resolve => resolve(value));
+  handled(adopted);
+  return native.promiseState(adopted) === 1 ? undefined : adopted;
+}
+
+/** `Expect::received_promise`: the received thenable, or what the received function returns. */
+function receivedPromise(received: unknown): Promise<unknown> | undefined {
+  const promise = promiseToAwait(received);
+  return promise === undefined && typeof received === "function" ? promiseToAwait((received as Fn)()) : promise;
+}
+
+/**
+ * `received_from_promise`: runs `matcher` on what the received promise settled with, once it settled the way
+ * `.resolves`/`.rejects` expects. The value goes to `matcher` as it is: returned from here, a thenable would be adopted.
+ */
+async function settledValue<R>(e: Expect, flags: Flags, name: string, params: string, matcher: (received: unknown) => R): Promise<Awaited<R>> {
+  const value = e[VALUE];
+  const promise = receivedPromise(value);
   let state: "fulfilled" | "rejected" | "none" = "none";
   let settled: unknown;
-  if (isThenable(candidate)) {
+  if (promise !== undefined) {
     try {
-      settled = await candidate;
+      settled = await promise;
       state = "fulfilled";
     } catch (error) {
       settled = error;
@@ -195,9 +221,9 @@ async function settledValue(e: Expect, flags: Flags, name: string, params: strin
     throw thrown(`${sig}\n\n${pretty(`${expected}<r>\n${received}<red>`)}${show(shown, { colors: colors() })}${pretty("<r>")}\n`);
   };
   if (state === "none") fail("Expected promise", "Received: ", value);
-  if (state === "fulfilled" && flags.promise === REJECTS) fail("Expected promise that rejects", "Received promise that resolved: ", settled);
-  if (state === "rejected" && flags.promise === RESOLVES) fail("Expected promise that resolves", "Received promise that rejected: ", settled);
-  return settled;
+  if (state === "fulfilled" && flags.promise === REJECTS) fail("Expected promise that rejects", "Received promise that resolved: ", value);
+  if (state === "rejected" && flags.promise === RESOLVES) fail("Expected promise that resolves", "Received promise that rejected: ", value);
+  return await matcher(settled);
 }
 
 const isThenable = (v: unknown): v is PromiseLike<unknown> =>
@@ -255,10 +281,11 @@ function once(ask: () => unknown): unknown {
 
 /** `Pass::wait_for`: the running matcher returns a promise, and runs again once `promise` settles. */
 function waitFor(promise: Promise<unknown>): never {
-  promise.then(
-    () => {},
-    () => {},
-  );
+  if (journal === undefined)
+    throw new Error(
+      "An async matcher only works inside an expect() matcher, which then returns a promise: await expect(received).toEqual(expected)",
+    );
+  handled(promise);
   throw new Deferred(promise);
 }
 
@@ -315,7 +342,7 @@ function runMatcherOnce(e: Expect, name: string, def: MatcherDef, args: unknown[
   };
   if (flags.poll) return poll(e, flags, run);
   if (flags.promise !== NONE)
-    return settledValue(e, flags, name, def.params).then(received => {
+    return settledValue(e, flags, name, def.params, received => {
       const r = run(received);
       return r === e ? undefined : r;
     });
@@ -1504,13 +1531,11 @@ interface MatcherFlags {
 /** `Expect_readFlagsAndProcessPromise`: the value a `resolvesTo`/`rejectsTo` matcher compares, or nothing. */
 function processPromise(flags: MatcherFlags, value: unknown): { value: unknown } | undefined {
   if (flags.promise === NONE) return { value };
-  if (!isPromise(value)) return undefined;
-  const state = native.promiseState(value);
-  if (state === 1 && flags.promise === RESOLVES) return { value: native.promiseResult(value) };
-  if (state === 2 && flags.promise === REJECTS) {
-    value.catch(() => {});
-    return { value: native.promiseResult(value) };
-  }
+  const promise = once(() => promiseToAwait(value)) as Promise<unknown> | undefined;
+  if (promise === undefined) return undefined;
+  const state = native.promiseState(promise);
+  if (state === 0) waitFor(promise);
+  if (state === (flags.promise === RESOLVES ? 1 : 2)) return { value: native.promiseResult(promise) };
   return undefined;
 }
 
@@ -1871,7 +1896,7 @@ function extend(definitions: unknown) {
             const r = executeCustomMatcher(labelOf(e), displayName(fn), fn, [received, ...args], flags, false);
             return isPromise(r) ? r.then(() => undefined) : e;
           };
-          if (flags.promise !== NONE) return settledValue(e, flags, name, customParams(fn)).then(run).then(() => undefined);
+          if (flags.promise !== NONE) return settledValue(e, flags, name, customParams(fn), run).then(() => undefined);
           if (flags.soft) {
             try {
               return run(e[VALUE]);
