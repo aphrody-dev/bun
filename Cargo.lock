@@ -1499,7 +1499,6 @@ dependencies = [
  "bun_core",
  "bun_errno",
  "bun_simd_kernels",
- "bun_simdutf_sys",
  "const_format",
 ]
 

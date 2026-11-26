@@ -252,3 +252,69 @@ fn utf8_errors_at_each_offset() {
         }
     }
 }
+
+#[test]
+fn wrappers_append_only_on_success() {
+    use crate::simdutf::{WithUtf8Len, WithUtf16Len, base64 as b64, convert};
+    use core::io::BorrowedBuf;
+
+    let text = "hé😀";
+    let mut units = [MaybeUninit::<u16>::uninit(); 16];
+    let mut buf = BorrowedBuf::from(&mut units[..]);
+    let r = convert::utf8::to::utf16::with_errors::le(
+        WithUtf16Len::utf8(text.as_bytes()),
+        buf.unfilled(),
+    );
+    assert!(r.is_successful());
+    assert_eq!(buf.filled(), text.encode_utf16().collect::<Vec<_>>());
+    let r = convert::utf8::to::utf16::with_errors::le(WithUtf16Len::utf8(b"a\xff"), buf.unfilled());
+    assert_eq!((r.status, r.count), (Status::HEADER_BITS, 1));
+    assert_eq!(buf.len(), 4);
+
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let mut bytes = [MaybeUninit::<u8>::uninit(); 32];
+    let mut buf = BorrowedBuf::from(&mut bytes[..]);
+    let r = convert::utf16::to::utf8::with_errors::le(WithUtf8Len::utf16(&wide), buf.unfilled());
+    assert!(r.is_successful());
+    assert_eq!(buf.filled(), text.as_bytes());
+    let r = convert::utf16::to::utf8::with_errors::le(
+        WithUtf8Len::utf16_with_replacement(&[0x41, 0xd800]),
+        buf.unfilled(),
+    );
+    assert_eq!((r.status, r.count), (Status::SURROGATE, 1));
+    assert_eq!(buf.len(), text.len());
+
+    let mut bytes = [MaybeUninit::<u8>::uninit(); 32];
+    let mut buf = BorrowedBuf::from(&mut bytes[..]);
+    convert::latin1::to::utf8(WithUtf8Len::latin1(b"caf\xe9"), buf.unfilled());
+    assert_eq!(buf.filled(), "café".as_bytes());
+
+    let mut bytes = [MaybeUninit::<u8>::uninit(); 32];
+    let mut buf = BorrowedBuf::from(&mut bytes[..]);
+    b64::encode(b"\xfb\xff", buf.unfilled(), true);
+    b64::encode(b"\xfb\xff", buf.unfilled(), false);
+    assert_eq!(buf.filled(), b"-_8+/8=");
+    assert_eq!(
+        (b64::encode_len(2, true), b64::encode_len(2, false)),
+        (3, 4)
+    );
+    let mut out = [0; 8];
+    assert_eq!(
+        b64::decode(b" +/8=\n", &mut out, false),
+        SIMDUTFResult {
+            status: Status::SUCCESS,
+            count: 2
+        }
+    );
+    assert_eq!(
+        b64::decode(b"+/8=", &mut out, true).status,
+        Status::INVALID_BASE64_CHARACTER
+    );
+    assert_eq!(
+        b64::decode_lenient(b"*-_8 = AAAA", &mut out),
+        SIMDUTFResult {
+            status: Status::SUCCESS,
+            count: 2
+        }
+    );
+}

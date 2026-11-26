@@ -358,22 +358,6 @@ unsafe fn bytes<'a>(p: *const u8, len: usize) -> &'a [u8] {
     }
 }
 
-/// Tests 32 bytes at a time without a branch in between, which the compiler turns into vector instructions. That keeps
-/// measurements made with these stand-ins close to the real kernels.
-fn first(text: &[u8], f: impl Fn(u8) -> bool) -> usize {
-    let mut at = 0;
-    for chunk in text.as_chunks::<32>().0 {
-        if chunk.iter().fold(false, |is_found, &c| is_found | f(c)) {
-            break;
-        }
-        at += 32;
-    }
-    at + text[at..]
-        .iter()
-        .position(|&c| f(c))
-        .unwrap_or(text.len() - at)
-}
-
 // ───────────────────────────── widths ─────────────────────────────
 
 /// An approximation. Bun's implementation is grapheme-aware.
