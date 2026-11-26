@@ -33,6 +33,9 @@ build: each `refuse(` call in the emitter is one such feature. `src/bun_js/tests
 outside its directory in its `Cargo.toml` (`[package.metadata.bun-js] bindings = ["../runtime/node/node_path.bind.ts"]`), which the
 JavaScriptCore build shares (`src/runtime_js`, `bun_runtime_js`, implements `node_path.bind.ts`). Until `bun_runtime` moves, the
 JavaScriptCore build compiles such a crate's code too, from a crate of its own (`src/semver_jsc` includes `src/semver_js`).
+A function whose body the JavaScriptCore build has in C++ (`cppSymbol`) has a Rust port on `bun_js`, at the module's `rustPath`
+(`node_validators.bind.ts`: `src/runtime_js/node/node_validators.rs`). There `b.any.orAbsent` is `undefined` when the argument is not
+passed, as C++'s `arguments.at(i)` reads it, and the words of `b.any.returning` hold nothing: Boa compiles no code that would read them.
 
 The body of a binding is Rust, but for a function that says `cppSymbol`. `$cpp` and `$newCppFunction` reach a function written in C++ from `src/js`.
 

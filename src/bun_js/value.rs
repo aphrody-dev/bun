@@ -156,6 +156,64 @@ impl JSValue {
         self.0.as_object().is_some_and(|object| object.is_array())
     }
 
+    /// `Array.isArray`: an array, or a proxy of one. A revoked proxy throws, as `JSC::isArray` does.
+    pub fn is_array_abstract(&self, global: &JSGlobalObject) -> JsResult<bool> {
+        if self.is_array() {
+            return Ok(true);
+        }
+        let Some(object) = self.0.as_object() else {
+            return Ok(false);
+        };
+        if !object.is::<boa_engine::builtins::proxy::Proxy>() {
+            return Ok(false);
+        }
+        let array = global.cx().intrinsics().constructors().array().constructor();
+        let is_array = array.get(js_string!("isArray"), global.cx());
+        let is_array = global.lift(is_array)?;
+        let Some(is_array) = is_array.as_callable() else {
+            return Ok(false);
+        };
+        let result = is_array.call(&array.into(), &[self.0.clone()], global.cx());
+        global.lift(result).map(|value| value.to_boolean())
+    }
+
+    /// A typed array or a `DataView`: JavaScriptCore's `JSArrayBufferView`.
+    pub fn is_array_buffer_view(&self) -> bool {
+        use boa_engine::object::builtins::{JsDataView, JsTypedArray};
+        self.0.as_object().is_some_and(|object| {
+            JsTypedArray::from_object(object.clone()).is_ok() || JsDataView::from_object(object.clone()).is_ok()
+        })
+    }
+
+    /// A typed array's length in elements, a `DataView`'s in bytes, an `ArrayBuffer`'s byte length; `None` for
+    /// anything else.
+    pub fn array_buffer_length(&self, global: &JSGlobalObject) -> JsResult<Option<u64>> {
+        use boa_engine::object::builtins::{JsArrayBuffer, JsDataView, JsTypedArray};
+        let Some(object) = self.0.as_object() else {
+            return Ok(None);
+        };
+        if let Ok(array) = JsTypedArray::from_object(object.clone()) {
+            let length = array.length(global.cx());
+            return global.lift(length).map(|n| Some(n as u64));
+        }
+        if let Ok(view) = JsDataView::from_object(object.clone()) {
+            let length = view.byte_length(global.cx());
+            return global.lift(length).map(|n| Some(n as u64));
+        }
+        if let Ok(buffer) = JsArrayBuffer::from_object(object.clone()) {
+            return Ok(Some(buffer.data().map_or(0, |data| data.len() as u64)));
+        }
+        Ok(None)
+    }
+
+    /// A symbol's description, `None` for one without, or for what is no symbol.
+    pub fn symbol_description(&self) -> Option<String> {
+        self.0
+            .as_symbol()
+            .and_then(|symbol| symbol.description())
+            .map(|description| description.to_std_string_escaped())
+    }
+
     pub fn is_error(&self) -> bool {
         self.0
             .as_object()

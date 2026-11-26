@@ -1,6 +1,9 @@
 // The native functions of src/js/internal/validators.ts. Their bodies are C++: src/jsc/bindings/NodeValidatorBodies.h.
+// On bun_js they are Rust, at the module's rustPath (src/runtime_js/node/node_validators.rs).
 import * as b from "../../codegen/bindgen-lib.ts";
 import * as table from "../../codegen/builtins/lib.ts";
+
+export default b.module({ rustPath: "crate::node::node_validators" });
 
 type Operands = Record<string, b.Type>;
 type Uses = Record<string, readonly table.UseSpec[]>;

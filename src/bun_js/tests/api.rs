@@ -491,3 +491,29 @@ fn microtasks() {
         );
     });
 }
+
+/// What Node's validators ask of a value: `Array.isArray` through a proxy, buffer views and their lengths, a
+/// symbol's description.
+#[test]
+fn arrays_buffers_and_symbols() {
+    JSGlobalObject::with_new(|global| {
+        let proxy = eval(global, "new Proxy([1, 2], {})");
+        assert!(!proxy.is_array() && proxy.is_array_abstract(global).unwrap());
+        assert!(!eval(global, "({ length: 0 })").is_array_abstract(global).unwrap());
+        let revoked = eval(global, "(() => { const p = Proxy.revocable([], {}); p.revoke(); return p.proxy })()");
+        let thrown = revoked.is_array_abstract(global).expect_err("a revoked proxy throws");
+        assert_eq!(global.take_exception(thrown).get(global, "name").unwrap().and_then(|n| n.as_string()).as_deref(), Some("TypeError"));
+
+        let typed = eval(global, "new Uint16Array(3)");
+        assert!(typed.is_array_buffer_view() && eval(global, "new DataView(new ArrayBuffer(4))").is_array_buffer_view());
+        assert!(!eval(global, "new ArrayBuffer(4)").is_array_buffer_view());
+        assert_eq!(typed.array_buffer_length(global).unwrap(), Some(3));
+        assert_eq!(eval(global, "new DataView(new ArrayBuffer(4), 1)").array_buffer_length(global).unwrap(), Some(3));
+        assert_eq!(eval(global, "new ArrayBuffer(5)").array_buffer_length(global).unwrap(), Some(5));
+        assert_eq!(eval(global, "[1]").array_buffer_length(global).unwrap(), None);
+
+        assert_eq!(eval(global, "Symbol('s')").symbol_description().as_deref(), Some("s"));
+        assert_eq!(eval(global, "Symbol()").symbol_description(), None);
+        assert_eq!(JSValue::js_number(1.0).symbol_description(), None);
+    });
+}

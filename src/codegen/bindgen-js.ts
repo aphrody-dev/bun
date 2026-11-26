@@ -85,10 +85,8 @@ function converter(type: Type): string {
   if (type instanceof Utf8Type) return type.isLoose ? "loose_utf8" : "strict_utf8";
   // `.allowStringObject` made a `String` object a string already (`prepared`).
   if (type instanceof LocalStringType) return "local_string";
-  if (type instanceof AnyType) {
-    if (type.isOptional) return refuse("b.any.orAbsent");
-    return "any";
-  }
+  // `b.any.orAbsent`: an argument that is not passed is `undefined`, as C++'s `arguments.at(i)` reads it.
+  if (type instanceof AnyType) return "any";
   return refuse(`${type.constructor.name} (${type.tsType})`);
 }
 
@@ -169,14 +167,8 @@ function toJs(type: Type, value: string): string {
     return `bindgen::to_js::${type.rustName}(heap, ${value})`;
   }
   if (type instanceof Utf8Type || type instanceof LocalStringType) return `bindgen::to_js::utf8(heap, ${value})`;
-  if (type instanceof AnyType) {
-    // The C++ build holds a result to the words of `.returning` for compiled code, which has nothing to check with
-    // alternatives that are not words: it holds those to nothing.
-    const words = type.checkedResult;
-    if (words !== null)
-      refuse(`b.any.returning(${words.map(word => rustString(word)).join(", ")}) (a result held to its words)`);
-    return `bindgen::to_js::any(heap, ${value})`;
-  }
+  // The C++ build holds a result to the words of `.returning` for compiled code. Boa compiles none: no one reads them.
+  if (type instanceof AnyType) return `bindgen::to_js::any(heap, ${value})`;
   if (type instanceof DictionaryType) return `${value}.into_js(heap)`;
   return refuse(`a result of ${type.constructor.name} (${type.tsType})`);
 }
@@ -272,7 +264,6 @@ function indent(text: string, by: number): string {
 function onlySignature(fn: FunctionDefinition, what: string): Signature {
   if (fn.signatures.length !== 1) refuse(`${what}: b.overloads`);
   const signature = fn.signatures[0];
-  if (signature.cppSymbol) refuse(`${what}: cppSymbol`);
   if (fn.passThis || fn.passCallee) refuse(`${what}: passThis and passCallee`);
   return signature;
 }
@@ -280,6 +271,8 @@ function onlySignature(fn: FunctionDefinition, what: string): Signature {
 function rustForFunction(fn: FunctionDefinition, file: SchemaFile): string {
   const signature = onlySignature(fn, fn.name);
   const modulePath = file.moduleDefinition?.rustPath;
+  // A body that the JavaScriptCore build has in C++ (`cppSymbol`) is a port in Rust here, at the module's rustPath.
+  if (signature.cppSymbol && !signature.rustPath && !modulePath) refuse(`${fn.name}: cppSymbol without a rustPath`);
   const target =
     signature.rustPath ??
     (modulePath ? `${modulePath}::${ident(snakeCase(fn.name))}` : refuse(`${fn.name}: a rustPath`));
