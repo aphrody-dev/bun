@@ -4,14 +4,28 @@
 //!
 //! [`generated_bindgen::native`] is what `$bindgen(file, symbol)` answers, [`cpp`] what `$cpp(file, symbol)` and
 //! `$newCppFunction(file, symbol, length)` do.
+//!
+//! - [`event_loop`]: Boa's job executor with Bun's turn, over `bun_http_rs`'s reactor.
+//! - [`timer`]: `setTimeout`, `setInterval`, `setImmediate`.
+//! - [`webcore`]: `Blob`, `Headers`, `Request`, `Response`, `fetch()` on `bun_http_rs`'s client.
+//! - [`server`]: `Bun.serve()` on `bun_http_rs`'s server.
 
 mod engine;
+pub mod event_loop;
 pub mod generated_bindgen;
 pub mod node;
+pub mod server;
 pub mod sys_js;
 pub mod test_runner;
+pub mod timer;
 pub mod web;
 pub mod webcore;
+
+use boa_engine::property::{Attribute, PropertyDescriptor};
+use boa_engine::{Context, JsResult, JsString, JsValue};
+use bun_js::JSGlobalObject;
+
+pub use event_loop::EventLoop;
 
 /// The natives that the JavaScriptCore build has in C++ (`src/jsc/bindings/<file>`), ported: `None` for one that
 /// is not.
@@ -23,4 +37,38 @@ pub fn cpp(global: &bun_js::JSGlobalObject, file: &str, symbol: &str) -> Option<
         "NodeVM.cpp" => node::vm::native(global, symbol),
         _ => None,
     }
+}
+
+/// Boa's context of a realm, for one engine operation at a time (see `JSGlobalObject::context`).
+#[allow(clippy::mut_from_ref)]
+pub(crate) fn cx(global: &JSGlobalObject) -> &mut Context {
+    // SAFETY: each use is one operation on the context, done before anything else reaches the realm.
+    unsafe { global.context() }
+}
+
+/// A `bun_js` result as Boa's: the pending exception becomes the error.
+pub(crate) fn lift<T>(global: &JSGlobalObject, result: bun_js::JsResult<T>) -> JsResult<T> {
+    result.map_err(|error| global.into_engine_error(error))
+}
+
+pub(crate) fn define_global(context: &mut Context, name: &str, value: JsValue) -> JsResult<()> {
+    let attribute = Attribute::WRITABLE | Attribute::CONFIGURABLE;
+    let global = context.global_object();
+    global.define_property_or_throw(
+        JsString::from(name),
+        PropertyDescriptor::builder()
+            .value(value)
+            .writable(attribute.writable())
+            .enumerable(false)
+            .configurable(attribute.configurable()),
+        context,
+    )?;
+    Ok(())
+}
+
+/// Puts Bun's runtime globals in the realm, over Boa's WinterTC ones of the same names. The realm's job executor is
+/// an [`EventLoop`].
+pub fn install(context: &mut Context) -> JsResult<()> {
+    timer::install(context)?;
+    webcore::install(context)
 }

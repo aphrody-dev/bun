@@ -62,6 +62,12 @@ fn nanoseconds(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue>
         .into())
 }
 
+/// `Bun.gc()`: Boa's collection, which is always a full one.
+fn gc(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    boa_gc::force_collect();
+    Ok(JsValue::undefined())
+}
+
 fn strings(values: impl IntoIterator<Item = String>, context: &mut Context) -> JsValue {
     let values: Vec<JsValue> = values
         .into_iter()
@@ -93,6 +99,7 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
     );
     let version = JsString::from(bun_core::package_json_version);
     let revision = JsString::from(bun_core::env::GIT_SHA);
+    let serve = bun_runtime_js::server::serve_function(context)?;
     let mut ops = ObjectInitializer::new(context);
     for (name, f, len) in [
         (
@@ -104,6 +111,7 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
         ("exit", exit, 1),
         ("cwd", cwd, 0),
         ("nanoseconds", nanoseconds, 0),
+        ("gc", gc, 0),
     ] {
         ops.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);
     }
@@ -121,7 +129,8 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
     for (name, value) in bound.into_iter().chain(clock) {
         ops.property(JsString::from(name), value.into_engine(), Attribute::all());
     }
-    ops.property(js_string!("env"), env, Attribute::all())
+    ops.property(js_string!("serve"), serve, Attribute::all())
+        .property(js_string!("env"), env, Attribute::all())
         .property(js_string!("argv"), argv, Attribute::all())
         .property(js_string!("main"), main, Attribute::all())
         .property(js_string!("version"), version, Attribute::all())
@@ -158,9 +167,11 @@ pub fn context(
     if let Ok(cwd) = std::env::current_dir() {
         bun_paths::fs::FileSystem::init(cwd.as_os_str().as_encoded_bytes());
     }
+    let event_loop = bun_runtime_js::EventLoop::new()
+        .map_err(|err| JsNativeError::error().with_message(err.to_string()))?;
     let mut context = Context::builder()
         .module_loader(loader.clone())
-        .job_executor(Rc::new(bun_js::AsyncContextJobExecutor::default()))
+        .job_executor(event_loop)
         .build()
         .map_err(|err| JsNativeError::error().with_message(err.to_string()))?;
     loader.install(&mut context);
@@ -170,6 +181,7 @@ pub fn context(
         &mut context,
     )?;
     bun_runtime_js::web::performance::start();
+    bun_runtime_js::install(&mut context)?;
     let ops = native(&mut context)?;
     context.register_global_property(js_string!("__bun_native_ops__"), ops, Attribute::all())?;
     let performance = crate::transpile::transpile(b"bun:performance.ts", include_bytes!("js/performance.ts"))

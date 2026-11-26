@@ -30,7 +30,7 @@ mod realm;
 mod strong;
 mod value;
 
-pub use async_context::AsyncContextJobExecutor;
+pub use async_context::{AsyncContextJobExecutor, carry_async_context};
 pub use bun_core::JsError;
 pub use call_frame::CallFrame;
 pub use class::{ClassRef, JsClass};

@@ -3,6 +3,12 @@
 
 use bun_js::JSGlobalObject;
 
+// bun_alloc's out-of-memory hook, which bun_crash_handler defines in a binary.
+#[unsafe(no_mangle)]
+extern "Rust" fn __bun_crash_handler_out_of_memory() -> ! {
+    panic!("out of memory");
+}
+
 const NAMES: [&str; 11] = [
     "resolve",
     "normalize",

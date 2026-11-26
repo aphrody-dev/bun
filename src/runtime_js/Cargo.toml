@@ -1,6 +1,6 @@
 [package]
 name = "bun_runtime_js"
-description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff, Blob, File, Bun.file, Bun.write."
+description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff, Blob, File, Bun.file, Bun.write, the event loop, timers, fetch, Headers/Request/Response and Bun.serve."
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -18,7 +18,9 @@ bindings = ["../runtime/node/node_path.bind.ts", "../runtime/node/node_validator
 boa_engine = { path = "../boa/core/engine", features = ["annex-b", "intl_bundled", "experimental"] }
 boa_gc = { path = "../boa/core/gc" }
 bstr = { version = "1", default-features = false, features = ["alloc"] }
+bun_base64 = { path = "../base64" }
 bun_core = { path = "../bun_core" }
+bun_http_rs = { path = "../http_rs" }
 bun_http_types = { path = "../http_types" }
 bun_js = { path = "../bun_js" }
 bun_node_path = { path = "../node_path" }

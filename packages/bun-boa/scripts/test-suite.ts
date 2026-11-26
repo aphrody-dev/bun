@@ -1,6 +1,6 @@
 // Runs Bun's own test files with the Boa build's `bun test`, one process per file, all cores at once, and prints one
 // JSON line: per file, the counts `bun test` printed. Runs on each cluster host (scripts/test-boa.ts).
-//   bun scripts/test-suite.ts <bun-boa binary> [--partition hash:M/N] [dir…]
+//   bun scripts/test-suite.ts <bun-boa binary> [--partition hash:M/N] [dir or test file…]
 // --partition is nextest's: a file belongs to shard hash(path) % N + 1, and this run takes shard M, or the shards
 // M1-M2 (so a host's share can follow its core count).
 import { Glob } from "bun";
@@ -34,9 +34,15 @@ if (values.partition) {
 
 type Result = { file: string; pass: number; fail: number; skip: number; todo: number; exit: number | null; ms: number };
 const files: string[] = [];
-for (const root of roots)
+const testFile = new Glob("**/*.{test,spec}.{ts,tsx,js,jsx,mjs,cjs,mts,cts}");
+for (const root of roots) {
+  if (testFile.match(root)) {
+    files.push(root);
+    continue;
+  }
   for await (const f of new Glob(`${root}/**/*.{test,spec}.{ts,tsx,js,jsx,mjs,cjs,mts,cts}`).scan({ cwd: repo }))
     if (!f.includes("/node_modules/") && inPartition(f)) files.push(f);
+}
 files.sort();
 
 const count = (text: string, label: string) => Number(text.match(new RegExp(`^ (\\d+) ${label}$`, "m"))?.[1] ?? 0);

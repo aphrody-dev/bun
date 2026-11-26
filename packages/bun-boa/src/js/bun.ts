@@ -16,6 +16,8 @@ const OPS = "__bun_native_ops__";
   stdin: Blob;
   stdout: Blob;
   stderr: Blob;
+  serve(options: unknown): unknown;
+  gc(): void;
   env: Record<string, string>;
   argv: string[];
   main: string;
@@ -48,6 +50,9 @@ const OPS = "__bun_native_ops__";
     pathToFileURL(path: unknown): URL {
       return new URL(`file://${encodeURI(String(path)).replace(/[?#]/g, encodeURIComponent)}`);
     },
+    serve: native.serve,
+    fetch: globalThis.fetch,
+    gc: (_force?: boolean) => native.gc(),
   };
 
   const process: any = {
