@@ -171,6 +171,10 @@ pub fn main() -> i32 {
         Some("test") => crate::test::main(&args[1..]),
         #[cfg(feature = "build")]
         Some("build") => crate::build::main(&args[1..]),
+        #[cfg(feature = "install")]
+        Some(command) if let Some(subcommand) = crate::install::subcommand(command, &args[1..]) => {
+            crate::install::main(subcommand)
+        }
         Some("run") => match args.get(1) {
             Some(name) => script_or_file(name, &args[2..]),
             None => crate::scripts::list(),

@@ -9,6 +9,8 @@ pub mod build;
 pub mod builtins;
 pub mod cli;
 pub mod fmt;
+#[cfg(feature = "install")]
+pub mod install;
 pub mod lint;
 pub mod loader;
 pub mod natives;
