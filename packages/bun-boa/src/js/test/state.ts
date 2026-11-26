@@ -55,6 +55,8 @@ export interface Sequence {
   concurrent: boolean;
   /** Errors of expect.soft(), which fail the test when its callback is done. */
   softErrors: unknown[];
+  /** The promises of matchers that wait on a pending promise (expect_deferred.rs): the entry ends once they settle. */
+  pendingMatchers: Promise<unknown>[];
 }
 
 export const runtime = {

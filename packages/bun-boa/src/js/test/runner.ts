@@ -263,6 +263,7 @@ class ExecutionSequence {
       vitest: false,
       concurrent,
       softErrors: [],
+      pendingMatchers: [],
     };
   }
   get entryMode(): ScopeMode {
@@ -309,6 +310,7 @@ class ExecutionSequence {
     this.expect.expectCalls = 0;
     this.expect.assertions = { kind: "none" };
     this.expect.softErrors = [];
+    this.expect.pendingMatchers = [];
   }
 }
 
@@ -525,7 +527,16 @@ async function runEntry(sequence: ExecutionSequence, current: SequenceEntry) {
     runtime.sequence = sequence.expect;
   }
   const started = runCallback(entry);
-  const outcome = started instanceof Promise ? await withTimeout(started, entry.timeout) : started;
+  let outcome = started instanceof Promise ? await withTimeout(started, entry.timeout) : started;
+  // `waits_for_matchers`: a matcher that the callback did not await still ends inside its entry.
+  while (outcome !== "timeout" && sequence.expect.pendingMatchers.length) {
+    const pending = sequence.expect.pendingMatchers.splice(0);
+    const settled = await withTimeout(
+      Promise.allSettled(pending).then(() => undefined),
+      entry.timeout,
+    );
+    if (settled === "timeout") outcome = "timeout";
+  }
   // expect.soft() failures: each is an error of the test, which fails once its callback is done.
   for (const error of sequence.expect.softErrors.splice(0)) if (failSequence(sequence, atTest)) printError(error);
   if (outcome === "timeout") {
