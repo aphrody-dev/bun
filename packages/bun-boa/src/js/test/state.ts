@@ -9,6 +9,8 @@ export interface Native {
   promiseResult(promise: Promise<unknown>): unknown;
   readFile(path: string): string | undefined;
   writeFile(path: string, text: string): boolean;
+  /** `mock.module()`: what imports or requires `specifier`, resolved from `fromDir`, gets `exports` from now on. */
+  mockModule(specifier: string, fromDir: string, exports: unknown): void;
   /** Bun's `enable_ansi_colors_stderr`. */
   colors: boolean;
   isAgent: boolean;
@@ -24,6 +26,10 @@ export interface Native {
     retry: number;
     concurrent: boolean;
     maxConcurrency: number;
+    /** `--bail`: the number of failures that ends the run, 0 for none. */
+    bail: number;
+    /** The failures of the files that ran before this one. */
+    failuresBefore: number;
   };
   /** Set by js/test.ts for test.rs: runs the file's tests once it is evaluated. */
   run?: (path: string) => Promise<object>;

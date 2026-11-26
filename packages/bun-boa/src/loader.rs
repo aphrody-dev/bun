@@ -19,11 +19,20 @@ pub struct BunModuleLoader {
     modules: RefCell<HashMap<PathBuf, Module>>,
     /// The `module` object of each CommonJS module, whose `exports` `require` answers.
     commonjs: RefCell<HashMap<PathBuf, JsObject>>,
+    /// What `mock.module()` put in place of a path or a specifier: the exports that `require` answers.
+    mocked: RefCell<HashMap<PathBuf, JsValue>>,
 }
 
 /// The loader of the realm, in its data, which `require` (a native function without captures of Rust values) loads
 /// through.
 struct Installed(Rc<BunModuleLoader>);
+
+/// The loader that `install` made the realm's.
+pub fn installed(context: &Context) -> Option<Rc<BunModuleLoader>> {
+    context
+        .get_data::<Installed>()
+        .map(|installed| Rc::clone(&installed.0))
+}
 
 /// `require` as a module in `dir` calls it: Bun's builtin modules, JSON, CommonJS modules (their
 /// `module.exports`) and ES modules (their namespace, once evaluated).
@@ -51,6 +60,11 @@ fn require(specifier: &str, dir: &Path, context: &mut Context) -> JsResult<JsVal
         .get_data::<Installed>()
         .map(|installed| Rc::clone(&installed.0))
         .ok_or_else(|| JsNativeError::error().with_message("no module loader"))?;
+    let resolved = resolve(specifier, dir);
+    let key = resolved.clone().unwrap_or_else(|| PathBuf::from(specifier));
+    if let Some(exports) = loader.mocked.borrow().get(&key) {
+        return Ok(exports.clone());
+    }
     let module = if let Some(module) = loader.builtin(specifier, context) {
         if let Some(id) =
             crate::builtins::id_of(specifier).filter(|_| !matches!(specifier, "bun" | "bun:test"))
@@ -59,7 +73,7 @@ fn require(specifier: &str, dir: &Path, context: &mut Context) -> JsResult<JsVal
         }
         module?
     } else {
-        let Some(path) = resolve(specifier, dir) else {
+        let Some(path) = resolved else {
             return Err(type_error(format!(
                 "Cannot find module '{specifier}' from '{}'",
                 dir.display()
@@ -340,8 +354,39 @@ impl BunModuleLoader {
         function.call(&exports.into(), &args, context)?;
         module.set(js_string!("loaded"), true, false, context)?;
         let exports = module.get(js_string!("exports"), context)?;
+        exports_module(exports, path, false, context)
+    }
+
+    /// `mock.module(specifier, factory)`: from now on, what imports or requires `key` (a resolved path, or the
+    /// specifier when it resolves to nothing) gets `exports`.
+    pub fn mock(&self, key: PathBuf, exports: JsValue, context: &mut Context) -> JsResult<()> {
+        let module = exports_module(exports.clone(), &key, true, context)?;
+        self.modules.borrow_mut().insert(key.clone(), module);
+        self.mocked.borrow_mut().insert(key, exports);
+        Ok(())
+    }
+
+    /// The module that `mock` put in place of `key`.
+    fn mocked_module(&self, key: &Path) -> Option<Module> {
+        if !self.mocked.borrow().contains_key(key) {
+            return None;
+        }
+        self.modules.borrow().get(key).cloned()
+    }
+}
+
+/// An ES module whose names are the keys of `exports`: what a CommonJS module and a mocked one are seen as from an
+/// `import`. Its `default` is `exports` itself, or, for a mocked module, its `default` where it has one.
+fn exports_module(exports: JsValue, path: &Path, own_default: bool, context: &mut Context) -> JsResult<Module> {
+    {
         let mut names = vec![js_string!("default")];
-        let mut values = vec![exports.clone()];
+        let default = match exports.as_object() {
+            Some(object) if own_default && object.has_own_property(js_string!("default"), context)? => {
+                object.get(js_string!("default"), context)?
+            }
+            _ => exports.clone(),
+        };
+        let mut values = vec![default];
         if let Some(object) = exports.as_object() {
             let keys = boa_engine::object::builtins::JsArray::from_object(
                 context
@@ -385,7 +430,9 @@ impl BunModuleLoader {
             context,
         ))
     }
+}
 
+impl BunModuleLoader {
     pub fn load(&self, path: &Path, context: &mut Context) -> JsResult<Module> {
         if let Some(module) = self.modules.borrow().get(path) {
             return Ok(module.clone());
@@ -436,6 +483,9 @@ impl ModuleLoader for BunModuleLoader {
             let dir = &from[..from.rfind(['/', ':']).map_or(0, |i| i + 1)];
             specifier = format!("{dir}{relative}");
         }
+        if let Some(module) = self.mocked_module(Path::new(&specifier)) {
+            return std::future::ready(Ok(module));
+        }
         if let Some(module) = self.builtin(&specifier, &mut context.borrow_mut()) {
             return std::future::ready(module);
         }
@@ -446,6 +496,7 @@ impl ModuleLoader for BunModuleLoader {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
         let result = match resolve(&specifier, &from_dir) {
+            // A path that `mock.module()` mocked is in `modules`, where `load` finds it first.
             Some(path) => self.load(&path, &mut context.borrow_mut()),
             None => Err(type_error(format!(
                 "Cannot find module '{specifier}' from '{}'",

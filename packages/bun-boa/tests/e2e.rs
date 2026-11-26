@@ -349,6 +349,31 @@ fn test_runner_orders_as_bun() {
     assert_eq!(out.status.code(), Some(1), "{stderr}");
 }
 
+/// `--bail` stops at the failure it counts to, inside the file; with more than 20 tests passing, the failed ones are
+/// listed again after the last file.
+#[test]
+fn test_runner_bails_mid_file_and_repeats_failures() {
+    let run = |args: &[&str]| {
+        let out = bun()
+            .args(args)
+            .current_dir(fixtures().join("runner"))
+            .env("AGENT", "0")
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        (text(&out).1, out.status.code())
+    };
+    let (stderr, code) = run(&["test", "order.test.ts", "--bail"]);
+    assert!(stderr.contains("(fail) beforeAll throws > (unnamed)"), "{stderr}");
+    assert!(!stderr.contains("(fail) timeout"), "{stderr}");
+    assert!(stderr.contains("Ran 14 tests across 1 file.") && stderr.contains("Bailed out after 1 failure"), "{stderr}");
+    assert_eq!(code, Some(1), "{stderr}");
+
+    let (stderr, _) = run(&["test", "order.test.ts", "repeat.test.ts"]);
+    let listed = stderr.split_once("tests failed:").map(|(_, rest)| rest).unwrap_or_default();
+    assert!(listed.contains("(fail) beforeAll throws > (unnamed)") && listed.contains("(fail) timeout"), "{stderr}");
+}
+
 /// A file that does not load is an unhandled error and a failure, as in Bun.
 #[test]
 fn test_file_that_does_not_load() {
@@ -411,6 +436,20 @@ console.log("outside", als.getStore());
     let out = bun().args(["-e", code]).output().unwrap();
     let (stdout, stderr) = text(&out);
     assert_eq!(stdout, "outside undefined\nawait a\nmicrotask a\nnested b\ntimer a\n", "stderr: {stderr}");
+}
+
+/// mock.module() through the loader: import and require see the mock, of a missing package and of a builtin.
+#[test]
+fn mock_module_replaces_modules() {
+    let out = bun()
+        .args(["test", "mock-module.test.ts"])
+        .current_dir(fixtures().join("mock-module"))
+        .env("AGENT", "0")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let stderr = text(&out).1;
+    assert!(stderr.contains(" 4 pass") && stderr.contains(" 0 fail"), "{stderr}");
 }
 
 #[test]

@@ -431,6 +431,8 @@ export const stats = {
   filteredOut: 0,
   expects: 0,
   errors: 0,
+  /** `--bail`'s count of failures was reached: no further test runs. */
+  bailed: false,
 };
 
 /** The sequence whose callback is running, which an uncaught error is blamed on. */
@@ -601,7 +603,7 @@ async function execute() {
   phase = "execution";
   runtime.phase = "execution";
   let index = 0;
-  while (index < groups.length) {
+  while (index < groups.length && !stats.bailed) {
     const group = groups[index];
     await runGroup(group);
     index = group.sequences.every(sequence => isFail(sequence.result)) ? group.failureSkipTo : index + 1;
@@ -663,9 +665,9 @@ function report(sequence: ExecutionSequence, entry: Entry, elapsedNs: number) {
       line += colors() ? `${pretty(dim ? "<r><d> " : "<r><b> ")}${label}${pretty("<r>")}` : ` ${label}`;
       const test = sequence.test?.entry;
       const attempts = test ? test.retry - sequence.remainingRetry + 1 : 1;
-      const repeats = test ? test.repeat - sequence.remainingRepeat + 1 : 1;
+      const runs = test ? test.repeat - sequence.remainingRepeat + 1 : 1;
       if (attempts > 1) line += pretty(` <d>(attempt ${attempts})<r>`);
-      if (repeats > 1) line += pretty(` <d>(run ${repeats})<r>`);
+      if (runs > 1) line += pretty(` <d>(run ${runs})<r>`);
       if (elapsedNs > 10_000) line += ` ${elapsedText(elapsedNs)}`;
       line += "\n";
       switch (result) {
@@ -695,6 +697,12 @@ function report(sequence: ExecutionSequence, entry: Entry, elapsedNs: number) {
           break;
       }
       err(line);
+      // `failures_to_repeat_buf` and the others, which bun test prints again after the last file.
+      if (!native.options.onlyFailures) {
+        if (basic === "fail") repeats.fail += line;
+        else if (basic === "skip") repeats.skip += line;
+        else if (basic === "todo") repeats.todo += line;
+      }
     }
   }
   switch (result) {
@@ -714,9 +722,13 @@ function report(sequence: ExecutionSequence, entry: Entry, elapsedNs: number) {
       break;
     default:
       stats.fail++;
+      // `bail_out`: the failure that `--bail` counts to ends the run, the files before this one included.
+      if (native.options.bail > 0 && native.options.failuresBefore + stats.fail >= native.options.bail) stats.bailed = true;
   }
   stats.expects += sequence.expect.expectCalls;
 }
+
+export const repeats = { fail: "", skip: "", todo: "" };
 
 
 // ── errors ─────────────────────────────────────────────────────────────────

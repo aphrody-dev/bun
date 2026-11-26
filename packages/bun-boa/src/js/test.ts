@@ -9,6 +9,7 @@ import {
   jestSpyOn,
   mock,
   mocked,
+  mockObject,
   moduleMock,
   resetAllMocks,
   restoreAllMocks,
@@ -24,6 +25,7 @@ import {
   beforeEach,
   describe,
   onTestFinished,
+  repeats,
   run,
   setDefaultTimeout,
   test,
@@ -103,6 +105,7 @@ const vi: Record<string, unknown> = {
   setSystemTime,
   isMockFunction,
   mocked,
+  mockObject,
 };
 
 const it = test;
@@ -132,7 +135,7 @@ for (const name of ["setTimeout", "setInterval", "setImmediate"] as const) {
 native.run = async (path: string) => {
   const stats = await run(path);
   saveSnapshots();
-  return { ...stats, snapshots: { ...snapshots } };
+  return { ...stats, snapshots: { ...snapshots }, repeats: { ...repeats } };
 };
 native.unhandled = unhandled;
 
