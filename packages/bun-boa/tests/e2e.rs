@@ -264,3 +264,46 @@ fn file_errors_read_as_bun() {
     let (stdout, _) = text(&out);
     assert!(stdout.contains("ENOENT") && stdout.contains("no-such-file.txt"), "{stdout:?}");
 }
+
+/// `bun test` on Boa: discovery, `bun:test` imports and globals, hooks, async and `done` tests, mocks, `test.each`,
+/// skip/todo, a failing test that sets the exit code, `-t`, and Bun's summary.
+#[test]
+fn test_runs_bun_test_files() {
+    let dir = fixtures().join("test");
+    let out = bun().arg("test").current_dir(&dir).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    let all = format!("{stdout}{stderr}");
+    for line in [
+        "(pass) math > adds",
+        "(pass) math > nested > async",
+        "(pass) mocks",
+        "(pass) 2 + 3 = 5",
+        "(pass) globals > works",
+        "(fail) fails on purpose",
+        "(skip) skipped",
+        "(todo) later",
+        " 7 pass",
+        " 1 skip",
+        " 1 todo",
+        " 1 fail",
+        "Ran 10 tests across 2 files.",
+    ] {
+        assert!(all.contains(line), "missing {line:?} in:\n{all}");
+    }
+    assert!(all.contains("Expected: 5") && all.contains("Received: 4"), "{all}");
+    assert!(!all.contains("must not run") && !all.contains("beforeEach ran"), "{all}");
+    assert_eq!(out.status.code(), Some(1), "{all}");
+
+    let out = bun().args(["test", "nested"]).current_dir(&dir).output().unwrap();
+    let all = format!("{}{}", text(&out).0, text(&out).1);
+    assert!(all.contains(" 1 pass") && all.contains("across 1 file."), "{all}");
+    assert!(out.status.success(), "{all}");
+
+    let out = bun().args(["test", "math.test.ts", "-t", "^mocks$"]).current_dir(&dir).output().unwrap();
+    let all = format!("{}{}", text(&out).0, text(&out).1);
+    assert!(all.contains("(pass) mocks") && !all.contains("(pass) math > adds"), "{all}");
+
+    let out = bun().args(["test", "no-such-filter"]).current_dir(&dir).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{:?}", text(&out));
+    assert!(text(&out).1.contains("No tests found"), "{:?}", text(&out));
+}

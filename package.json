@@ -78,6 +78,7 @@
     "clean": "bun scripts/build/clean.ts",
     "pin-webkit": "bun ./scripts/pin-webkit.ts",
     "sync-webkit-source": "bun ./scripts/sync-webkit-source.ts",
-    "cxx:report": "bun scripts/cxx-report.ts"
+    "cxx:report": "bun scripts/cxx-report.ts",
+    "test:boa": "bun scripts/test-boa.ts"
   }
 }
