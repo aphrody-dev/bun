@@ -11,7 +11,7 @@ if [ ! -d vendor/mimalloc ]; then
 fi
 
 SUP=target/bench-json-cdeps
-mkdir -p "$SUP/wtf"
+mkdir -p "$SUP"
 export BUN_CODEGEN_DIR=${BUN_CODEGEN_DIR:-$PWD/build/debug/codegen}
 if [ ! -f "$BUN_CODEGEN_DIR/build_options.rs" ]; then
   echo "error: $BUN_CODEGEN_DIR/build_options.rs not found — run \`bun bd\` once first" >&2
@@ -19,15 +19,6 @@ if [ ! -f "$BUN_CODEGEN_DIR/build_options.rs" ]; then
 fi
 CC=${CC:-cc}
 CXX=${CXX:-c++}
-SIMDUTF_VERSION=v7.3.6
-SIMDUTF_STAMP="$SUP/.simdutf-$SIMDUTF_VERSION"
-if [ ! -f "$SIMDUTF_STAMP" ] || [ ! -f "$SUP/simdutf.cpp" ]; then
-  curl -fsSL -o "$SUP/simdutf.cpp" "https://github.com/simdutf/simdutf/releases/download/$SIMDUTF_VERSION/simdutf.cpp"
-  curl -fsSL -o "$SUP/simdutf.h" "https://github.com/simdutf/simdutf/releases/download/$SIMDUTF_VERSION/simdutf.h"
-  rm -f "$SUP"/simdutf*.o "$SUP"/.simdutf-*
-  touch "$SIMDUTF_STAMP"
-fi
-printf '#pragma once\n#include "simdutf.h"\n' > "$SUP/wtf/SIMDUTF.h"
 
 build() {
   local out=$1
@@ -37,8 +28,6 @@ build() {
 MI_FLAGS=(-O2 -fPIC -ftls-model=initial-exec -DNDEBUG -D_GNU_SOURCE -DMI_STATIC_LIB
   -DMI_SKIP_COLLECT_ON_EXIT=1 -DMI_DEFAULT_ALLOW_THP=0)
 build "$SUP/mimalloc.o" $CC "${MI_FLAGS[@]}" -Ivendor/mimalloc/include -c vendor/mimalloc/src/static.c
-build "$SUP/simdutf.o" $CXX -O3 -fPIC -std=c++20 -I"$SUP" -c "$SUP/simdutf.cpp"
-build "$SUP/simdutf_shim.o" $CXX -O3 -fPIC -std=c++20 -I"$SUP" -c src/parsers/benches/support/simdutf_shim.cpp
 # C/C++ XML parsers for benches/xml_parse.rs to compare against (optional).
 XML_C_DEFS=()
 XML_C_LIBS=()

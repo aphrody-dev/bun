@@ -1323,16 +1323,13 @@ pub(crate) mod strings_impl {
 
     #[inline]
     pub fn is_all_ascii(slice: &[u8]) -> bool {
-        // Short-string fast path: for ≤32 bytes the scalar loop wins. Without
-        // cross-LTO the FFI path is Rust → `simdutf__validate_ascii` shim
-        // (push/mov/pop/jmp) → `simdutf::validate_ascii` (runtime CPU-dispatch
-        // vtable load + indirect call) → impl; on the `path.dirname` micro the
-        // 2-hop dispatch was ~60% of the SIMD work for 14-byte inputs.
+        // Short-string fast path: for ≤32 bytes the scalar loop beats the
+        // runtime CPU dispatch of the kernel (on the `path.dirname` micro the
+        // dispatch was ~60% of the SIMD work for 14-byte inputs).
         if slice.len() <= 32 {
             return slice.iter().all(|&b| b < 0x80);
         }
-        // SAFETY: FFI reads exactly slice.len() bytes.
-        unsafe { simdutf::simdutf__validate_ascii(slice.as_ptr(), slice.len()) }
+        simdutf::validate::ascii(slice)
     }
 
     /// Byte index of the first non-ASCII byte, or None if all-ASCII.
@@ -1341,14 +1338,12 @@ pub(crate) mod strings_impl {
     /// this; `_usize` is the raw form for callers that index with the result.
     #[inline]
     pub(crate) fn first_non_ascii_usize(slice: &[u8]) -> Option<usize> {
-        // Short-string fast path: see is_all_ascii() above for the FFI-dispatch
-        // cost rationale. position() autovectorizes; ≤32B beats the shim.
+        // Short-string fast path: see is_all_ascii() above for the dispatch
+        // cost rationale. position() autovectorizes; ≤32B beats the kernel.
         if slice.len() <= 32 {
             return slice.iter().position(|&b| b >= 0x80);
         }
-        // SAFETY: FFI reads exactly slice.len() bytes.
-        let r =
-            unsafe { simdutf::simdutf__validate_ascii_with_errors(slice.as_ptr(), slice.len()) };
+        let r = simdutf::validate::with_errors::ascii(slice);
         if r.status == simdutf::Status::SUCCESS {
             None
         } else {

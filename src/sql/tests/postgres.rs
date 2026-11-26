@@ -52,35 +52,6 @@ unsafe extern "C" fn CRYPTO_memcmp(a: *const u8, b: *const u8, len: usize) -> i3
     unsafe { (std::slice::from_raw_parts(a, len) != std::slice::from_raw_parts(b, len)) as i32 }
 }
 
-#[unsafe(no_mangle)]
-extern "C" fn simdutf__base64_length_from_binary(len: usize, _: i32) -> usize {
-    len
-}
-
-/// One `A` per byte.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn simdutf__base64_encode(_: usize, len: usize, out: *mut u8, _: i32) -> usize {
-    // SAFETY: `out` has room for `simdutf__base64_length_from_binary(len)` bytes.
-    unsafe { out.write_bytes(b'A', len) };
-    len
-}
-
-#[repr(C)]
-struct Decoded(i32, usize);
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn simdutf__base64_decode_from_binary(
-    _: usize,
-    _: usize,
-    out: *mut u8,
-    room: usize,
-    _: i32,
-) -> Decoded {
-    // SAFETY: `out` has room for `room` bytes.
-    unsafe { out.write_bytes(0, room) };
-    Decoded(0, room)
-}
-
 mod handshake {
     use super::*;
     use ChannelBinding::{Disable, Prefer, Require};
