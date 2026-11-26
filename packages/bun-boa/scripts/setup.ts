@@ -29,5 +29,23 @@ async function generated() {
   return `codegen: ${commands.length} generators`;
 }
 
-const steps = [rustDep(lolhtml, "lolhtml"), rustDep(rustArgon2, "rust-argon2"), $`bun scripts/vendor.ts`.cwd(join(import.meta.dir, "..")).text(), generated()];
+// The OFL faces kitesurf-cdp embeds (no system fonts), from kitesurf's font set.
+const FONTS_BASE = "https://raw.githubusercontent.com/cloudflare/kitesurf/0affe70c9202b80396e3c5bf147018cb760af633/packages/engine/public/fonts";
+const FONTS = ["Arimo.ttf", "Arimo-Italic.ttf", "Tinos-Regular.ttf", "Tinos-Bold.ttf", "Tinos-Italic.ttf", "NotoSansMono.ttf", "NotoSans.ttf", "NotoSansSymbols2.ttf", "OFL.txt"];
+
+async function fonts() {
+  const dir = join(import.meta.dir, "../vendor/fonts");
+  const missing = [];
+  for (const name of FONTS) if (!(await Bun.file(join(dir, name)).exists())) missing.push(name);
+  await Promise.all(
+    missing.map(async name => {
+      const res = await fetch(`${FONTS_BASE}/${name}`);
+      if (!res.ok) throw new Error(`fonts/${name}: ${res.status}`);
+      await Bun.write(join(dir, name), res);
+    }),
+  );
+  return `vendor/fonts: ${missing.length} fetched`;
+}
+
+const steps = [rustDep(lolhtml, "lolhtml"), rustDep(rustArgon2, "rust-argon2"), $`bun scripts/vendor.ts`.cwd(join(import.meta.dir, "..")).text(), generated(), fonts()];
 for (const r of await Promise.allSettled(steps)) console.log(r.status === "fulfilled" ? String(r.value).trim() : `error: ${r.reason}`);

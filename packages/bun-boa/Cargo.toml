@@ -2,6 +2,7 @@
 # keep inheriting their settings from the root `Cargo.toml`.
 [workspace]
 resolver = "2"
+members = ["cdp"]
 
 [package]
 name = "bun-boa"
@@ -41,10 +42,27 @@ lto = "thin"
 codegen-units = 16
 panic = "abort"
 
-# The series in patches/<crate>-<version>/, applied to the crates.io tarballs by `bun run vendor`.
+# The series in patches/<crate>-<version>/, applied to the crates.io tarballs by `bun run vendor`: kitesurf's
+# (Boa and the Blitz stack) first, ours on top.
 [patch.crates-io]
+anyrender = { path = "vendor/anyrender-0.14.0" }
+anyrender_svg = { path = "vendor/anyrender_svg-0.15.0" }
+anyrender_vello_cpu = { path = "vendor/anyrender_vello_cpu-0.18.0" }
+blitz-dom = { path = "vendor/blitz-dom-0.3.0-beta.4" }
+blitz-html = { path = "vendor/blitz-html-0.3.0-beta.4" }
+blitz-paint = { path = "vendor/blitz-paint-0.3.0-beta.4" }
+blitz-traits = { path = "vendor/blitz-traits-0.3.0-beta.4" }
 boa_ast = { path = "vendor/boa_ast-0.22.0" }
 boa_engine = { path = "vendor/boa_engine-0.22.0" }
 boa_gc = { path = "vendor/boa_gc-0.22.0" }
 boa_interner = { path = "vendor/boa_interner-0.22.0" }
 boa_parser = { path = "vendor/boa_parser-0.22.0" }
+parley = { path = "vendor/parley-0.12.0" }
+parley_engine = { path = "vendor/parley_engine-0.12.0" }
+selectors = { path = "vendor/selectors-0.41.0" }
+stylo = { path = "vendor/stylo-0.22.0" }
+stylo_taffy = { path = "vendor/stylo_taffy-0.3.0-beta.4" }
+taffy = { path = "vendor/taffy-0.15.0" }
+usvg = { path = "vendor/usvg-0.48.1" }
+vello_common = { path = "vendor/vello_common-0.3.0" }
+vello_cpu = { path = "vendor/vello_cpu-0.3.0" }

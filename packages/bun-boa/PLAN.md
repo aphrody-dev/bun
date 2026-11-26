@@ -6,8 +6,9 @@ It merges Bun, Dioxus/Blitz and kitesurf without breaking any of them and withou
 - `packages/bun-boa/` is a standalone Cargo workspace (the Dioxus layout: a crate in `packages/`). Bun's root
   workspace and lockfile are untouched; Bun's `src/*` crates are path dependencies.
 - `patches/<crate>-<version>/` holds git-format-patch series against crates.io tarballs, kitesurf's series first
-  (Boa today, then Blitz, Stylo, Taffy, Parley, vello_cpu), ours on top. `bun run vendor` materialises them into
-  the gitignored `vendor/`, and `[patch.crates-io]` wires them in.
+  (Boa, Blitz, Stylo, Taffy, Parley, vello_cpu, usvg), ours on top. `bun run vendor` materialises them into
+  the gitignored `vendor/`, and `[patch.crates-io]` wires them in. A crate that is not on crates.io names its
+  base in `patches/<crate>-<version>/SOURCE` (`<git-url>@<ref>:<path>`) and is a path dependency.
 - `aphrody-dev/boa` and `aphrody-dev/blitz` are forks for upstream PRs only, never dependencies.
 - Builds never run locally: `bun run build` / `bun run test` (`scripts/remote.ts`) give the build host (n1,
   `/srv/xbuild` XFS) its own clone of HEAD from GitHub, rsync only the local delta, run `scripts/setup.ts`
@@ -47,7 +48,10 @@ Already Rust and reused as is: `js_parser`, `js_printer`, `ast`, `resolver`, `cs
 3. **Web APIs**: `fetch` (Rust HTTP plus rustls), `URL`, `TextEncoder`/`TextDecoder`, streams, `Blob`,
    WebCrypto, `Bun.serve`.
 4. **Node compat**: run Bun's own `src/js/node/*` builtins on Boa by providing their `$` intrinsics in Rust.
-5. **Blitz**: headless `Bun.WebView` on Blitz (vello_cpu screenshots), `HTMLRewriter` on lol-html.
+5. **Blitz**: headless `Bun.WebView` on Blitz (vello_cpu screenshots), `HTMLRewriter` on lol-html. First
+   piece: `cdp/` (`kitesurf-cdp serve --host 127.0.0.1 --port N`), a headless browser on kitesurf's Blitz
+   stack and `blitz-vibey-script` (Boa DOM bindings, a `SOURCE` series) behind the DevTools protocol, the
+   `lightpanda serve` contract agent-browser launches. `bun run build:cdp`, `bun run test:cdp`.
 6. **The rest**: `bun:sqlite` on Turso, `bun:ffi` on Cranelift, HTTP/3 on quinn, Windows I/O.
 7. **Conformance**: run Bun's `test/js` suite with this binary and track the pass rate. Engine
    performance work happens in the Boa fork.
