@@ -158,12 +158,9 @@ pub fn context(loader: Rc<BunModuleLoader>, main: Option<PathBuf>, argv: Vec<Str
         &mut context,
     )?;
     let ops = native(&mut context)?;
+    context.register_global_property(js_string!("__bun_native_ops__"), ops, Attribute::all())?;
     let prelude = crate::transpile::transpile(b"bun:prelude.ts", include_bytes!("js/bun.ts"))
         .map_err(|err| JsNativeError::syntax().with_message(err))?;
-    let install = context.eval(Source::from_bytes(&prelude))?;
-    install
-        .as_callable()
-        .ok_or_else(|| JsNativeError::typ().with_message("bun:prelude must evaluate to a function"))?
-        .call(&JsValue::undefined(), &[ops], &mut context)?;
+    context.eval(Source::from_bytes(&prelude))?;
     Ok(context)
 }

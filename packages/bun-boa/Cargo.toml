@@ -26,6 +26,9 @@ bun_js_printer = { path = "../../src/js_printer" }
 bun_sema_standalone = { path = "../../src/sema/standalone" }
 serde_json = "1"
 
+[dev-dependencies]
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
+
 [profile.dev]
 debug = "line-tables-only"
 

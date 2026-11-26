@@ -1,4 +1,6 @@
-// Installs `Bun` and `process` on top of the native operations from runtime.rs. Evaluates to the installer.
+// Installs `Bun` and `process` on top of the native operations that runtime.rs puts on `globalThis[OPS]`.
+// It is a call, not a bare function expression: the parser drops expression statements without side effects.
+const OPS = "__bun_native_ops__";
 (function install(native: {
   readText(path: string): string;
   readBytes(path: string): Uint8Array;
@@ -114,4 +116,5 @@
     process: { value: process, writable: true, configurable: true },
     global: { value: globalThis, writable: true, configurable: true },
   });
-});
+})((globalThis as any)[OPS]);
+delete (globalThis as any)[OPS];

@@ -63,10 +63,46 @@ fn reports_errors() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+/// `ldd` + `nm`, in Rust: no C++ runtime among the shared libraries, and no C++ ABI or `std::` symbol defined or
+/// imported. glibc's `__cxa_atexit`/`__cxa_finalize`/`__cxa_thread_atexit_impl` are C runtime and Rust's std uses them.
 #[test]
 fn binary_contains_no_cxx() {
+    use object::{Object, ObjectSymbol};
+    const GLIBC: [&str; 3] = ["__cxa_atexit", "__cxa_finalize", "__cxa_thread_atexit_impl"];
+    const CXX_LIBS: [&str; 3] = ["libstdc++", "libc++", "libc++abi"];
     let bytes = std::fs::read(env!("CARGO_BIN_EXE_bun")).unwrap();
-    for needle in [&b"__cxa_"[..], b"__gxx_personality", b"libstdc++", b"libc++.so", b"_ZNSt"] {
-        assert!(!bytes.windows(needle.len()).any(|w| w == needle), "found {}", String::from_utf8_lossy(needle));
+    let file = object::File::parse(&*bytes).unwrap();
+
+    let object::File::Elf64(elf) = &file else { panic!("expected a 64-bit ELF") };
+    let needed: Vec<String> = elf_needed(elf);
+    let cxx_libs: Vec<&String> = needed.iter().filter(|l| CXX_LIBS.iter().any(|c| l.starts_with(c))).collect();
+    assert!(cxx_libs.is_empty(), "links C++ runtime: {cxx_libs:?} (needed: {needed:?})");
+
+    let cxx_symbols: Vec<String> = file
+        .symbols()
+        .chain(file.dynamic_symbols())
+        .filter_map(|s| s.name().ok().map(str::to_owned))
+        .filter(|n| {
+            (n.starts_with("__cxa_") && !GLIBC.contains(&n.as_str()))
+                || n.starts_with("__gxx_personality")
+                || ["_ZNSt", "_ZSt", "_ZTI", "_ZTV", "_ZTS", "_Znw", "_Zdl", "_Zna", "_Zda"].iter().any(|p| n.starts_with(p))
+        })
+        .collect();
+    assert!(cxx_symbols.is_empty(), "C++ symbols: {:?}", &cxx_symbols[..cxx_symbols.len().min(20)]);
+}
+
+fn elf_needed(elf: &object::read::elf::ElfFile64) -> Vec<String> {
+    use object::read::elf::{Dyn, FileHeader, SectionHeader};
+    let endian = elf.endian();
+    let data = elf.data();
+    let sections = elf.elf_header().sections(endian, data).unwrap();
+    let mut out = Vec::new();
+    for section in sections.iter() {
+        let Some((entries, link)) = section.dynamic(endian, data).unwrap() else { continue };
+        let strings = sections.strings(endian, data, link).unwrap();
+        for d in entries.iter().filter(|d| d.tag32(endian) == Some(object::elf::DT_NEEDED)) {
+            out.push(String::from_utf8_lossy(d.string(endian, strings).unwrap()).into_owned());
+        }
     }
+    out
 }
