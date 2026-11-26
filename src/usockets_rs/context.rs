@@ -4,6 +4,7 @@ use core::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use core::ptr;
 use std::net::SocketAddr;
 
+use crate::bsd::{connect as bsd_connect, set_nodelay, sockaddr_from_std};
 use crate::eventing::*;
 use crate::socket::*;
 use crate::*;
@@ -43,6 +44,13 @@ pub unsafe extern "C" fn us_socket_group_deinit(group: *mut us_socket_group_t) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn us_socket_group_close_all(group: *mut us_socket_group_t) {
+    // SAFETY: the caller's group.
+    unsafe { group_close_all(group, true) }
+}
+
+/// Listeners first when `also_listeners`, so that nothing new is accepted while the sockets close. Process exit
+/// leaves listeners to their owners, which close them themselves.
+pub(crate) unsafe fn group_close_all(group: *mut us_socket_group_t, also_listeners: bool) {
     // SAFETY: the caller passes an initialized group. Close handlers can close siblings, which `iterator` follows.
     unsafe {
         let loop_ = (*group).loop_;
@@ -50,6 +58,11 @@ pub unsafe extern "C" fn us_socket_group_close_all(group: *mut us_socket_group_t
             return;
         }
         (*loop_).data.tick_depth += 1;
+        if also_listeners {
+            while !(*group).head_listen_sockets.is_null() {
+                crate::listen::us_listen_socket_close((*group).head_listen_sockets);
+            }
+        }
         let mut c = (*group).head_connecting_sockets;
         while !c.is_null() {
             let next = (*c).next_pending;
@@ -149,68 +162,18 @@ unsafe fn group_unlink_connecting(group: *mut us_socket_group_t, c: *mut us_conn
     }
 }
 
-// ── connect ────────────────────────────────────────────────────────────────
-
-fn sockaddr_from_std(address: &SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
-    // SAFETY: all-zero is an empty sockaddr_storage.
-    let mut storage: libc::sockaddr_storage = unsafe { core::mem::zeroed() };
-    let len = match address {
-        SocketAddr::V4(a) => {
-            // SAFETY: sockaddr_storage has room for, and the alignment of, a sockaddr_in.
-            let sin = unsafe { &mut *(&raw mut storage).cast::<libc::sockaddr_in>() };
-            sin.sin_family = libc::AF_INET as libc::sa_family_t;
-            sin.sin_port = a.port().to_be();
-            sin.sin_addr.s_addr = u32::from_ne_bytes(a.ip().octets());
-            core::mem::size_of::<libc::sockaddr_in>()
-        }
-        SocketAddr::V6(a) => {
-            // SAFETY: as above, for a sockaddr_in6.
-            let sin6 = unsafe { &mut *(&raw mut storage).cast::<libc::sockaddr_in6>() };
-            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
-            sin6.sin6_port = a.port().to_be();
-            sin6.sin6_addr.s6_addr = a.ip().octets();
-            sin6.sin6_flowinfo = a.flowinfo();
-            sin6.sin6_scope_id = a.scope_id();
-            core::mem::size_of::<libc::sockaddr_in6>()
-        }
-    };
-    (storage, len as libc::socklen_t)
-}
-
-/// A nonblocking connect on a new fd; -1 if it failed at once (errno says why).
-fn bsd_connect(family: c_int, addr: *const libc::sockaddr, len: libc::socklen_t, local: Option<&SocketAddr>) -> c_int {
-    // SAFETY: the caller passes an address of `len` bytes.
+/// An adopted socket's pending connect follows it to `group`.
+pub(crate) unsafe fn group_move_connecting(c: *mut us_connecting_socket_t, group: *mut us_socket_group_t) {
+    // SAFETY: the caller's live connecting socket and initialized group.
     unsafe {
-        let fd = libc::socket(family, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0);
-        if fd == -1 {
-            return -1;
+        if !(*c).group.is_null() {
+            group_unlink_connecting((*c).group, c);
         }
-        if let Some(local) = local {
-            let on: c_int = 1;
-            libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, (&raw const on).cast(), 4);
-            let (storage, local_len) = sockaddr_from_std(local);
-            if libc::bind(fd, (&raw const storage).cast(), local_len) != 0 {
-                let e = errno();
-                libc::close(fd);
-                set_errno(e);
-                return -1;
-            }
-        }
-        loop {
-            if libc::connect(fd, addr, len) == 0 {
-                return fd;
-            }
-            match errno() {
-                libc::EINPROGRESS | libc::EINTR => return fd,
-                e => {
-                    libc::close(fd);
-                    set_errno(e);
-                    return -1;
-                }
-            }
-        }
+        group_link_connecting(group, c);
     }
 }
+
+// ── connect ────────────────────────────────────────────────────────────────
 
 unsafe fn new_connect_socket(group: *mut us_socket_group_t, fd: c_int, kind: u8, options: c_int, ext_size: c_int) -> *mut us_socket_t {
     // SAFETY: the caller passes an initialized group and a connecting fd it hands over.
@@ -327,14 +290,14 @@ pub unsafe extern "C" fn us_socket_group_connect_unix(
 ) -> *mut us_socket_t {
     // SAFETY: the caller passes an initialized group and `pathlen` bytes at `path`.
     unsafe {
-        let mut addr: libc::sockaddr_un = core::mem::zeroed();
-        if pathlen >= addr.sun_path.len() {
-            set_errno(libc::ENAMETOOLONG);
-            return ptr::null_mut();
-        }
-        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        ptr::copy_nonoverlapping(path, addr.sun_path.as_mut_ptr(), pathlen);
-        let len = (core::mem::offset_of!(libc::sockaddr_un, sun_path) + pathlen + 1) as libc::socklen_t;
+        let path = if pathlen == 0 { &[][..] } else { core::slice::from_raw_parts(path.cast::<u8>(), pathlen) };
+        let (addr, len, _dir) = match crate::bsd::unix_address(path) {
+            Ok(address) => address,
+            Err(e) => {
+                set_errno(e);
+                return ptr::null_mut();
+            }
+        };
         let fd = bsd_connect(libc::AF_UNIX, (&raw const addr).cast(), len, None);
         if fd == -1 {
             return ptr::null_mut();

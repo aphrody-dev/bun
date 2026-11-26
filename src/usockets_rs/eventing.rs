@@ -509,6 +509,8 @@ unsafe fn us_internal_dispatch_ready_poll(p: *mut us_poll_t, error: c_int, eof: 
                         }
                     }
                     crate::context::us_internal_socket_after_open(s, connect_error);
+                } else {
+                    crate::listen::on_readable(p.cast());
                 }
             }
             _ => crate::socket::dispatch_socket(p.cast(), error, eof, events),
@@ -607,7 +609,7 @@ pub unsafe extern "C" fn us_loop_close_all_groups(loop_: *mut us_loop_t) -> c_in
         while !g.is_null() {
             let mut next = (*g).next;
             if !(*g).head_sockets.is_null() || !(*g).head_connecting_sockets.is_null() {
-                crate::context::us_socket_group_close_all(g);
+                crate::context::group_close_all(g, false);
                 any = 1;
             }
             if !next.is_null() && (*next).linked == 0 {
