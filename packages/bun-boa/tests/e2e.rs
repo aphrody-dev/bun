@@ -374,6 +374,57 @@ fn test_runner_bails_mid_file_and_repeats_failures() {
     assert!(listed.contains("(fail) beforeAll throws > (unnamed)") && listed.contains("(fail) timeout"), "{stderr}");
 }
 
+/// Through the loader's source maps: new inline snapshots are written into the test file where the matcher is called,
+/// and an error shows the lines of the file as it is written, at their numbers.
+#[test]
+fn inline_snapshots_are_written_and_errors_show_their_source() {
+    let dir = std::env::temp_dir().join(format!("bun-boa-inline-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let test = r#"import { expect, test } from "bun:test";
+
+type Shape = { a: number };
+test("writes", () => {
+  const value: Shape = { a: 1 };
+  expect(value).toMatchInlineSnapshot();
+  expect("one line").toMatchInlineSnapshot();
+  expect({ b: 2 }).toMatchInlineSnapshot({ b: expect.any(Number) });
+});
+
+test("fails", () => {
+  const typed: number = 1;
+  expect(typed).toBe(2);
+});
+"#;
+    std::fs::write(dir.join("inline.test.ts"), test).unwrap();
+    let out = bun()
+        .args(["test", "inline.test.ts"])
+        .current_dir(&dir)
+        .env("CI", "false")
+        .env("AGENT", "0")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let stderr = text(&out).1;
+    let written = std::fs::read_to_string(dir.join("inline.test.ts")).unwrap();
+    let expected = test
+        .replace(
+            "expect(value).toMatchInlineSnapshot();",
+            "expect(value).toMatchInlineSnapshot(`\n    {\n      \"a\": 1,\n    }\n  `);",
+        )
+        .replace(
+            "expect(\"one line\").toMatchInlineSnapshot();",
+            "expect(\"one line\").toMatchInlineSnapshot(`\"one line\"`);",
+        )
+        .replace(
+            "toMatchInlineSnapshot({ b: expect.any(Number) });",
+            "toMatchInlineSnapshot({ b: expect.any(Number) }, `\n    {\n      \"b\": Any<Number>,\n    }\n  `);",
+        );
+    assert_eq!(written, expected, "stderr: {stderr}");
+    assert!(stderr.contains("13 |   expect(typed).toBe(2);"), "{stderr}");
+    assert!(stderr.contains("inline.test.ts:13:"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A file that does not load is an unhandled error and a failure, as in Bun.
 #[test]
 fn test_file_that_does_not_load() {

@@ -14,6 +14,7 @@ pub mod loader;
 pub mod natives;
 pub mod runtime;
 pub mod scripts;
+pub mod source_maps;
 pub mod test;
 pub mod transpile;
 pub mod wtf;

@@ -11,6 +11,12 @@ export interface Native {
   writeFile(path: string, text: string): boolean;
   /** `mock.module()`: what imports or requires `specifier`, resolved from `fromDir`, gets `exports` from now on. */
   mockModule(specifier: string, fromDir: string, exports: unknown): void;
+  /** Through the loader's source map: a 1-based position of the printed code, in the file as it is written. */
+  originalPosition(path: string, line: number, column: number): [line: number, column: number] | undefined;
+  /** The file as it is written, if the loader transpiled it. */
+  originalSource(path: string): string | undefined;
+  /** Its 1-based lines `first` to `last`. */
+  originalLines(path: string, first: number, last: number): string[] | undefined;
   /** Bun's `enable_ansi_colors_stderr`. */
   colors: boolean;
   isAgent: boolean;

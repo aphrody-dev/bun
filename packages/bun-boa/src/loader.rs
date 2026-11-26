@@ -276,6 +276,7 @@ impl BunModuleLoader {
             "bun:test/mock.ts" => include_bytes!("js/test/mock.ts"),
             "bun:test/runner.ts" => include_bytes!("js/test/runner.ts"),
             "bun:test/snapshot.ts" => include_bytes!("js/test/snapshot.ts"),
+            "bun:test/source.ts" => include_bytes!("js/test/source.ts"),
             "bun:test/state.ts" => include_bytes!("js/test/state.ts"),
             "bun" => include_bytes!("js/bun_module.ts"),
             // The helpers the transpiler imports (`__using`, `__callDispose`, …): src/runtime.bun.js, whose

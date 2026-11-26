@@ -3,6 +3,7 @@
 import { deepMatch } from "./equals.ts";
 import { diffStrings, type M, type SnapshotHooks } from "./expect.ts";
 import { isAsymmetric, isError, showUnquoted, snapshotText } from "./format.ts";
+import { framesOf } from "./source.ts";
 import { native, runtime } from "./state.ts";
 
 const HEADER = "// Bun Snapshot v1, https://bun.sh/docs/test/snapshots\n";
@@ -155,21 +156,152 @@ export const hooks: SnapshotHooks = {
     if (runtime.sequence) addCount(nameOf(""));
     if (saved !== undefined) {
       const trimmed = trimInlineSnapshot(saved);
-      if (trimmed === text || native.options.updateSnapshots) {
+      if (trimmed === text) {
         counts.passed++;
         return;
       }
-      counts.failed++;
-      m.withParams("<green>expected<r>").fail(diffStrings(text, trimmed) + "\n");
+      if (!native.options.updateSnapshots) {
+        counts.failed++;
+        m.withParams("<green>expected<r>").fail(diffStrings(text, trimmed) + "\n");
+      }
+      counts.passed++;
+    } else {
+      if (native.isCI && !native.options.updateSnapshots) m.withParams("").failf(CI_INLINE, text);
+      counts.added++;
     }
-    if (native.isCI && !native.options.updateSnapshots) m.withParams("").failf(CI_INLINE, text);
-    // Bun writes the new snapshot into the test file; this build counts it and leaves the file as it is.
-    counts.added++;
+    // `add_inline_snapshot_to_write`: where in the test file the matcher was called, written at the end of the file.
+    const site = framesOf(String(new Error().stack ?? "")).find(frame => frame.path === runtime.path);
+    if (site?.line === undefined || site.column === undefined)
+      m.withParams("").failf(
+        "<b>Matcher error<r>: Inline snapshot matchers must be called from the test file:\n  Expected to be called from file: <green>{}<r>\n",
+        JSON.stringify(runtime.path),
+      );
+    inlineWrites.push({ line: site!.line!, column: site!.column!, kind: m.name, value: text, hasMatchers: propertyMatchers !== undefined });
   },
 };
 
+// ── write_inline_snapshots ──────────────────────────────────────────────────
+interface InlineWrite {
+  line: number;
+  column: number;
+  kind: string;
+  value: string;
+  hasMatchers: boolean;
+}
+const inlineWrites: InlineWrite[] = [];
+
+/** Where the value that starts at `i` ends: a string, a template literal, or anything up to a `,` or `)` at depth 0. */
+function skipValue(source: string, i: number): number {
+  let depth = 0;
+  while (i < source.length) {
+    const c = source[i];
+    if (c === '"' || c === "'") {
+      i = skipQuoted(source, i, c);
+      continue;
+    }
+    if (c === "`") {
+      i = skipTemplate(source, i);
+      continue;
+    }
+    if (c === "/" && source[i + 1] === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && source[i + 1] === "*") {
+      const end = source.indexOf("*/", i + 2);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") {
+      if (depth === 0) return i;
+      depth--;
+    } else if (c === "," && depth === 0) return i;
+    i++;
+  }
+  return i;
+}
+function skipQuoted(source: string, i: number, quote: string): number {
+  for (i++; i < source.length; i++) {
+    if (source[i] === "\\") i++;
+    else if (source[i] === quote) return i + 1;
+  }
+  return i;
+}
+function skipTemplate(source: string, i: number): number {
+  for (i++; i < source.length; i++) {
+    if (source[i] === "\\") i++;
+    else if (source[i] === "`") return i + 1;
+    else if (source[i] === "$" && source[i + 1] === "{") {
+      i = skipValue(source, i + 2);
+    }
+  }
+  return i;
+}
+const skipSpace = (source: string, i: number) => {
+  while (i < source.length && /\s/.test(source[i])) i++;
+  return i;
+};
+
+/** The template literal Bun writes: one line as it is, or the value's lines indented below the call's line. */
+function literal(value: string, indent: string): string {
+  if (!value.includes("\n")) return `\`${escape(value)}\``;
+  const lines = value.replace(/^\n/, "").replace(/\n$/, "").split("\n");
+  return `\`\n${lines.map(line => (line ? `${indent}  ${escape(line)}` : "")).join("\n")}\n${indent}\``;
+}
+
+function applyInlineWrites(source: string): string {
+  const lineStarts = [0];
+  for (let i = 0; i < source.length; i++) if (source[i] === "\n") lineStarts.push(i + 1);
+  const edits: [start: number, end: number, text: string][] = [];
+  for (const write of inlineWrites) {
+    const lineStart = lineStarts[write.line - 1];
+    if (lineStart === undefined) continue;
+    const lineEnd = source.indexOf("\n", lineStart) === -1 ? source.length : source.indexOf("\n", lineStart);
+    const at = lineStart + write.column - 1;
+    const name = `${write.kind}(`;
+    // The occurrence of the matcher's name on the call's line that is closest before its column, else the next one.
+    let open = -1;
+    for (let i = source.indexOf(name, lineStart); i !== -1 && i < lineEnd; i = source.indexOf(name, i + 1))
+      if (i <= at || open === -1) open = i;
+    if (open === -1) open = source.indexOf(name, at);
+    if (open === -1) continue;
+    const indent = /^[ \t]*/.exec(source.slice(lineStart))![0];
+    let i = skipSpace(source, open + name.length);
+    const text = literal(write.value, indent);
+    if (write.hasMatchers) {
+      i = skipValue(source, i);
+      const next = skipSpace(source, i);
+      if (source[next] === ",") {
+        const start = skipSpace(source, next + 1);
+        if (source[start] === ")") edits.push([next + 1, next + 1, ` ${text}`]);
+        else edits.push([start, skipValue(source, start), text]);
+      } else edits.push([i, i, `, ${text}`]);
+    } else if (source[i] === ")") edits.push([i, i, text]);
+    else edits.push([i, skipValue(source, i), text]);
+  }
+  edits.sort((a, b) => b[0] - a[0]);
+  let out = source;
+  let last = Infinity;
+  for (const [start, end, text] of edits) {
+    // The same call twice (in a loop) is written once.
+    if (end > last || start === last) continue;
+    out = out.slice(0, start) + text + out.slice(end);
+    last = start;
+  }
+  return out;
+}
+
 /** At the end of the file: the snapshots it added, written back. */
 export function save() {
+  if (inlineWrites.length) {
+    const source = native.originalSource(runtime.path) ?? native.readFile(runtime.path);
+    if (source !== undefined) {
+      const written = applyInlineWrites(source);
+      if (written !== source) native.writeFile(runtime.path, written);
+    }
+    inlineWrites.length = 0;
+  }
   if (!file?.dirty) return;
   const dir = file.path.slice(0, file.path.lastIndexOf("/"));
   if (!native.writeFile(file.path, file.text)) throw new Error(`Failed to make snapshot directory for test file: ${dir}`);
