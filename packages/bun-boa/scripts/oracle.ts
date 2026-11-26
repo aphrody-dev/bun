@@ -11,7 +11,7 @@
 //   bun scripts/oracle.ts worker <dir> <i>/<n> [limit]          (on a host)
 import { $, Glob } from "bun";
 import { availableParallelism } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 
 const CHECKPOINTS = ["transpile", "bundle", "run"] as const;
@@ -212,14 +212,16 @@ async function coordinate() {
   const [builder] = hosts;
   if (builder !== "n1") throw new Error("oracle: n1 builds bun-boa and must be reachable");
 
-  if (!values["no-build"])
-    await $`bun ${join(import.meta.dir, "remote.ts")} cargo build --bin bun --features build`.env({
-      ...Bun.env,
-      BUN_BUILD_HOST: builder,
-      BUN_REMOTE_REPO: remoteRepo,
-      GIT_NO_LAZY_FETCH: "1",
-    });
+  // remote.ts brings n1's tree to this checkout, which is also where the corpus is copied from.
+  const command = values["no-build"] ? ["true"] : ["cargo", "build", "--bin", "bun", "--features", "build"];
+  await $`bun ${join(import.meta.dir, "remote.ts")} ${command}`.env({
+    ...Bun.env,
+    BUN_BUILD_HOST: builder,
+    BUN_REMOTE_REPO: remoteRepo,
+    GIT_NO_LAZY_FETCH: "1",
+  });
   const boaBinary = `/srv/xbuild/target/bun-boa-${remoteRepo}/debug/bun`;
+  const tree = `/srv/xbuild/src/${remoteRepo}`;
 
   // Binaries on n1: the upstream one is the host's own Bun, so every host compares against the same build.
   await ssh(
@@ -248,13 +250,15 @@ async function coordinate() {
     dependencies: Object.fromEntries(top.map(p => [p.name, p.latest_release_number])),
   };
 
-  // Sources from this checkout to every host; packages installed once on n1 and copied from there.
-  const corpusFiles = join(repo, "build/oracle-corpus.txt");
-  await Bun.write(corpusFiles, ["test/", "bunfig.toml", "tsconfig.json", "tsconfig.base.json"].join("\n") + "\n");
+  // The corpus is n1's tree; packages are installed there once, and n1 copies all of it to the others.
+  await ssh(
+    builder,
+    `set -e; rsync -a --delete --exclude node_modules --exclude .git ${tree}/test/ ${DIR}/corpus/test/; ` +
+      `cp -f ${tree}/bunfig.toml ${tree}/tsconfig.json ${tree}/tsconfig.base.json ${DIR}/corpus/`,
+  );
   await Promise.all(
     hosts.map(async host => {
       await ssh(host, `mkdir -p ${DIR}/corpus ${DIR}/bin ${DIR}/cache`);
-      await $`rsync -az --delete --exclude node_modules --exclude .git -r --files-from=${corpusFiles} ${`${repo}/`} ${`${host}:${DIR}/corpus/`}`;
       await $`rsync -az ${join(import.meta.dir, "oracle.ts")} ${`${host}:${DIR}/oracle.ts`}`;
     }),
   );
@@ -275,8 +279,7 @@ async function coordinate() {
       await ssh(
         builder,
         `set -e; cd ${DIR}; rsync -az -e 'ssh -o BatchMode=yes' bin/ ${to}:${DIR}/bin/; ` +
-          `rsync -az --delete -e 'ssh -o BatchMode=yes' corpus/npm/ ${to}:${DIR}/corpus/npm/; ` +
-          `rsync -az --delete -e 'ssh -o BatchMode=yes' corpus/test/node_modules/ ${to}:${DIR}/corpus/test/node_modules/`,
+          `rsync -az --delete -e 'ssh -o BatchMode=yes' corpus/ ${to}:${DIR}/corpus/`,
       );
     }),
   );
