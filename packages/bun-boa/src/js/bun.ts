@@ -86,6 +86,14 @@ const OPS = "__bun_native_ops__";
     nanoseconds: native.nanoseconds,
     cwd: native.cwd,
     semver: native.semver,
+    fileURLToPath(url: unknown): string {
+      const parsed = url instanceof URL ? url : new URL(String(url));
+      if (parsed.protocol !== "file:") throw new TypeError("The URL must be of scheme file");
+      return decodeURIComponent(parsed.pathname);
+    },
+    pathToFileURL(path: unknown): URL {
+      return new URL(`file://${encodeURI(String(path)).replace(/[?#]/g, encodeURIComponent)}`);
+    },
   };
 
   const process: any = {
@@ -122,5 +130,23 @@ const OPS = "__bun_native_ops__";
     process: { value: process, writable: true, configurable: true },
     global: { value: globalThis, writable: true, configurable: true },
   });
+  // Boa's runtime has timers but no immediates: one is a timer that is due at once.
+  if (typeof (globalThis as any).setImmediate !== "function")
+    Object.defineProperties(globalThis, {
+      setImmediate: {
+        value: function setImmediate(fn: (...args: unknown[]) => void, ...args: unknown[]) {
+          return setTimeout(() => fn(...args), 0);
+        },
+        writable: true,
+        configurable: true,
+      },
+      clearImmediate: {
+        value: function clearImmediate(id: ReturnType<typeof setTimeout>) {
+          clearTimeout(id);
+        },
+        writable: true,
+        configurable: true,
+      },
+    });
 })((globalThis as any)[OPS]);
 delete (globalThis as any)[OPS];

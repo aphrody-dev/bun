@@ -210,7 +210,7 @@ fn brand(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
 }
 
 /// `promiseState(promise)`: 0 pending, 1 fulfilled, 2 rejected (`JSC::JSPromise::Status`).
-fn promise_state(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn promise_state(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     let promise = args
         .get_or_undefined(0)
         .as_object()
@@ -225,7 +225,7 @@ fn promise_state(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsV
 }
 
 /// `promiseResult(promise)`: its value or reason, `undefined` while it is pending.
-fn promise_result(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn promise_result(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     let promise = args
         .get_or_undefined(0)
         .as_object()

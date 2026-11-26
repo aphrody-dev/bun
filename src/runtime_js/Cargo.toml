@@ -1,6 +1,6 @@
 [package]
 name = "bun_runtime_js"
-description = "bun_runtime's JS-visible APIs on bun_js: node:path."
+description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff."
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -15,8 +15,12 @@ path = "lib.rs"
 bindings = ["../runtime/node/node_path.bind.ts"]
 
 [dependencies]
+bstr = { version = "1", default-features = false, features = ["alloc"] }
+bun_core = { path = "../bun_core" }
 bun_js = { path = "../bun_js" }
 bun_node_path = { path = "../node_path" }
+bun_text_diff = { path = "../text_diff" }
+const_format = "0.2"
 
 [dev-dependencies]
 bun_paths = { path = "../paths" }

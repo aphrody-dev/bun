@@ -6,3 +6,4 @@
 
 pub mod generated_bindgen;
 pub mod node;
+pub mod test_runner;

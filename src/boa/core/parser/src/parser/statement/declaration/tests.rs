@@ -899,3 +899,26 @@ fn await_using_valid_identifiers() {
         result.err()
     );
 }
+
+/// `export default async` is an async function declaration only when `function` follows on the same line; else it
+/// starts an expression, such as an async arrow function.
+#[test]
+fn export_default_async_arrow_function() {
+    let scope = boa_ast::scope::Scope::new_global();
+    for (source, is_function) in [
+        ("export default async () => {};", false),
+        ("export default async x => x;", false),
+        ("export default async\nfunction f() {}", false),
+        ("export default async function () {}", true),
+        ("export default async function* f() {}", true),
+    ] {
+        let module = Parser::new(Source::from_bytes(source))
+            .parse_module(&scope, &mut Interner::default())
+            .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+        let ModuleItem::ExportDeclaration(export) = &module.items().items()[0] else {
+            panic!("{source:?}: not an export");
+        };
+        let is_expression = matches!(&**export, ExportDeclaration::DefaultAssignmentExpression(_));
+        assert_eq!(is_expression, !is_function, "{source:?}");
+    }
+}

@@ -30,6 +30,23 @@ use super::{
     hoistable::{AsyncFunctionDeclaration, AsyncGeneratorDeclaration, GeneratorDeclaration},
 };
 
+/// Whether the `async` at the cursor starts an async function: `function` follows it on the same line.
+fn is_async_function<R: ReadChar>(cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<bool> {
+    let skip_n = if cursor.peek_is_line_terminator(0, interner).or_abrupt()? {
+        2
+    } else {
+        1
+    };
+    let is_line_terminator = cursor
+        .peek_is_line_terminator(skip_n, interner)?
+        .unwrap_or(true);
+    Ok(!is_line_terminator
+        && matches!(
+            cursor.peek(1, interner)?.map(crate::lexer::Token::kind),
+            Some(TokenKind::Keyword((Keyword::Function, _)))
+        ))
+}
+
 /// Parses an export declaration.
 ///
 /// More information:
@@ -166,6 +183,9 @@ where
             TokenKind::Keyword((Keyword::Default, false)) => {
                 cursor.advance(interner);
 
+                let is_async = cursor.peek(0, interner).or_abrupt()?.kind()
+                    == &TokenKind::Keyword((Keyword::Async, false));
+                let async_function = is_async && is_async_function(cursor, interner)?;
                 let tok = cursor.peek(0, interner).or_abrupt()?;
 
                 match tok.kind() {
@@ -183,7 +203,9 @@ where
                             )
                         }
                     }
-                    TokenKind::Keyword((Keyword::Async, false)) => {
+                    // `export default [lookahead ∉ { async [no LineTerminator here] function }]
+                    // AssignmentExpression`: `export default async () => {}` is an expression.
+                    TokenKind::Keyword((Keyword::Async, false)) if async_function => {
                         let next_token = cursor.peek(2, interner).or_abrupt()?;
                         if next_token.kind() == &TokenKind::Punctuator(Punctuator::Mul) {
                             AstExportDeclaration::DefaultAsyncGeneratorDeclaration(

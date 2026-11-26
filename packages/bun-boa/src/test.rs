@@ -1,26 +1,109 @@
-//! `bun test [filters…] [-t pattern] [--bail]`: Bun's test runner on Boa. Each test file runs in a realm of its
-//! own with `bun:test` (js/test.ts) loaded first, so `describe`/`test`/`expect` are globals as in Bun; the counts
-//! and the summary are printed the way `bun test` prints them.
+//! `bun test [filters…]`: Bun's test runner on Boa. Each test file runs in a realm of its own with `bun:test`
+//! (js/test.ts) loaded first, so `describe`/`test`/`expect` are globals as in Bun; js/test/runner.ts runs the file's
+//! tests and prints each, and the summary across files is printed here the way src/runtime/cli/test_command.rs does.
 
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use boa_engine::builtins::promise::PromiseState;
-use boa_engine::{Context, JsError, JsResult, JsValue, Module, Source, js_string};
+use boa_engine::object::ObjectInitializer;
+use boa_engine::object::builtins::JsPromise;
+use boa_engine::property::Attribute;
+use boa_engine::{
+    Context, JsArgs, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Module, NativeFunction,
+    js_string,
+};
 
 use crate::loader::BunModuleLoader;
 
 const SUFFIXES: &[&str] = &[".test", "_test", ".spec", "_spec"];
 const EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"];
 const SKIP_DIRS: &[&bun_paths::OSPathSlice] = &[b"node_modules", b".git"];
+const NATIVE: &str = "__bun_test_native__";
+const DEFAULT_TIMEOUT_MS: f64 = 5000.0;
 
+/// The flags of `bun test` (src/runtime/cli/Arguments.rs).
+#[derive(Default)]
+struct Options {
+    filters: Vec<String>,
+    name_pattern: Option<String>,
+    bail: u64,
+    timeout: Option<f64>,
+    update_snapshots: bool,
+    only_failures: bool,
+    todo: bool,
+    randomize: bool,
+    retry: f64,
+    concurrent: bool,
+    max_concurrency: Option<f64>,
+}
+
+impl Options {
+    fn parse(args: &[String]) -> Options {
+        let mut options = Options::default();
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            let (flag, inline) = match arg.split_once('=') {
+                Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_owned())),
+                _ => (arg.as_str(), None),
+            };
+            let mut value = || inline.clone().or_else(|| iter.next().cloned());
+            match flag {
+                "-t" | "--test-name-pattern" => options.name_pattern = value(),
+                "--bail" => options.bail = inline.as_deref().map_or(1, |n| n.parse().unwrap_or(1)),
+                "--timeout" => options.timeout = value().and_then(|n| n.parse().ok()),
+                "-u" | "--update-snapshots" => options.update_snapshots = true,
+                "--only-failures" => options.only_failures = true,
+                "--todo" => options.todo = true,
+                "--randomize" => options.randomize = true,
+                "--retry" => options.retry = value().and_then(|n| n.parse().ok()).unwrap_or(0.0),
+                "--concurrent" => options.concurrent = true,
+                "--max-concurrency" => options.max_concurrency = value().and_then(|n| n.parse().ok()),
+                "--preload" | "--rerun-each" | "--reporter" | "--reporter-outfile" | "--coverage-dir"
+                | "--coverage-reporter" | "--seed" | "--path-ignore-patterns" => {
+                    if inline.is_none() {
+                        iter.next();
+                    }
+                }
+                a if a.starts_with('-') => {}
+                a => options.filters.push(a.to_owned()),
+            }
+        }
+        options
+    }
+}
+
+/// What a file's run counted, and the totals across files.
 #[derive(Default, Clone, Copy)]
 struct Counts {
     pass: u64,
     fail: u64,
     skip: u64,
     todo: u64,
+    filtered_out: u64,
     expects: u64,
+    errors: u64,
+    snapshots: u64,
+    snapshots_passed: u64,
+    snapshots_failed: u64,
+    snapshots_added: u64,
+}
+
+impl std::ops::AddAssign for Counts {
+    fn add_assign(&mut self, o: Counts) {
+        self.pass += o.pass;
+        self.fail += o.fail;
+        self.skip += o.skip;
+        self.todo += o.todo;
+        self.filtered_out += o.filtered_out;
+        self.expects += o.expects;
+        self.errors += o.errors;
+        self.snapshots += o.snapshots;
+        self.snapshots_passed += o.snapshots_passed;
+        self.snapshots_failed += o.snapshots_failed;
+        self.snapshots_added += o.snapshots_added;
+    }
 }
 
 fn is_test_file(path: &str) -> bool {
@@ -82,163 +165,355 @@ fn files(filters: &[String], cwd: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn settle(
-    promise: boa_engine::object::builtins::JsPromise,
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn settle(promise: JsPromise, context: &mut Context) -> JsResult<JsValue> {
     context.run_jobs()?;
     match promise.state() {
         PromiseState::Fulfilled(value) => Ok(value),
         PromiseState::Rejected(reason) => Err(JsError::from_opaque(reason)),
-        PromiseState::Pending => Err(boa_engine::JsNativeError::error()
+        PromiseState::Pending => Err(JsNativeError::error()
             .with_message("the test file never finished (a promise that never settles)")
             .into()),
     }
 }
 
-fn error_text(err: &JsError, context: &mut Context) -> String {
-    let value = err
-        .clone()
-        .into_opaque(context)
-        .unwrap_or_else(|e| JsValue::from(js_string!(e.to_string())));
-    let stack = value
+fn get(object: &JsValue, key: &str, context: &mut Context) -> JsValue {
+    object
         .as_object()
-        .and_then(|o| o.get(js_string!("stack"), context).ok())
-        .filter(JsValue::is_string);
-    stack
-        .unwrap_or(value)
-        .display()
-        .to_string()
-        .trim_matches('"')
-        .to_string()
+        .and_then(|o| o.get(JsString::from(key), context).ok())
+        .unwrap_or_default()
 }
 
 fn number(object: &JsValue, key: &str, context: &mut Context) -> u64 {
-    object
-        .as_object()
-        .and_then(|o| o.get(js_string!(key), context).ok())
-        .and_then(|v| v.as_number())
-        .map_or(0, |n| n as u64)
+    get(object, key, context).as_number().map_or(0, |n| n as u64)
 }
 
-fn run_file(path: &Path, pattern: Option<&str>) -> Counts {
+fn path_arg(args: &[JsValue], context: &mut Context) -> JsResult<String> {
+    Ok(args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped())
+}
+
+fn read_file(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let path = path_arg(args, context)?;
+    Ok(
+        match bun_sys::File::read_from(bun_sys::Fd::cwd(), path.as_bytes()) {
+            Ok(bytes) => JsString::from(String::from_utf8_lossy(&bytes).as_ref()).into(),
+            Err(_) => JsValue::undefined(),
+        },
+    )
+}
+
+fn write_file(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let path = path_arg(args, context)?;
+    let text = args
+        .get_or_undefined(1)
+        .to_string(context)?
+        .to_std_string_escaped();
+    // make_open creates the parent directories.
+    let written = bun_sys::File::make_open(
+        path.as_bytes(),
+        bun_sys::O::WRONLY | bun_sys::O::CREAT | bun_sys::O::TRUNC,
+        0o664,
+    )
+    .and_then(|file| file.write_all(text.as_bytes()));
+    Ok(written.is_ok().into())
+}
+
+/// Bun's `enable_ansi_colors_stderr`: a terminal, unless NO_COLOR, or FORCE_COLOR.
+fn colors() -> bool {
+    let set = |name| std::env::var_os(name).is_some_and(|v| !v.is_empty() && v != "0");
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    set("FORCE_COLOR") || std::io::stderr().is_terminal()
+}
+
+/// `globalThis.__bun_test_native__`, which js/test/state.ts takes: printDiff.rs from bun_runtime_js, promise
+/// inspection, files, and the flags.
+fn install_natives(options: &Options, context: &mut Context) -> JsResult<JsObject> {
+    let global = bun_js::JSGlobalObject::from_context(context);
+    let mut diff = JsValue::undefined();
+    for (name, value) in bun_runtime_js::generated_bindgen::test_runner::namespaces(global)
+        .map_err(|error| global.into_engine_error(error))?
+    {
+        if name == "testRunner" {
+            diff = get(&value.into_engine(), "diff", context);
+        }
+    }
+    let flags = {
+        let mut flags = ObjectInitializer::new(context);
+        flags
+            .property(
+                js_string!("timeout"),
+                options.timeout.unwrap_or(DEFAULT_TIMEOUT_MS),
+                Attribute::all(),
+            )
+            .property(js_string!("updateSnapshots"), options.update_snapshots, Attribute::all())
+            .property(js_string!("onlyFailures"), options.only_failures, Attribute::all())
+            .property(js_string!("todo"), options.todo, Attribute::all())
+            .property(js_string!("randomize"), options.randomize, Attribute::all())
+            .property(js_string!("retry"), options.retry, Attribute::all())
+            .property(js_string!("concurrent"), options.concurrent, Attribute::all())
+            .property(
+                js_string!("maxConcurrency"),
+                options.max_concurrency.unwrap_or(20.0),
+                Attribute::all(),
+            );
+        if let Some(pattern) = &options.name_pattern {
+            flags.property(js_string!("namePattern"), JsString::from(pattern.as_str()), Attribute::all());
+        }
+        flags.build()
+    };
+    let mut native = ObjectInitializer::new(context);
+    native
+        .property(js_string!("diff"), diff, Attribute::all())
+        .property(js_string!("colors"), colors(), Attribute::all())
+        .property(js_string!("isAgent"), bun_core::output::is_ai_agent(), Attribute::all())
+        .property(js_string!("isCI"), bun_core::ci_info::is_ci(), Attribute::all())
+        .property(js_string!("options"), flags, Attribute::all());
+    for (name, f, len) in [
+        (
+            "promiseState",
+            crate::builtins::promise_state as fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>,
+            1,
+        ),
+        ("promiseResult", crate::builtins::promise_result, 1),
+        ("readFile", read_file, 1),
+        ("writeFile", write_file, 2),
+    ] {
+        native.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);
+    }
+    let native = native.build();
+    context.register_global_property(JsString::from(NATIVE), native.clone(), Attribute::all())?;
+    Ok(native)
+}
+
+/// A function js/test.ts put on the native object: `run` and `unhandled`.
+fn callback(native: &JsObject, name: &str, context: &mut Context) -> JsResult<JsObject> {
+    native
+        .get(JsString::from(name), context)?
+        .as_callable()
+        .ok_or_else(|| JsNativeError::typ().with_message(format!("bun:test has no {name}")).into())
+}
+
+/// The error the file threw while it loaded, printed by js/test/runner.ts as an unhandled error.
+fn unhandled(err: JsError, native: &JsObject, context: &mut Context) {
+    let value = err
+        .into_opaque(context)
+        .unwrap_or_else(|e| JsValue::from(JsString::from(e.to_string().as_str())));
+    match callback(native, "unhandled", context) {
+        Ok(print) => {
+            let _ = print.call(&JsValue::undefined(), &[value], context);
+        }
+        Err(_) => eprintln!("error: {}", value.display()),
+    }
+}
+
+fn run_file(path: &Path, options: &Options) -> Counts {
     let loader = Rc::new(BunModuleLoader::default());
     let argv = vec![
         std::env::args().next().unwrap_or_else(|| "bun".into()),
         path.display().to_string(),
     ];
+    let failed_to_load = Counts {
+        fail: 1,
+        errors: 1,
+        ..Counts::default()
+    };
     let mut context = match crate::runtime::context(loader.clone(), None, argv) {
         Ok(context) => context,
         Err(err) => {
             eprintln!("error: {err}");
-            return Counts {
-                fail: 1,
-                ..Counts::default()
-            };
+            return failed_to_load;
         }
     };
-    let result = (|| -> JsResult<JsValue> {
+    let loaded = (|| -> JsResult<JsObject> {
+        let native = install_natives(options, &mut context)?;
         let runner = loader
             .builtin("bun:test", &mut context)
             .expect("bun:test is built in")?;
         settle(runner.load_link_evaluate(&mut context), &mut context)?;
-        let module: Module = loader.load(path, &mut context)?;
-        settle(module.load_link_evaluate(&mut context), &mut context)?;
-        let pattern = serde_json::to_string(&pattern).unwrap_or_else(|_| "null".into());
-        let run = context.eval(Source::from_bytes(&format!(
-            "globalThis[Symbol.for(\"bun:test:run\")]({pattern} ?? undefined)"
-        )))?;
-        let promise = run
+        Ok(native)
+    })();
+    let native = match loaded {
+        Ok(native) => native,
+        Err(err) => {
+            eprintln!("error: bun:test: {err}");
+            return failed_to_load;
+        }
+    };
+    let evaluated = loader
+        .load(path, &mut context)
+        .and_then(|module: Module| settle(module.load_link_evaluate(&mut context), &mut context));
+    if let Err(err) = evaluated {
+        unhandled(err, &native, &mut context);
+        return failed_to_load;
+    }
+    let finished = (|| -> JsResult<JsValue> {
+        let run = callback(&native, "run", &mut context)?;
+        let promise = run.call(
+            &JsValue::undefined(),
+            &[JsString::from(path.display().to_string().as_str()).into()],
+            &mut context,
+        )?;
+        let promise = promise
             .as_object()
-            .and_then(|o| boa_engine::object::builtins::JsPromise::from_object(o.clone()).ok())
-            .ok_or_else(|| {
-                boa_engine::JsNativeError::typ()
-                    .with_message("bun:test runner did not return a promise")
-            })?;
+            .and_then(|o| JsPromise::from_object(o.clone()).ok())
+            .ok_or_else(|| JsNativeError::typ().with_message("bun:test's runner did not return a promise"))?;
         settle(promise, &mut context)
     })();
-    match result {
-        Ok(stats) => Counts {
-            pass: number(&stats, "pass", &mut context),
-            fail: number(&stats, "fail", &mut context),
-            skip: number(&stats, "skip", &mut context),
-            todo: number(&stats, "todo", &mut context),
-            expects: number(&stats, "expects", &mut context),
-        },
-        Err(err) => {
-            eprintln!(
-                "{}\n(fail) (file) {}",
-                error_text(&err, &mut context),
-                path.display()
-            );
+    match finished {
+        Ok(stats) => {
+            let snapshots = get(&stats, "snapshots", &mut context);
             Counts {
-                fail: 1,
-                ..Counts::default()
+                pass: number(&stats, "pass", &mut context),
+                fail: number(&stats, "fail", &mut context),
+                skip: number(&stats, "skip", &mut context),
+                todo: number(&stats, "todo", &mut context),
+                filtered_out: number(&stats, "filteredOut", &mut context),
+                expects: number(&stats, "expects", &mut context),
+                errors: number(&stats, "errors", &mut context),
+                snapshots: number(&snapshots, "total", &mut context),
+                snapshots_passed: number(&snapshots, "passed", &mut context),
+                snapshots_failed: number(&snapshots, "failed", &mut context),
+                snapshots_added: number(&snapshots, "added", &mut context),
             }
+        }
+        Err(err) => {
+            unhandled(err, &native, &mut context);
+            failed_to_load
         }
     }
 }
 
-pub fn main(args: &[String]) -> i32 {
-    let mut filters = Vec::new();
-    let mut pattern: Option<String> = None;
-    let mut bail = false;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "-t" | "--test-name-pattern" => pattern = iter.next().cloned(),
-            "--bail" => bail = true,
-            "--timeout" | "--preload" | "--rerun-each" | "--reporter" | "--reporter-outfile"
-            | "--coverage-dir" => {
-                iter.next();
+/// `Output::pretty_fmt` for the summary: Bun's markup, colored or not.
+fn pretty(text: &str, colors: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('>') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let code = match &after[..end] {
+            "r" => "\x1b[0m",
+            "d" => "\x1b[2m",
+            "b" => "\x1b[1m",
+            "red" => "\x1b[31m",
+            "green" => "\x1b[32m",
+            "yellow" => "\x1b[33m",
+            "magenta" => "\x1b[35m",
+            _ => {
+                out.push('<');
+                rest = after;
+                continue;
             }
-            a if a.starts_with("--test-name-pattern=") => {
-                pattern = Some(a["--test-name-pattern=".len()..].to_string())
-            }
-            a if a.starts_with('-') => {}
-            a => filters.push(a.to_string()),
+        };
+        if colors {
+            out.push_str(code);
         }
+        rest = &after[end + 1..];
     }
+    out.push_str(rest);
+    out
+}
+
+fn summary(total: &Counts, files: usize, start: std::time::Instant, colors: bool) {
+    let mut err = String::new();
+    let mut line = |text: &str| err.push_str(&pretty(text, colors));
+    if total.pass > 0 {
+        line("<r><green>");
+    }
+    line(&format!(" {} pass<r>\n", total.pass));
+    if total.skip > 0 {
+        line(&format!("<r><yellow> {} skip<r>\n", total.skip));
+    } else if total.filtered_out > 0 {
+        line(&format!("<r><d> {} filtered out<r>\n", total.filtered_out));
+    }
+    if total.todo > 0 {
+        line(&format!("<r><magenta> {} todo<r>\n", total.todo));
+    }
+    line(if total.fail > 0 { "<r><red>" } else { "<r><d>" });
+    line(&format!(" {} fail<r>\n", total.fail));
+    if total.errors > 0 {
+        line(&format!(
+            "<r><red> {} error{}<r>\n",
+            total.errors,
+            if total.errors > 1 { "s" } else { "" }
+        ));
+    }
+    let mut print_expect_calls = total.expects > 0;
+    if total.snapshots > 0 {
+        if print_expect_calls && total.snapshots_added == 0 && total.snapshots_failed == 0 {
+            print_expect_calls = false;
+            line(&format!(" {} snapshots, {} expect() calls", total.snapshots, total.expects));
+        } else {
+            let mut parts = Vec::new();
+            if total.snapshots_passed > 0 {
+                parts.push(format!("<d>{} passed<r>", total.snapshots_passed));
+            }
+            if total.snapshots_added > 0 {
+                parts.push(format!("<b>+{} added<r>", total.snapshots_added));
+            }
+            if total.snapshots_failed > 0 {
+                parts.push(format!("<red>{} failed<r>", total.snapshots_failed));
+            }
+            line(&format!("<d>snapshots:<r> {}", parts.join(", ")));
+        }
+        line("\n");
+    }
+    if print_expect_calls {
+        line(&format!(" {} expect() calls\n", total.expects));
+    }
+    let _ = std::io::stderr().write_all(err.as_bytes());
+    ran(total, files, start, colors);
+}
+
+/// `print_summary`: what ran, and how long it took.
+fn ran(total: &Counts, files: usize, start: std::time::Instant, colors: bool) {
+    let tests = total.pass + total.fail + total.skip + total.todo;
+    let text = format!(
+        "Ran {tests} test{} across {files} file{}. <d>[{:.2}ms]<r>\n",
+        if tests == 1 { "" } else { "s" },
+        if files == 1 { "" } else { "s" },
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    let _ = std::io::stderr().write_all(pretty(&text, colors).as_bytes());
+}
+
+pub fn main(args: &[String]) -> i32 {
+    let options = Options::parse(args);
+    let colors = colors();
+    println!("bun test {}", bun_core::package_json_version_with_sha);
+    let _ = std::io::stdout().flush();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let files = files(&filters, &cwd);
+    let files = files(&options.filters, &cwd);
     if files.is_empty() {
         eprintln!("No tests found!");
         return 1;
     }
     let start = std::time::Instant::now();
     let mut total = Counts::default();
+    let mut files_run = 0;
     for file in &files {
         let rel = file.strip_prefix(&cwd).unwrap_or(file);
         eprintln!("\n{}:", rel.display());
-        let c = run_file(file, pattern.as_deref());
-        total.pass += c.pass;
-        total.fail += c.fail;
-        total.skip += c.skip;
-        total.todo += c.todo;
-        total.expects += c.expects;
-        if bail && c.fail > 0 {
-            break;
+        total += run_file(file, &options);
+        files_run += 1;
+        if options.bail > 0 && total.fail >= options.bail {
+            ran(&total, files_run, start, colors);
+            eprintln!(
+                "\nBailed out after {} failure{}",
+                options.bail,
+                if options.bail == 1 { "" } else { "s" }
+            );
+            return 1;
         }
     }
     eprintln!();
-    for (n, label) in [
-        (total.pass, "pass"),
-        (total.skip, "skip"),
-        (total.todo, "todo"),
-        (total.fail, "fail"),
-    ] {
-        if n > 0 || label == "pass" || label == "fail" {
-            eprintln!(" {n} {label}");
-        }
-    }
-    eprintln!(" {} expect() calls", total.expects);
-    let tests = total.pass + total.fail + total.skip + total.todo;
-    eprintln!(
-        "Ran {tests} test{} across {} file{}. [{:.2}ms]",
-        if tests == 1 { "" } else { "s" },
-        files.len(),
-        if files.len() == 1 { "" } else { "s" },
-        start.elapsed().as_secs_f64() * 1000.0
-    );
-    i32::from(total.fail > 0)
+    summary(&total, files_run, start, colors);
+    i32::from(total.fail > 0 || total.errors > 0)
 }

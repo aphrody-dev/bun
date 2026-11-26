@@ -308,6 +308,62 @@ fn test_runs_bun_test_files() {
     assert!(text(&out).1.contains("No tests found"), "{:?}", text(&out));
 }
 
+/// js/test/runner.ts as Bun's runner orders a file: describe callbacks after the file, hooks around each test, done
+/// callbacks, a beforeAll that throws, test.failing, test.each labels, retries, expect.assertions, inline
+/// snapshots, onTestFinished and timeouts.
+#[test]
+fn test_runner_orders_as_bun() {
+    let out = bun()
+        .args(["test", "order.test.ts"])
+        .current_dir(fixtures().join("runner"))
+        .env("AGENT", "0")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert!(stdout.starts_with("bun test "), "{stdout}");
+    for line in [
+        "(pass) outer > inner > one",
+        "(pass) outer > two",
+        "(pass) async describe > declared after an await",
+        "(pass) order",
+        "(pass) done callback",
+        "(pass) failing passes when it throws",
+        "(pass) each 1 x 0",
+        "(pass) each 2 y 1",
+        "(pass) retried (attempt 2)",
+        "(pass) assertions",
+        "(pass) inline snapshot",
+        "(pass) after onTestFinished",
+        "(fail) beforeAll throws > (unnamed)",
+        "error: setup failed",
+        "(fail) timeout",
+        "this test timed out after 20ms.",
+        " 13 pass",
+        " 2 fail",
+        "Ran 15 tests across 1 file.",
+    ] {
+        assert!(stderr.contains(line), "missing {line:?} in:\n{stderr}");
+    }
+    assert!(!stderr.contains("must not run"), "{stderr}");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+}
+
+/// A file that does not load is an unhandled error and a failure, as in Bun.
+#[test]
+fn test_file_that_does_not_load() {
+    let dir = std::env::temp_dir().join(format!("bun-boa-bad-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("bad.test.js"), "throw new Error('top level');\n").unwrap();
+    let out = bun().args(["test", "bad.test.js"]).current_dir(&dir).env("NO_COLOR", "1").output().unwrap();
+    let (_, stderr) = text(&out);
+    for line in ["# Unhandled error between tests", "top level", " 0 pass", " 1 fail", " 1 error", "Ran 1 test across 1 file."] {
+        assert!(stderr.contains(line), "missing {line:?} in:\n{stderr}");
+    }
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn semver_is_bound_through_bun_js() {
     let out = bun()
