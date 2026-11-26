@@ -364,6 +364,34 @@ fn test_file_that_does_not_load() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `performance` (js/performance.ts) on the clock of bun_runtime_js: now() is monotonic from the time origin, and
+/// marks and measures are kept as WebCore's PerformanceUserTiming keeps them.
+#[test]
+fn performance_marks_and_measures() {
+    let code = r#"
+const a = performance.now(), b = performance.now();
+console.log(a <= b, Math.abs(performance.timeOrigin + performance.now() - Date.now()) < 1000);
+const start = performance.mark("start", { startTime: 1, detail: { x: 1 } });
+performance.mark("end", { startTime: 5 });
+const m = performance.measure("span", "start", "end");
+console.log(start instanceof PerformanceEntry, start.detail.x, m.entryType, m.startTime, m.duration);
+console.log(performance.getEntries().map(e => e.name).join(), performance.getEntriesByName("span").length);
+try { performance.measure("x", "missing") } catch (e) { console.log(e.name, e.message) }
+try { new PerformanceEntry() } catch (e) { console.log(e.constructor.name, e.message) }
+performance.clearMarks(); console.log(performance.getEntriesByType("mark").length);
+"#;
+    let out = bun().args(["-e", code]).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    let expected = "true true
+true 1 measure 1 4
+start,span,end 1
+SyntaxError No mark named 'missing' exists
+TypeError Illegal constructor
+0
+";
+    assert_eq!(stdout, expected, "stderr: {stderr}");
+}
+
 #[test]
 fn semver_is_bound_through_bun_js() {
     let out = bun()
