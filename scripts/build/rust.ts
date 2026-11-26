@@ -265,7 +265,7 @@ const generatedFilesReadBy: Record<string, string[] | "all"> = {
   bun_resolver: ["node-fallbacks/"],
   bun_runtime: "all",
   bun_sema: ["compressed/src/sema/"],
-  bun_semver_jsc: ["generated_bindgen_bun_semver_jsc.rs"],
+  bun_semver_jsc: ["generated_bindgen_bun_semver_js.rs"],
   bun_sourcemap_jsc: ["generated_bindgen_bun_sourcemap_jsc.rs"],
   bun_sql_jsc: ["generated_bindgen_bun_sql_jsc.rs"],
   bun_sys_jsc: ["generated_bindgen_bun_sys_jsc.rs"],

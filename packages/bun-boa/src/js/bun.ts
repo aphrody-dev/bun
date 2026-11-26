@@ -12,6 +12,7 @@ const OPS = "__bun_native_ops__";
   exit(code: number): never;
   cwd(): string;
   nanoseconds(): number;
+  semver: { satisfies(version: unknown, range: unknown): boolean; order(left: unknown, right: unknown): -1 | 0 | 1 };
   env: Record<string, string>;
   argv: string[];
   main: string;
@@ -62,7 +63,8 @@ const OPS = "__bun_native_ops__";
     }
   }
 
-  const path = (dest: unknown): string => (dest instanceof BunFile ? dest.name : dest instanceof URL ? dest.pathname : String(dest));
+  const path = (dest: unknown): string =>
+    dest instanceof BunFile ? dest.name : dest instanceof URL ? dest.pathname : String(dest);
 
   async function write(dest: unknown, data: unknown): Promise<number> {
     if (data instanceof BunFile) data = await data.bytes();
@@ -83,6 +85,7 @@ const OPS = "__bun_native_ops__";
     sleep: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
     nanoseconds: native.nanoseconds,
     cwd: native.cwd,
+    semver: native.semver,
   };
 
   const process: any = {
@@ -102,11 +105,14 @@ const OPS = "__bun_native_ops__";
     nextTick(fn: (...args: unknown[]) => void, ...args: unknown[]) {
       queueMicrotask(() => fn(...args));
     },
-    hrtime: Object.assign((prev?: [number, number]) => {
-      const ns = native.nanoseconds();
-      const now: [number, number] = [Math.floor(ns / 1e9), ns % 1e9];
-      return prev ? [now[0] - prev[0], now[1] - prev[1]] : now;
-    }, { bigint: () => BigInt(Math.floor(native.nanoseconds())) }),
+    hrtime: Object.assign(
+      (prev?: [number, number]) => {
+        const ns = native.nanoseconds();
+        const now: [number, number] = [Math.floor(ns / 1e9), ns % 1e9];
+        return prev ? [now[0] - prev[0], now[1] - prev[1]] : now;
+      },
+      { bigint: () => BigInt(Math.floor(native.nanoseconds())) },
+    ),
     stdout: { write: (s: unknown) => (native.stdout(String(s)), true) },
     stderr: { write: (s: unknown) => (native.stderr(String(s)), true) },
   };

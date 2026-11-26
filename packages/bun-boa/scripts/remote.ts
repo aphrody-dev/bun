@@ -21,7 +21,7 @@ const ssh = (script: string) => $`ssh -o BatchMode=yes ${host} ${script}`;
 const head = (await $`git -C ${repo} merge-base HEAD ${process.env.BUN_BASE_BRANCH ?? "main"}`.text()).trim();
 const changed = [
   ...new Set([
-    ...(await $`git -C ${repo} diff --name-only --diff-filter=d ${head}`.text()).split("\n"),
+    ...(await $`git -C ${repo} diff --name-only --no-renames --diff-filter=d ${head}`.text()).split("\n"),
     ...(await $`git -C ${repo} ls-files -o --exclude-standard`.text()).split("\n"),
   ]),
 ].filter(Boolean);
@@ -41,8 +41,11 @@ await $`ssh -o BatchMode=yes ${host} ${
   `set -e; cd ${remoteRepo}; keep=$(mktemp); sort > "$keep"; ` +
   `git ls-files -o --exclude-standard | sort | comm -23 - "$keep" | xargs -rd '\\n' rm -f --; rm -f "$keep"`
 } < ${Buffer.from(changed.join("\n") + "\n")}`;
-// Files the branch deleted still exist at the base commit the host checked out: delete them there too.
-const deleted = (await $`git -C ${repo} diff --name-only --diff-filter=D ${head}`.text()).split("\n").filter(Boolean);
+// Files the branch deleted still exist at the base commit the host checked out: delete them there too. A rename is
+// a deletion of its old path, which rename detection would hide.
+const deleted = (await $`git -C ${repo} diff --name-only --no-renames --diff-filter=D ${head}`.text())
+  .split("\n")
+  .filter(Boolean);
 if (deleted.length)
   await $`ssh -o BatchMode=yes ${host} ${`cd ${remoteRepo} && xargs -0 rm -f`} < ${Buffer.from(deleted.join("\0"))}`;
 

@@ -307,3 +307,15 @@ fn test_runs_bun_test_files() {
     assert_eq!(out.status.code(), Some(1), "{:?}", text(&out));
     assert!(text(&out).1.contains("No tests found"), "{:?}", text(&out));
 }
+
+#[test]
+fn semver_is_bound_through_bun_js() {
+    let out = bun()
+        .args(["test", "semver.test.ts"])
+        .current_dir(fixtures().join("semver"))
+        .output()
+        .unwrap();
+    let all = format!("{}{}", text(&out).0, text(&out).1);
+    assert!(all.contains(" 4 pass") && all.contains(" 0 fail"), "{all}");
+    assert!(out.status.success(), "{all}");
+}
