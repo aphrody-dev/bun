@@ -91,6 +91,7 @@ fn node_type(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<J
         Some(NodeData::Element(_)) | Some(NodeData::AnonymousBlock(_)) => 1,
         Some(NodeData::Text(_)) => 3,
         Some(NodeData::Comment { .. }) => 8,
+        Some(NodeData::ShadowRoot(_)) => 11,
         None => 0,
     };
     Ok(JsValue::from(node_type))
@@ -109,6 +110,7 @@ fn node_name(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<J
         }
         Some(NodeData::Text(_)) => "#text".to_string(),
         Some(NodeData::Comment { .. }) => "#comment".to_string(),
+        Some(NodeData::ShadowRoot(_)) => "#document-fragment".to_string(),
         None => String::new(),
     };
     Ok(js_str(&name))
@@ -121,7 +123,7 @@ fn parent_node(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult
         .doc
         .borrow()
         .get_node(node_id)
-        .and_then(|node| node.parent);
+        .and_then(|node| node.parent_id());
     Ok(node_or_null(&ctx, parent_id, context))
 }
 
@@ -129,7 +131,7 @@ fn child_ids(ctx: &crate::state::DomCtx, node_id: NodeId) -> Vec<NodeId> {
     ctx.doc
         .borrow()
         .get_node(node_id)
-        .map(|node| node.children.to_vec())
+        .map(|node| node.children().to_vec())
         .unwrap_or_default()
 }
 
@@ -151,7 +153,7 @@ fn first_child(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult
         .doc
         .borrow()
         .get_node(node_id)
-        .and_then(|node| node.children.first().copied());
+        .and_then(|node| node.children().first());
     Ok(node_or_null(&ctx, child_id, context))
 }
 
@@ -162,17 +164,17 @@ fn last_child(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<
         .doc
         .borrow()
         .get_node(node_id)
-        .and_then(|node| node.children.last().copied());
+        .and_then(|node| node.children().last());
     Ok(node_or_null(&ctx, child_id, context))
 }
 
 fn sibling(ctx: &crate::state::DomCtx, node_id: NodeId, offset: isize) -> Option<NodeId> {
     let doc = ctx.doc.borrow();
     let node = doc.get_node(node_id)?;
-    let parent = doc.get_node(node.parent?)?;
+    let parent = doc.get_node(node.parent_id()?)?;
     let index = parent.index_of_child(node_id)?;
     let sibling_index = index.checked_add_signed(offset)?;
-    parent.children.get(sibling_index).copied()
+    parent.children().get(sibling_index)
 }
 
 fn previous_sibling(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -203,7 +205,7 @@ fn is_connected(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResul
 fn owner_document(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let ctx = dom_ctx(context)?;
     let _ = this_node_id(this)?;
-    let root_id = ctx.doc.borrow().root_node().id;
+    let root_id = ctx.doc.borrow().root_node().id();
     Ok(node_or_null(&ctx, Some(root_id), context))
 }
 
@@ -370,9 +372,9 @@ fn replace_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
                     "the new child is an inclusive ancestor of this node",
                 ));
             }
-            ancestor_id = doc.get_node(id).and_then(|node| node.parent);
+            ancestor_id = doc.get_node(id).and_then(|node| node.parent_id());
         }
-        if doc.get_node(old_id).and_then(|node| node.parent) != Some(parent_id) {
+        if doc.get_node(old_id).and_then(|node| node.parent_id()) != Some(parent_id) {
             return Err(super::dom_exception(
                 context,
                 "NotFoundError",
@@ -426,7 +428,7 @@ fn insertable_node_ids(ctx: &crate::state::DomCtx, node_id: NodeId) -> Vec<NodeI
     }
     let child_ids: Vec<NodeId> = doc
         .get_node(node_id)
-        .map(|node| node.children.to_vec())
+        .map(|node| node.children().to_vec())
         .unwrap_or_default();
     let mut mutr = doc.mutate();
     for child_id in &child_ids {
@@ -540,7 +542,7 @@ fn has_child_nodes(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsRe
         .doc
         .borrow()
         .get_node(node_id)
-        .is_some_and(|node| !node.children.is_empty());
+        .is_some_and(|node| !node.children().is_empty());
     Ok(JsValue::from(has_children))
 }
 
@@ -556,7 +558,7 @@ fn contains(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
         if current == node_id {
             return Ok(JsValue::from(true));
         }
-        match doc.get_node(current).and_then(|node| node.parent) {
+        match doc.get_node(current).and_then(|node| node.parent_id()) {
             Some(parent_id) => current = parent_id,
             None => return Ok(JsValue::from(false)),
         }
@@ -581,9 +583,9 @@ fn clone_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
         } else {
             let src = match doc.get_node(node_id).map(|node| &node.data) {
                 Some(NodeData::Element(data)) => {
-                    CloneSrc::Element(data.name.clone(), data.attrs().to_vec())
+                    CloneSrc::Element(data.qual_name(), data.attrs().to_vec())
                 }
-                Some(NodeData::Text(data)) => CloneSrc::Text(data.content.clone()),
+                Some(NodeData::Text(data)) => CloneSrc::Text(data.content.to_string()),
                 _ => CloneSrc::Other,
             };
             let mut mutr = doc.mutate();

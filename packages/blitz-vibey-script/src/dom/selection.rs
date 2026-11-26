@@ -94,7 +94,7 @@ fn set_base_and_extent(
         let length = match &node.data {
             NodeData::Text(text) => text.content.encode_utf16().count(),
             NodeData::Comment { contents } => contents.encode_utf16().count(),
-            _ => node.children.len(),
+            _ => node.children().len(),
         };
         if offset > length {
             return Err(dom_exception(
@@ -150,15 +150,14 @@ fn range_endpoints(doc: &BaseDocument) -> Option<[Range; 2]> {
         let node = doc.get_node(id)?;
         // Anonymous inline roots are rebuilt, so compare their stable location.
         let (id, index) = if node.is_anonymous() {
-            let parent = doc.get_node(node.parent?)?;
-            let children = parent.layout_children.borrow();
+            let parent = doc.get_node(node.parent_id()?)?;
+            let children = parent.layout_children()?;
             let index = children
-                .as_ref()?
                 .iter()
-                .take_while(|&&child| child != node.id)
+                .take_while(|&&child| child != node.id())
                 .filter(|&&child| doc.get_node(child).is_some_and(Node::is_anonymous))
                 .count();
-            (parent.id, Some(index))
+            (parent.id(), Some(index))
         } else {
             (id, None)
         };
@@ -187,16 +186,14 @@ fn rendered_point(doc: &BaseDocument, point: Point) -> Option<Point> {
     if !node.flags.is_in_document() {
         return None;
     }
-    if let Some(root) = inline_root(doc, node.id) {
+    if let Some(root) = inline_root(doc, node.id()) {
         let layout = doc
             .get_node(root)?
-            .element_data()?
-            .inline_layout_data
-            .as_ref()?;
+            .element_data()?.inline_layout_data()?;
         let mut mapper = OffsetMapper {
             doc,
             root,
-            text: &layout.text,
+            text: layout.text(doc.tree()),
             cursor: 0,
             collapsed_space: false,
             point,
@@ -209,12 +206,13 @@ fn rendered_point(doc: &BaseDocument, point: Point) -> Option<Point> {
     }
 
     // Block containers have no inline layout of their own. Use the adjacent text.
-    let offset = point.1.min(node.children.len());
-    node.children[offset..]
+    let children = node.children().to_vec();
+    let offset = point.1.min(children.len());
+    children[offset..]
         .iter()
         .find_map(|&id| subtree_point(doc, id, false))
         .or_else(|| {
-            node.children[..offset]
+            children[..offset]
                 .iter()
                 .rev()
                 .find_map(|&id| subtree_point(doc, id, true))
@@ -226,11 +224,11 @@ fn inline_root(doc: &BaseDocument, mut id: NodeId) -> Option<NodeId> {
         let node = doc.get_node(id)?;
         if node
             .element_data()
-            .is_some_and(|element| element.inline_layout_data.is_some())
+            .is_some_and(|element| element.inline_layout_data().is_some())
         {
             return Some(id);
         }
-        id = node.layout_parent.get()?;
+        id = node.layout_parent_id()?;
     }
 }
 
@@ -245,14 +243,12 @@ fn subtree_point(doc: &BaseDocument, id: NodeId, end: bool) -> Option<Point> {
         return rendered_point(doc, (id, offset));
     }
     if end {
-        node.children
+        node.children()
             .iter()
-            .rev()
-            .find_map(|&id| subtree_point(doc, id, end))
+            .rev().find_map(|id| subtree_point(doc, id, end))
     } else {
-        node.children
-            .iter()
-            .find_map(|&id| subtree_point(doc, id, end))
+        node.children()
+            .iter().find_map(|id| subtree_point(doc, id, end))
     }
 }
 
@@ -280,13 +276,12 @@ impl OffsetMapper<'_> {
         if id != self.root
             && node
                 .element_data()
-                .is_some_and(|element| element.inline_layout_data.is_some())
+                .is_some_and(|element| element.inline_layout_data().is_some())
         {
             return;
         }
         if let NodeData::Text(data) = &node.data {
-            let style = node
-                .parent
+            let style = node.parent_id()
                 .and_then(|id| self.doc.get_node(id))
                 .and_then(Node::primary_styles);
             let transform = style
@@ -321,7 +316,7 @@ impl OffsetMapper<'_> {
         if let Some(before) = node.before() {
             self.visit(before);
         }
-        for (index, &child) in node.children.iter().enumerate() {
+        for (index, child) in node.children().iter().enumerate() {
             if id == self.point.0 && index == self.point.1 {
                 self.result = Some(self.cursor);
                 return;

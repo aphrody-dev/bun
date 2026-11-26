@@ -29,17 +29,17 @@ pub(crate) fn inner_text(element: &Node) -> String {
         .flatten()
     {
         while root.is_anonymous() && !is_generated_pseudo(root) {
-            let Some(parent) = root.layout_parent.get() else {
+            let Some(parent) = root.layout_parent_id() else {
                 break;
             };
             root = element.with(parent);
         }
         start = root;
-        filter = Some(element.id);
+        filter = Some(element.id());
     }
 
     let mut collector = InnerTextCollector {
-        target: element.id,
+        target: element.id(),
         text: String::new(),
         pending_line_breaks: 0,
     };
@@ -56,7 +56,7 @@ fn display(node: &Node) -> Option<Display> {
 fn is_rendered(element: &Node) -> bool {
     let has_box = display(element)
         .is_some_and(|d| !matches!(d.inside(), DisplayInside::None | DisplayInside::Contents));
-    let mut ancestors = std::iter::successors(element.parent, |&id| element.with(id).parent);
+    let mut ancestors = std::iter::successors(element.parent_id(), |&id| element.with(id).parent_id());
     element.flags.is_in_document()
         && has_box
         && !ancestors.any(|id| {
@@ -81,19 +81,19 @@ fn is_replaced_element(name: &markup5ever::LocalName) -> bool {
 
 /// `::before` and `::after` are anonymous nodes referenced by their parent element.
 fn is_generated_pseudo(node: &Node) -> bool {
-    node.parent.is_some_and(|parent| {
+    node.parent_id().is_some_and(|parent| {
         let parent = node.with(parent);
-        parent.before() == Some(node.id) || parent.after() == Some(node.id)
+        parent.before() == Some(node.id()) || parent.after() == Some(node.id())
     })
 }
 
 fn is_inclusive_descendant_of(node: &Node, ancestor: NodeId) -> bool {
     let mut current = Some(node);
     while let Some(n) = current {
-        if n.id == ancestor {
+        if n.id() == ancestor {
             return true;
         }
-        current = n.parent.map(|id| node.with(id));
+        current = n.parent_id().map(|id| node.with(id));
     }
     false
 }
@@ -149,22 +149,22 @@ impl InnerTextCollector {
         self.require_line_breaks(line_breaks);
 
         let element_data = node.element_data();
-        if let Some(layout) = element_data.and_then(|el| el.inline_layout_data.as_deref()) {
+        if let Some(layout) = element_data.and_then(|el| el.inline_layout_data()) {
             self.visit_inline_layout(node, layout, filter);
         } else if node.flags.is_table_root() || is_internal_table_part(display.inside()) {
             // Table layout flattens the rows away, so walk the DOM to find them
-            for &child_id in &node.children {
+            for child_id in node.children().iter() {
                 self.visit_child(node.with(child_id), filter);
             }
-        } else if let Some(children) = node.layout_children.borrow().as_ref() {
-            for &child_id in children {
+        } else if let Some(children) = node.layout_children() {
+            for &child_id in children.iter() {
                 self.visit_child(node.with(child_id), filter);
             }
         }
 
         if display.inside() == DisplayInside::TableCell
             && is_visible
-            && node.id != self.target
+            && node.id() != self.target
             && !is_last_table_cell(node)
         {
             self.push_str("\t");
@@ -178,13 +178,13 @@ impl InnerTextCollector {
         };
         if is_inclusive_descendant_of(child, target) {
             self.visit(child, None);
-        } else if child.is_anonymous() || is_inclusive_descendant_of(child.with(target), child.id) {
+        } else if child.is_anonymous() || is_inclusive_descendant_of(child.with(target), child.id()) {
             self.visit(child, filter);
         }
     }
 
     fn visit_inline_layout(&mut self, root: &Node, layout: &TextLayout, filter: Option<NodeId>) {
-        let text = layout.text.as_str();
+        let text = layout.text(root.tree());
         let marker_len = inside_marker_len(root, text);
 
         let mut cached_brush: Option<(NodeId, bool)> = None;
@@ -204,9 +204,9 @@ impl InnerTextCollector {
             included
         };
 
-        let mut boxes = layout.layout.inline_boxes().peekable();
+        let mut boxes = layout.layout(root.tree()).inline_boxes().peekable();
         let mut runs = Vec::new();
-        for line in layout.layout.lines() {
+        for line in layout.layout(root.tree()).lines() {
             // Runs are stored in visual order: restore logical order for bidi text
             runs.clear();
             runs.extend(line.runs());
@@ -248,11 +248,12 @@ fn is_internal_table_part(display: DisplayInside) -> bool {
 }
 
 fn is_last_table_cell(cell: &Node) -> bool {
-    let Some(row) = cell.parent.map(|id| cell.with(id)) else {
+    let Some(row) = cell.parent_id().map(|id| cell.with(id)) else {
         return true;
     };
-    let position = row.children.iter().position(|&id| id == cell.id);
-    row.children[position.map_or(0, |p| p + 1)..]
+    let children = row.children().to_vec();
+    let position = children.iter().position(|&id| id == cell.id());
+    children[position.map_or(0, |p| p + 1)..]
         .iter()
         .all(|&id| display(cell.with(id)).is_none_or(|d| d.inside() != DisplayInside::TableCell))
 }
@@ -261,7 +262,7 @@ fn is_last_table_cell(cell: &Node) -> bool {
 fn inside_marker_len(root: &Node, text: &str) -> usize {
     let Some(list_item) = root
         .element_data()
-        .and_then(|el| el.list_item_data.as_deref())
+        .and_then(|el| el.list_item_data())
     else {
         return 0;
     };

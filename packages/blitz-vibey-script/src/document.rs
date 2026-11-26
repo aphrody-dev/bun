@@ -321,7 +321,7 @@ impl ScriptDocument {
     fn collect_scripts(&self) -> Vec<PendingScript> {
         let doc = self.inner.borrow();
         let mut scripts = Vec::new();
-        let mut stack = vec![doc.root_node().id];
+        let mut stack = vec![doc.root_node().id()];
 
         while let Some(node_id) = stack.pop() {
             let Some(node) = doc.get_node(node_id) else {
@@ -353,7 +353,7 @@ impl ScriptDocument {
                 }
             }
 
-            stack.extend(node.children.iter().rev().copied());
+            stack.extend(node.children().iter().rev());
         }
 
         scripts

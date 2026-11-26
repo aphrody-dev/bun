@@ -1371,7 +1371,7 @@ impl ScriptRuntime {
         crate::dom::init_protos(&ctx, &mut context);
 
         // `document`
-        let root_id = ctx.doc.borrow().root_node().id;
+        let root_id = ctx.doc.borrow().root_node().id();
         let document_wrapper = node_wrapper(&ctx, root_id, &mut context);
         register_global(&mut context, "document", document_wrapper.into());
 
@@ -1575,7 +1575,7 @@ impl ScriptRuntime {
     pub fn install_body_onload_attribute(&mut self) {
         let code: Option<String> = {
             let doc = self.ctx.doc.borrow();
-            let mut stack = vec![doc.root_node().id];
+            let mut stack = vec![doc.root_node().id()];
             let mut code = None;
             while let Some(node_id) = stack.pop() {
                 let Some(node) = doc.get_node(node_id) else {
@@ -1589,7 +1589,7 @@ impl ScriptRuntime {
                         break;
                     }
                 }
-                stack.extend(node.children.iter().rev().copied());
+                stack.extend(node.children().iter().rev());
             }
             code
         };
@@ -1621,7 +1621,7 @@ impl ScriptRuntime {
         let ids: Vec<(String, NodeId)> = {
             let doc = self.ctx.doc.borrow();
             let mut ids = Vec::new();
-            let mut stack = vec![doc.root_node().id];
+            let mut stack = vec![doc.root_node().id()];
             while let Some(node_id) = stack.pop() {
                 let Some(node) = doc.get_node(node_id) else {
                     continue;
@@ -1634,7 +1634,7 @@ impl ScriptRuntime {
                         ids.push((id.to_string(), node_id));
                     }
                 }
-                stack.extend(node.children.iter().rev().copied());
+                stack.extend(node.children().iter().rev());
             }
             ids
         };
@@ -1920,7 +1920,7 @@ impl ScriptRuntime {
 
     /// Dispatch a simple event (e.g. `DOMContentLoaded`) targeting the document node
     pub fn dispatch_document_event(&mut self, name: &str) -> bool {
-        let root_id = self.ctx.doc.borrow().root_node().id;
+        let root_id = self.ctx.doc.borrow().root_node().id();
         let mut event_state = EventState::default();
         let ran = self.dispatch_event_inner(
             &[root_id],
@@ -2222,7 +2222,7 @@ fn window_scroll_to(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let ctx = dom_ctx(context)?;
     let mut doc = ctx.doc.borrow_mut();
     doc.resolve(0.0);
-    let Some(root_id) = doc.try_root_element().map(|root| root.id) else {
+    let Some(root_id) = doc.try_root_element().map(|root| root.id()) else {
         return Ok(JsValue::undefined());
     };
     let current = doc.viewport_scroll();
@@ -2240,7 +2240,7 @@ fn window_scroll_by(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let ctx = dom_ctx(context)?;
     let mut doc = ctx.doc.borrow_mut();
     doc.resolve(0.0);
-    let Some(root_id) = doc.try_root_element().map(|root| root.id) else {
+    let Some(root_id) = doc.try_root_element().map(|root| root.id()) else {
         return Ok(JsValue::undefined());
     };
     doc.scroll_by(

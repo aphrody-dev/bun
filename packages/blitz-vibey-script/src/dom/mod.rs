@@ -81,7 +81,7 @@ pub(crate) fn node_wrapper(ctx: &DomCtx, node_id: NodeId, context: &mut Context)
             Some(NodeData::Text(_)) | Some(NodeData::Comment { .. }) => {
                 protos.character_data.clone()
             }
-            None => protos.node.clone(),
+            Some(NodeData::ShadowRoot(_)) | None => protos.node.clone(),
         };
         let is_body = matches!(
             node_data,
@@ -392,7 +392,7 @@ pub(crate) fn collect_matching_descendants(
     let mut matches = Vec::new();
     let mut stack: Vec<NodeId> = doc
         .get_node(root_id)
-        .map(|root| root.children.iter().rev().copied().collect())
+        .map(|root| root.children().iter().rev().collect())
         .unwrap_or_default();
     while let Some(node_id) = stack.pop() {
         let Some(node) = doc.get_node(node_id) else {
@@ -403,7 +403,7 @@ pub(crate) fn collect_matching_descendants(
                 matches.push(node_id);
             }
         }
-        stack.extend(node.children.iter().rev().copied());
+        stack.extend(node.children().iter().rev());
     }
     matches
 }

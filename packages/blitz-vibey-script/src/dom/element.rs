@@ -231,7 +231,7 @@ pub(crate) fn read_attr(ctx: &DomCtx, node_id: NodeId, name: &str) -> Option<Str
         .attrs()
         .iter()
         .find(|attr| &*attr.name.local == name)
-        .map(|attr| attr.value.clone())
+        .map(|attr| attr.value.to_string())
 }
 
 pub(crate) fn write_attr(ctx: &DomCtx, node_id: NodeId, name: &str, value: &str) {
@@ -296,7 +296,7 @@ fn namespace_uri(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
     let ns = doc
         .get_node(node_id)
         .and_then(|node| node.element_data())
-        .map(|element| element.name.ns.to_string())
+        .map(|element| element.namespace().to_string())
         .unwrap_or_default();
     Ok(js_str(&ns))
 }
@@ -305,9 +305,7 @@ fn namespace_uri(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
 pub(crate) fn element_child_ids(doc: &blitz_dom::BaseDocument, node_id: NodeId) -> Vec<NodeId> {
     doc.get_node(node_id)
         .map(|node| {
-            node.children
-                .iter()
-                .copied()
+            node.children().iter()
                 .filter(|child_id| {
                     doc.get_node(*child_id)
                         .is_some_and(|child| child.is_element())
@@ -373,11 +371,11 @@ fn element_sibling(
     offset: isize,
 ) -> Option<NodeId> {
     let node = doc.get_node(node_id)?;
-    let parent = doc.get_node(node.parent?)?;
+    let parent = doc.get_node(node.parent_id()?)?;
     let mut index = parent.index_of_child(node_id)?;
     loop {
         index = index.checked_add_signed(offset)?;
-        let sibling_id = *parent.children.get(index)?;
+        let sibling_id = parent.children().get(index)?;
         if doc
             .get_node(sibling_id)
             .is_some_and(|node| node.is_element())
@@ -427,7 +425,7 @@ fn read_attrs(ctx: &DomCtx, node_id: NodeId) -> Vec<(String, String)> {
             element
                 .attrs()
                 .iter()
-                .map(|attr| (attr.name.local.to_string(), attr.value.clone()))
+                .map(|attr| (attr.name.local.to_string(), attr.value.to_string()))
                 .collect()
         })
         .unwrap_or_default()
@@ -559,7 +557,7 @@ fn get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<J
                     .attrs()
                     .iter()
                     .find(|attr| &*attr.name.local == "value")
-                    .map(|attr| attr.value.clone())
+                    .map(|attr| attr.value.to_string())
                     .unwrap_or_default(),
             })
             .unwrap_or_default()
@@ -945,8 +943,8 @@ fn get_inner_html(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsRes
     let doc = ctx.doc.borrow();
     let mut html = String::new();
     if let Some(node) = doc.get_node(node_id) {
-        for child_id in &node.children {
-            if let Some(child) = doc.get_node(*child_id) {
+        for child_id in node.children().iter() {
+            if let Some(child) = doc.get_node(child_id) {
                 child.write_outer_html(&mut html);
             }
         }
@@ -1084,7 +1082,7 @@ fn client_size(
     let Some(node) = doc.get_node(node_id) else {
         return Ok(JsValue::from(0.0));
     };
-    let value = if node_id == doc.root_element().id {
+    let value = if node_id == doc.root_element().id() {
         let viewport = doc.viewport();
         let scale = viewport.scale();
         let size = (
@@ -1117,7 +1115,7 @@ fn offset_parent(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
         doc.resolve(0.0);
         doc.get_node(node_id)
             .and_then(|node| node.offset_parent())
-            .map(|parent| parent.id)
+            .map(|parent| parent.id())
     };
     Ok(node_or_null(&ctx, parent_id, context))
 }
@@ -1160,7 +1158,7 @@ fn scroll_height(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
 fn current_scroll_offset(doc: &blitz_dom::BaseDocument, node_id: NodeId) -> blitz_dom::Point<f64> {
     if doc
         .try_root_element()
-        .is_some_and(|root| root.id == node_id)
+        .is_some_and(|root| root.id() == node_id)
     {
         doc.viewport_scroll()
     } else {

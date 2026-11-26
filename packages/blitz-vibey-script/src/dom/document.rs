@@ -122,7 +122,7 @@ pub(crate) fn init_document_proto(proto: &JsObject, context: &mut Context) {
 fn document_element(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let ctx = dom_ctx(context)?;
     let _ = this_node_id(this)?;
-    let root_id = ctx.doc.borrow().try_root_element().map(|root| root.id);
+    let root_id = ctx.doc.borrow().try_root_element().map(|root| root.id());
     Ok(node_or_null(&ctx, root_id, context))
 }
 
@@ -135,14 +135,14 @@ fn scrolling_element(this: &JsValue, args: &[JsValue], context: &mut Context) ->
 fn body(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let ctx = dom_ctx(context)?;
     let _ = this_node_id(this)?;
-    let body_id = ctx.doc.borrow().find_body_node().map(|node| node.id);
+    let body_id = ctx.doc.borrow().find_body_node().map(|node| node.id());
     Ok(node_or_null(&ctx, body_id, context))
 }
 
 fn head(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let ctx = dom_ctx(context)?;
     let _ = this_node_id(this)?;
-    let head_id = ctx.doc.borrow().find_head_node().map(|node| node.id);
+    let head_id = ctx.doc.borrow().find_head_node().map(|node| node.id());
     Ok(node_or_null(&ctx, head_id, context))
 }
 
@@ -262,7 +262,7 @@ fn get_elements_by_tag_name(
         .to_ascii_lowercase();
     let match_all = tag == "*";
 
-    let root_id = ctx.doc.borrow().root_node().id;
+    let root_id = ctx.doc.borrow().root_node().id();
     let matches = super::collect_matching_descendants(&ctx.doc.borrow(), root_id, |element| {
         match_all || &*element.name.local == tag.as_str()
     });
@@ -287,7 +287,7 @@ fn get_elements_by_class_name(
     let matches = if class_names.is_empty() {
         Vec::new()
     } else {
-        let root_id = ctx.doc.borrow().root_node().id;
+        let root_id = ctx.doc.borrow().root_node().id();
         super::collect_matching_descendants(&ctx.doc.borrow(), root_id, |element| {
             super::matches_class_names(element, &class_names)
         })
