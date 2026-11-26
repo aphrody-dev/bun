@@ -493,6 +493,71 @@ pub mod from_js {
         Ok(heap.keep(string.into_bytes()))
     }
 
+    /// `b.string.utf8.owned`: as [`strict_utf8`], kept by the body.
+    pub fn strict_owned_utf8<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        ctx: Context<'_>,
+    ) -> Result<'a, Vec<u8>> {
+        if !value.is_string() && !value.is_string_object() {
+            return Err(type_must_be(heap, ctx, "a string", value));
+        }
+        loose_owned_utf8(heap, value, ctx)
+    }
+
+    /// `b.string.loose.utf8.owned`: `ToString`, as UTF-8 the body keeps.
+    pub fn loose_owned_utf8<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        _: Context<'_>,
+    ) -> Result<'a, Vec<u8>> {
+        Ok(lift(value.to_utf8(heap.global_object()))?.into_bytes())
+    }
+
+    /// The object a dictionary is read from: any object, but an array only with `allow_array`. Anything else is
+    /// `<name> must be an object`, the dictionary naming itself.
+    pub fn dictionary_object<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        name: &str,
+        allow_array: bool,
+    ) -> Result<'a, crate::JSObject> {
+        match value.get_object() {
+            Some(object) if allow_array || !value.is_array() => Ok(object),
+            _ => Err(type_must_be(heap, Context::Argument(name), "an object", value)),
+        }
+    }
+
+    /// A member of a dictionary, as C++'s `DictionaryMemberReader::get`: from the object or a prototype short of
+    /// `Object.prototype`, so that a property added to `Object.prototype` is not an option. `undefined` if none has it.
+    pub fn dictionary_member<'a>(
+        heap: &JsHeap<'a>,
+        object: &crate::JSObject,
+        name: &str,
+    ) -> Result<'a, JSValue> {
+        let global = heap.global_object();
+        let key = boa_engine::JsString::from(name);
+        let object_prototype = global.cx().intrinsics().constructors().object().prototype();
+        let mut holder = object.0.clone();
+        loop {
+            let has = holder.has_own_property(key.clone(), global.cx());
+            if lift(global.lift(has))? {
+                let value = object.0.get(key, global.cx());
+                return Ok(JSValue(lift(global.lift(value))?));
+            }
+            match holder.prototype() {
+                Some(prototype) if prototype != object_prototype => holder = prototype,
+                _ => return Ok(JSValue::UNDEFINED),
+            }
+        }
+    }
+
+    /// A member that has no default and is absent: `<name> is required`.
+    pub fn required<'a>(heap: &JsHeap<'a>, ctx: Context<'_>) -> Error<'a> {
+        let name = ctx.name();
+        heap.error_with_code(ErrorCode::INVALID_ARG_TYPE, format_args!("{name} is required"))
+    }
+
     /// `b.string.local`: a string, as UTF-8 for the call. A `String` object is not one: `.allowStringObject` makes it
     /// a string first, with [`string_of_string_object`].
     pub fn local_string<'a>(

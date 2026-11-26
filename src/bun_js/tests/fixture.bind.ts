@@ -58,6 +58,23 @@ export const call = b.fn({
   throws: true,
 });
 
+/** A dictionary that is taken: defaults, `.nullable`, a member read by a second name, one that is required. */
+export const Shape = b.dictionary({
+  sides: b.u32,
+  label: { type: b.string.utf8.nullable, altNames: ["name"] },
+  filled: b.bool.loose.nullable.default(true),
+});
+
+/** A union of a string and a dictionary: what neither takes goes to the dictionary, which throws. */
+export const ShapeOrName = b.union({ name: b.string.utf8, shape: Shape });
+
+export const describeShape = b.fn({
+  args: { shape: ShapeOrName.nullable },
+  returns: b.string.utf8,
+  capability: "heap",
+  throws: true,
+});
+
 export const math = b.namespace({
   half: { args: { value: b.f64 }, returns: b.f64 },
   isTruthy: { args: { value: b.bool.loose }, returns: b.bool },
@@ -71,6 +88,7 @@ export const Counter = b.class({
     label: { getter: b.string.utf8, setter: true },
     increment: { args: { by: b.u32.default(1) }, returns: b.u32, mutates: true },
     describe: { returns: b.string.utf8, capability: "heap", throws: true },
+    __peek: { returns: b.u32, privateSymbol: "counterPeek" },
   },
   static: {
     zero: { returns: b.u32 },

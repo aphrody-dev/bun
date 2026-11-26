@@ -2,6 +2,7 @@
 //! Each expected value is what JavaScriptCore Bun's `path.posix` and `path.win32` answer for the same expression.
 
 use bun_js::JSGlobalObject;
+use bun_sema_standalone as _;
 
 const NAMES: [&str; 11] = [
     "resolve",

@@ -16,6 +16,8 @@ const OPS = "__bun_native_ops__";
   stdin: Blob;
   stdout: Blob;
   stderr: Blob;
+  // bun_runtime_js::bun_object
+  Glob: new (pattern: string) => unknown;
   env: Record<string, string>;
   argv: string[];
   main: string;
@@ -40,6 +42,7 @@ const OPS = "__bun_native_ops__";
     nanoseconds: native.nanoseconds,
     cwd: native.cwd,
     semver: native.semver,
+    Glob: native.Glob,
     fileURLToPath(url: unknown): string {
       const parsed = url instanceof URL ? url : new URL(String(url));
       if (parsed.protocol !== "file:") throw new TypeError("The URL must be of scheme file");

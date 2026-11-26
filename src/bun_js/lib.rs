@@ -26,6 +26,7 @@ mod host_fn;
 mod internal_field;
 pub mod module;
 mod object;
+mod promise;
 mod realm;
 mod strong;
 mod value;
@@ -40,6 +41,7 @@ pub use global::JSGlobalObject;
 pub use host_fn::{JSFunction, JSHostFn};
 pub use module::JSModule;
 pub use object::{JSArray, JSObject};
+pub use promise::JSPromise;
 pub use strong::{Strong, Weak};
 pub use value::{CoerceTo, JSValue};
 

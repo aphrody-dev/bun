@@ -3,8 +3,9 @@
 //! the JavaScriptCore build implements in `src/runtime`, over the same engine-free crates.
 //!
 //! [`generated_bindgen::native`] is what `$bindgen(file, symbol)` answers, [`cpp`] what `$cpp(file, symbol)` and
-//! `$newCppFunction(file, symbol, length)` do.
+//! `$newCppFunction(file, symbol, length)` do, [`bun_object`] what else of `Bun` this crate implements.
 
+pub mod api;
 mod engine;
 pub mod generated_bindgen;
 pub mod node;
@@ -12,6 +13,8 @@ pub mod sys_js;
 pub mod test_runner;
 pub mod web;
 pub mod webcore;
+
+use bun_js::{JSGlobalObject, JSValue, JsResult};
 
 /// The natives that the JavaScriptCore build has in C++ (`src/jsc/bindings/<file>`), ported: `None` for one that
 /// is not.
@@ -23,4 +26,9 @@ pub fn cpp(global: &bun_js::JSGlobalObject, file: &str, symbol: &str) -> Option<
         "NodeVM.cpp" => node::vm::native(global, symbol),
         _ => None,
     }
+}
+
+/// The properties of `Bun` this crate implements besides Blob's, by name: `Bun.Glob`.
+pub fn bun_object(global: &JSGlobalObject) -> JsResult<Vec<(&'static str, JSValue)>> {
+    generated_bindgen::glob::exports(global)
 }

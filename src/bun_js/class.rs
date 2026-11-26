@@ -244,6 +244,71 @@ impl<'g, T: JsClass> ClassBuilder<'g, T> {
         )
     }
 
+    /// A method on the prototype keyed by the private name `symbol`, which a builtin reads as `this.$<symbol>`: on
+    /// Boa the property `__intrinsic__<symbol>`, read-only and not enumerable. `name` is the function's.
+    pub fn private_method(
+        &mut self,
+        symbol: &str,
+        name: &'static str,
+        length: usize,
+        method: Method<T>,
+    ) -> JsResult<()> {
+        let function = self.function(
+            name,
+            length,
+            NativeFunction::from_copy_closure(move |this, args, context| {
+                call_host_fn(
+                    |global, frame| method(&this_of::<T>(global, frame)?, global, frame),
+                    this,
+                    args,
+                    context,
+                )
+            }),
+        );
+        let private = Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        };
+        self.define_on(
+            &self.prototype,
+            &format!("__intrinsic__{symbol}"),
+            Self::value_descriptor(function.into(), private),
+        )
+    }
+
+    /// A method on the prototype written in JavaScript: `source` is a function in strict mode, which finds a
+    /// private name of `this` as `this.__intrinsic__<name>`.
+    pub fn builtin(
+        &mut self,
+        name: &str,
+        length: usize,
+        attributes: Attributes,
+        source: &str,
+    ) -> JsResult<()> {
+        let function = self
+            .global
+            .evaluate_script(&format!("(function () {{ \"use strict\"; return ({source}); }})()"))?;
+        let Some(object) = function.0.as_object().filter(|object| object.is_callable()) else {
+            return Err(self.global.throw_type_error(format_args!(
+                "{}.{name}: the builtin is not a function",
+                T::NAME
+            )));
+        };
+        let length_descriptor = PropertyDescriptor::builder()
+            .value(length)
+            .writable(false)
+            .enumerable(false)
+            .configurable(true)
+            .build();
+        self.define_on(&object, "length", length_descriptor)?;
+        self.define_on(
+            &self.prototype,
+            name,
+            Self::value_descriptor(function.0, attributes),
+        )
+    }
+
     fn getter_function(&self, name: &'static str, getter: Getter<T>) -> JsFunction {
         self.function(
             &format!("get {name}"),
