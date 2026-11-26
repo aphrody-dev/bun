@@ -1,4 +1,4 @@
-//! `bun [run] <file> [args…]`, `bun -e <code>`, `bun fmt`, `bun --version`, `bun --revision`.
+//! `bun [run] <file> [args…]`, `bun -e <code>`, `bun run <script>`, `bun fmt`, `bun lint`, `bun --version`, `bun --revision`.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,7 +14,9 @@ Commands:
   run       ./my-script.ts       Execute a file with Bun
   <file>    ./my-script.ts       Same as `bun run`
   -e        'console.log(1)'     Evaluate source code
+  run       dev                  Run a package.json script
   fmt       ./src                Format files with Bun's formatter
+  lint      ./src                Lint files with Bun's linter
   --version                      Print the version
   --revision                     Print the version with its git revision
 ";
@@ -115,6 +117,11 @@ fn eval(code: &str, rest: &[String]) -> i32 {
     }
 }
 
+/// A `package.json` script of that name first, as `bun run` does, then a file.
+fn script_or_file(name: &str, rest: &[String]) -> i32 {
+    crate::scripts::run(name, rest).unwrap_or_else(|| run_file(name, rest))
+}
+
 pub fn main() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -138,13 +145,11 @@ pub fn main() -> i32 {
             }
         },
         Some("fmt") => crate::fmt::main(&args[1..]),
+        Some("lint") => crate::lint::main(&args[1..]),
         Some("run") => match args.get(1) {
-            Some(file) => run_file(file, &args[2..]),
-            None => {
-                print!("{USAGE}");
-                1
-            }
+            Some(name) => script_or_file(name, &args[2..]),
+            None => crate::scripts::list(),
         },
-        Some(file) => run_file(file, &args[1..]),
+        Some(name) => script_or_file(name, &args[1..]),
     }
 }

@@ -4,7 +4,7 @@
 
 use std::ffi::OsStr;
 use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::process::Stdio;
 
 use bun_core::Output;
@@ -13,12 +13,12 @@ use bun_lint_driver::js_plugin::{Engine, Vm, Work};
 use bun_lint_driver::{Environment, Outcome, Script, Stream, git};
 
 #[path = "../../../src/runtime/cli/typescript_libs.rs"]
-mod typescript_libs;
+pub(crate) mod typescript_libs;
 
 const NO_JS: &[u8] = b"JS plugins need a JS engine";
 
 /// No realm can run JavaScript plugins here.
-struct NoEngine;
+pub(crate) struct NoEngine;
 
 impl Engine for NoEngine {
     fn thread_has_realm(&self) -> bool {
@@ -41,11 +41,11 @@ impl Engine for NoEngine {
     }
 }
 
-fn run_script(_script: &Script) -> Result<Vec<u8>, Vec<u8>> {
+pub(crate) fn run_script(_script: &Script) -> Result<Vec<u8>, Vec<u8>> {
     Err(b"This bun runs on Boa and can't run a configuration file that is a program yet. Use a JSON, YAML or TOML configuration.".to_vec())
 }
 
-fn run_git(command: &git::Command) -> Result<git::Finished, git::NotRun> {
+pub(crate) fn run_git(command: &git::Command) -> Result<git::Finished, git::NotRun> {
     let mut git = std::process::Command::new("git");
     git.args(command.args.iter().map(|arg| OsStr::from_bytes(arg)))
         .current_dir(OsStr::from_bytes(command.cwd))
@@ -71,7 +71,7 @@ fn run_git(command: &git::Command) -> Result<git::Finished, git::NotRun> {
 }
 
 /// `RunCommand::columns_of_stdout`: `$COLUMNS`, then the terminal's width, then 80.
-fn columns_of_stdout() -> u16 {
+pub(crate) fn columns_of_stdout() -> u16 {
     if let Some(n) = std::env::var("COLUMNS").ok().and_then(|it| it.parse::<u16>().ok()).filter(|&n| n > 0) {
         return n;
     }
@@ -122,7 +122,7 @@ fn bunfig_defaults(cwd: &[u8]) -> Result<Option<Options>, String> {
     Ok(None)
 }
 
-fn bunfig_section(shown: &[u8], contents: &[u8]) -> Result<Option<Options>, String> {
+pub(crate) fn bunfig_section(shown: &[u8], contents: &[u8]) -> Result<Option<Options>, String> {
     let name = String::from_utf8_lossy(shown);
     bun_ast::initialize_store();
     let bump = bun_alloc::Arena::borrowing_default();

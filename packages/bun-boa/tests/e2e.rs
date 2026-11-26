@@ -154,3 +154,46 @@ fn fmt_reads_bunfig() {
     assert!(stdout.starts_with("const greeting: string = \"hi\"\n"), "{stdout}{stderr}");
     assert!(out.status.success(), "{stderr}");
 }
+
+#[test]
+fn lint_reports_and_passes() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lint");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("bad.ts"), "debugger;\nif (/a+b/.test(\"aab\")) console.log(1);\n").unwrap();
+    std::fs::write(dir.join("good.ts"), "export const x = /a(b)?/.exec(\"ab\");\n").unwrap();
+    let out = bun().args(["lint", "--rule", r#"{"no-debugger":"error"}"#, "bad.ts"]).current_dir(&dir).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    assert!(format!("{stdout}{stderr}").contains("no-debugger"), "{stdout}{stderr}");
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    let out = bun().args(["lint", "good.ts"]).current_dir(&dir).output().unwrap();
+    assert!(out.status.success(), "{:?}", text(&out));
+}
+
+#[test]
+fn runs_package_json_scripts() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("scripts");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"p","scripts":{"prehi":"echo pre","hi":"echo hi $npm_lifecycle_event","posthi":"echo post","tool":"mytool","fail":"exit 4","code":"bun -e 'console.log(6*7)'"}}"#,
+    )
+    .unwrap();
+    let tool = dir.join("node_modules/.bin/mytool");
+    std::fs::write(&tool, "#!/bin/sh\necho tool \"$@\"\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = bun().args(["run", "hi", "a b"]).current_dir(&dir).output().unwrap();
+    assert_eq!(text(&out).0, "pre\nhi hi a b\npost\n", "{:?}", text(&out));
+    assert!(out.status.success());
+    let out = bun().args(["tool", "x"]).current_dir(&dir).output().unwrap();
+    assert_eq!(text(&out).0, "tool x\n", "{:?}", text(&out));
+    let out = bun().args(["run", "fail"]).current_dir(&dir).output().unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    let out = bun().args(["run", "code"]).current_dir(&dir).output().unwrap();
+    assert_eq!(text(&out).0, "42\n", "{:?}", text(&out));
+    let out = bun().arg("run").current_dir(&dir).output().unwrap();
+    assert!(text(&out).0.contains("bun run hi"), "{:?}", text(&out));
+}
