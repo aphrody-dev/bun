@@ -37,6 +37,18 @@ fn messages(log: &bun_ast::Log) -> String {
 }
 
 pub fn transpile(path: &[u8], contents: &[u8]) -> Result<Vec<u8>, String> {
+    transpile_module(path, contents).map(|module| module.code)
+}
+
+pub struct Transpiled {
+    pub code: Vec<u8>,
+    /// A CommonJS module, printed as `(function (exports, require, module, __filename, __dirname[, importMeta]) { … })`.
+    pub commonjs: bool,
+}
+
+/// As Bun's runtime transpiles a module: an ES module that names `require`, `__filename` or `__dirname` reads
+/// them from `import.meta`, and a CommonJS module is a function the loader calls.
+pub fn transpile_module(path: &[u8], contents: &[u8]) -> Result<Transpiled, String> {
     let loader = loader_for(path);
     let _store = StoreScope::enter();
     let arena = Arena::new();
@@ -46,6 +58,7 @@ pub fn transpile(path: &[u8], contents: &[u8]) -> Result<Vec<u8>, String> {
     opts.features.top_level_await = true;
     opts.features.standard_decorators = !loader.is_typescript();
     opts.transform_only = true;
+    opts.features.commonjs_at_runtime = true;
     let define: &bun_js_parser::Define = arena.alloc(bun_js_parser::Define::default());
     let mut log = bun_ast::Log::init();
     let parser = bun_js_parser::Parser::init(opts, &mut log, &source, define, &arena)
@@ -55,6 +68,7 @@ pub fn transpile(path: &[u8], contents: &[u8]) -> Result<Vec<u8>, String> {
         _ => return Err(messages(&log)),
     };
 
+    let commonjs = ast.exports_kind == bun_ast::ExportsKind::Cjs;
     let alloc = *ast.symbols.allocator();
     let list = core::mem::replace(&mut ast.symbols, bun_alloc::ArenaVec::new_in(alloc));
     let symbols = bun_ast::symbol::Map::init_with_one_list(list.into_iter().collect());
@@ -62,6 +76,7 @@ pub fn transpile(path: &[u8], contents: &[u8]) -> Result<Vec<u8>, String> {
     let options = bun_js_printer::Options {
         require_ref: Some(ast.require_ref),
         import_meta_ref: ast.import_meta_ref,
+        target: bun_ast::Target::Bun,
         ..Default::default()
     };
     bun_js_printer::print_ast::<false, false>(
@@ -73,5 +88,8 @@ pub fn transpile(path: &[u8], contents: &[u8]) -> Result<Vec<u8>, String> {
         options,
     )
     .map_err(|err| format!("{}: {err}", String::from_utf8_lossy(path)))?;
-    Ok(printer.ctx.buffer.list)
+    Ok(Transpiled {
+        code: printer.ctx.buffer.list,
+        commonjs,
+    })
 }

@@ -208,9 +208,10 @@ pub fn context(
     }
     let _ = ARGV.set(argv);
     let mut context = Context::builder()
-        .module_loader(loader)
+        .module_loader(loader.clone())
         .build()
         .map_err(|err| JsNativeError::error().with_message(err.to_string()))?;
+    loader.install(&mut context);
     boa_runtime::register(
         boa_runtime::extensions::ConsoleExtension(boa_runtime::DefaultLogger),
         None,
@@ -221,5 +222,6 @@ pub fn context(
     let prelude = crate::transpile::transpile(b"bun:prelude.ts", include_bytes!("js/bun.ts"))
         .map_err(|err| JsNativeError::syntax().with_message(err))?;
     context.eval(Source::from_bytes(&prelude))?;
+    crate::builtins::install(&mut context)?;
     Ok(context)
 }

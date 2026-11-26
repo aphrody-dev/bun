@@ -19,7 +19,7 @@ import { sliceSourceCode } from "./builtin-parser";
 import { nativeCalls, specifierOf, typesOnlySchemas } from "./builtins-manifest-model";
 import { Guards } from "./builtins/guards.ts";
 import { createAssertClientJS, createLogClientJS } from "./client-js";
-import { getJS2NativeCPP } from "./generate-js2native";
+import { getJS2NativeCPP, nativeCallList } from "./generate-js2native";
 import { checkAscii, engineStamp, sourceStamp, writeIfNotChanged, writeIfNotChangedBinary } from "./helpers";
 import { createInternalModuleRegistry, idToEnumName } from "./internal-module-registry-scanner";
 import { encodeLazyFunctionTable, findLazyFunctions } from "./lazy-function-table";
@@ -268,6 +268,9 @@ if (out.exitCode !== 0) {
 mark("Bundle modules");
 
 const outputs = new Map();
+/** The modules as Boa runs them, by file: `BUN_BOA_JS_DIR` asks for them (packages/bun-boa/scripts/setup.ts). */
+const BOA_JS_DIR = process.env.BUN_BOA_JS_DIR;
+const boaOutputs = new Map<string, string>();
 
 for (const [i, entrypoint] of bundledEntryPoints.entries()) {
   const file_path = entrypoint.slice(TMP_DIR.length + 1).replace(/\.ts$/, ".js");
@@ -279,28 +282,27 @@ for (const [i, entrypoint] of bundledEntryPoints.entries()) {
   let captured = `(function (){${output.replace("// @bun\n", "").trim()}})`;
   let usesDebug = output.includes("$debug_log");
   let usesAssert = output.includes("$assert");
-  captured =
-    captured
-      .replace(/\$\$EXPORT\$\$\((.*)\).\$\$EXPORT_END\$\$;/, "return $1")
-      .replace(/]\s*,\s*__(debug|assert)_end__\)/g, ")")
-      .replace(/]\s*,\s*__debug_end__\)/g, ")")
-      .replace(/import.meta.require\((.*?)\)/g, (expr, specifier) => {
-        throw new Error(`Builtin Bundler: do not use import.meta.require() (in ${file_path}))`);
-      })
-      .replace(/return \$\nexport /, "return")
-      .replace(/__intrinsic__/g, "@")
-      .replace(/__no_intrinsic__/g, "") + "\n";
-  captured = captured.replace(
-    /function\s*\(.*?\)\s*{/,
+  const unprefixed = captured
+    .replace(/\$\$EXPORT\$\$\((.*)\).\$\$EXPORT_END\$\$;/, "return $1")
+    .replace(/]\s*,\s*__(debug|assert)_end__\)/g, ")")
+    .replace(/]\s*,\s*__debug_end__\)/g, ")")
+    .replace(/import.meta.require\((.*?)\)/g, (expr, specifier) => {
+      throw new Error(`Builtin Bundler: do not use import.meta.require() (in ${file_path}))`);
+    })
+    .replace(/return \$\nexport /, "return");
+  const prologue =
     '$&"use strict";' +
-      (usesDebug
-        ? createLogClientJS(
-            file_path.replace(".js", ""),
-            idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:/, ""),
-          )
-        : "") +
-      (usesAssert ? createAssertClientJS(idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:/, "")) : ""),
-  );
+    (usesDebug
+      ? createLogClientJS(
+          file_path.replace(".js", ""),
+          idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:/, ""),
+        )
+      : "") +
+    (usesAssert ? createAssertClientJS(idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:/, "")) : "");
+  const withPrologue = (source: string) => source.replace(/function\s*\(.*?\)\s*{/, prologue);
+  captured = withPrologue(unprefixed.replace(/__intrinsic__/g, "@").replace(/__no_intrinsic__/g, "") + "\n");
+  // Boa has no private names: its runtime (packages/bun-boa) takes each `__intrinsic__<name>` as a parameter.
+  if (BOA_JS_DIR) boaOutputs.set(file_path, withPrologue(unprefixed.replace(/__no_intrinsic__/g, "") + "\n"));
   const errors = [...captured.matchAll(/@bundleError\((.*)\)/g)];
   if (errors.length) {
     throw new Error(`Errors in ${entrypoint}:\n${errors.map(x => x[1]).join("\n")}`);
@@ -892,6 +894,20 @@ for (const file of evalFiles) {
     },
   });
   writeIfNotChanged(path.join(CODEGEN_DIR, "eval", path.basename(file)), await output.text());
+}
+
+// The registry the Boa runtime loads modules by: a module's `require` is its index here, `$bindgen` and `$cpp` are
+// `__intrinsic__lazy(<id>)` of `natives`.
+if (BOA_JS_DIR) {
+  for (const [file, source] of boaOutputs) writeIfNotChanged(path.join(BOA_JS_DIR, file), source);
+  const modules = moduleList.map((id, n) =>
+    n < nativeStartIndex ? { id, specifier: idToPublicSpecifierOrEnumName(id) } : { id, specifier: id, native: true },
+  );
+  // `classes` are what `$inherits(<n>, value)` numbers (numberedClasses in replacements.ts).
+  writeIfNotChanged(
+    path.join(BOA_JS_DIR, "registry.json"),
+    JSON.stringify({ modules, natives: nativeCallList(), classes: jsclasses }),
+  );
 }
 
 if (!silent) {
