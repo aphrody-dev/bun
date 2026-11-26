@@ -69,6 +69,9 @@ fn transpile_printing<const SOURCE_MAP: bool>(path: &[u8], contents: &[u8]) -> R
     let mut opts = bun_js_parser::ParserOptions::init(Default::default(), loader);
     opts.features.top_level_await = true;
     opts.features.standard_decorators = !loader.is_typescript();
+    // The runtime transpiler's default (src/bundler/transpiler.rs): TypeScript drops the imports it does not use,
+    // such as those of types only.
+    opts.features.trim_unused_imports = loader.is_typescript();
     opts.transform_only = true;
     opts.features.commonjs_at_runtime = true;
     let define: &bun_js_parser::Define = arena.alloc(bun_js_parser::Define::default());

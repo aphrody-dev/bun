@@ -53,14 +53,23 @@ fn exit_code(context: &mut Context) -> i32 {
         .map_or(0, |code| code as i32)
 }
 
+/// Evaluates the entry point, then runs the event loop until nothing keeps it alive, as Bun does.
 fn evaluate(module: Module, context: &mut Context) -> i32 {
     let promise = module.load_link_evaluate(context);
-    if let Err(err) = context.run_jobs() {
+    let event_loop = bun_runtime_js::EventLoop::of(context);
+    let settled = || !matches!(promise.state(), PromiseState::Pending);
+    if let Err(err) = event_loop.run_until(context, settled) {
         report(&err, context);
         return 1;
     }
     match promise.state() {
-        PromiseState::Fulfilled(_) => exit_code(context),
+        PromiseState::Fulfilled(_) => {
+            if let Err(err) = event_loop.run(context) {
+                report(&err, context);
+                return 1;
+            }
+            exit_code(context)
+        }
         PromiseState::Rejected(reason) => {
             report(&JsError::from_opaque(reason), context);
             1

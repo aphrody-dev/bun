@@ -1,6 +1,6 @@
 [package]
 name = "bun_runtime_js"
-description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff, Blob, File, Bun.file, Bun.write, Bun.Glob, Bun.deepEquals."
+description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff, Blob, File, FormData, Bun.file, Bun.write, Bun.Glob, Bun.deepEquals, the event loop, timers, fetch, Headers/Request/Response and Bun.serve."
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -19,8 +19,10 @@ boa_engine = { path = "../boa/core/engine", features = ["annex-b", "intl_bundled
 boa_gc = { path = "../boa/core/gc" }
 boa_wintertc = { path = "../boa/core/wintertc" }
 bstr = { version = "1", default-features = false, features = ["alloc"] }
+bun_base64 = { path = "../base64" }
 bun_core = { path = "../bun_core" }
 bun_glob = { path = "../glob" }
+bun_http_rs = { path = "../http_rs" }
 bun_http_types = { path = "../http_types" }
 bun_js = { path = "../bun_js" }
 bun_node_path = { path = "../node_path" }

@@ -610,3 +610,33 @@ using true
     assert_eq!(stdout, expected, "stderr: {stderr}");
     assert!(out.status.success(), "stderr: {stderr}");
 }
+
+/// TypeScript drops the imports it does not use, as Bun's runtime transpiler does: a type-only name and a name
+/// imported twice.
+#[test]
+fn typescript_drops_unused_imports() {
+    let out = bun().args(["run", "unused_imports.ts"]).current_dir(fixtures().join("modules")).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    assert_eq!(stdout, "string mapped\n", "stderr: {stderr}");
+    assert!(out.status.success(), "stderr: {stderr}");
+}
+
+/// The event loop's order, `Bun.serve` (routes, `fetch`, `error`) answering `fetch()` over loopback, `Headers`,
+/// `Request`, and a refused connection's code. The process exits once `using` stops the server.
+#[test]
+fn serve_and_fetch_on_the_event_loop() {
+    let out = bun().args(["run", "serve.ts"]).current_dir(fixtures().join("http")).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    let expected = r#"microtask immediate timeout interval
+200 text/plain;charset=utf-8 hello boa from true
+201 Created echo payload
+application/json;charset=utf-8 {"id":"42"}
+static static body
+500 caught handler failed
+[["a","1, 3"],["b","2"]] 1, 3
+POST http://example.test/path text/plain;charset=utf-8
+ECONNREFUSED
+"#;
+    assert_eq!(stdout, expected, "stderr: {stderr}");
+    assert!(out.status.success(), "stderr: {stderr}");
+}

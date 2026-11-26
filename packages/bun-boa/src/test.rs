@@ -166,7 +166,8 @@ fn files(filters: &[String], cwd: &Path) -> Vec<PathBuf> {
 }
 
 fn settle(promise: JsPromise, context: &mut Context) -> JsResult<JsValue> {
-    context.run_jobs()?;
+    let event_loop = bun_runtime_js::EventLoop::of(context);
+    event_loop.run_until(context, || !matches!(promise.state(), PromiseState::Pending))?;
     match promise.state() {
         PromiseState::Fulfilled(value) => Ok(value),
         PromiseState::Rejected(reason) => Err(JsError::from_opaque(reason)),

@@ -1,0 +1,458 @@
+//! Bun's event loop on Boa: Boa's job executor, with Bun's turn (src/jsc/event_loop.rs, `auto_tick` in
+//! src/runtime/jsc_hooks.rs): tasks and microtasks, then the immediates queued before the turn, then a wait for I/O
+//! (no longer than the next timer, not at all if work is queued), then the timers that are due. Microtasks run after
+//! each callback. The process stays alive while a timer, an immediate or an I/O handle (a listening server, a request
+//! in flight) is ref'd.
+
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::future::Future;
+use std::rc::Rc;
+use std::task::{Context as TaskContext, Poll, Waker};
+use std::time::{Duration, Instant};
+
+use boa_engine::job::{GenericJob, IntervalJob, Job, JobExecutor, NativeAsyncJob, PromiseJob, TimeoutJob};
+use boa_engine::{Context, JsError, JsNativeError, JsObject, JsResult, JsValue};
+use bun_http_rs::Reactor;
+
+/// A callback for the next turn: what I/O completes with.
+pub type Task = Box<dyn FnOnce(&mut Context) -> JsResult<()>>;
+
+enum Queued {
+    Generic(GenericJob),
+    Native(Task),
+}
+
+pub(crate) enum Callback {
+    Function { function: JsObject, args: Vec<JsValue> },
+    Timeout(TimeoutJob),
+    Interval(IntervalJob),
+}
+
+pub(crate) struct Timer {
+    pub callback: Callback,
+    /// For an interval.
+    pub repeat: Option<Duration>,
+    pub delay: Duration,
+    pub deadline: Instant,
+    seq: u64,
+    pub refed: bool,
+}
+
+pub(crate) struct Immediate {
+    pub function: JsObject,
+    pub args: Vec<JsValue>,
+    pub refed: bool,
+}
+
+#[derive(Default)]
+struct Timers {
+    next_id: u32,
+    next_seq: u64,
+    active: HashMap<u32, Timer>,
+    /// By deadline, then by when they were set.
+    queue: BTreeMap<(Instant, u64), u32>,
+    refed: usize,
+    immediates: HashMap<u32, Immediate>,
+    /// The immediates of the next turn, in order.
+    immediate_queue: Vec<u32>,
+    refed_immediates: usize,
+}
+
+pub struct EventLoop {
+    reactor: Rc<Reactor>,
+    microtasks: RefCell<VecDeque<PromiseJob>>,
+    async_jobs: RefCell<VecDeque<NativeAsyncJob>>,
+    tasks: RefCell<VecDeque<Queued>>,
+    timers: RefCell<Timers>,
+    /// The timer whose callback is running: `refresh()` and `clearInterval` inside it act on it.
+    running: Cell<Option<u32>>,
+    /// The error a callback threw that nothing caught.
+    uncaught: RefCell<Option<JsError>>,
+}
+
+impl EventLoop {
+    pub fn new() -> std::io::Result<Rc<EventLoop>> {
+        Ok(Rc::new(EventLoop {
+            reactor: Reactor::new()?,
+            microtasks: RefCell::default(),
+            async_jobs: RefCell::default(),
+            tasks: RefCell::default(),
+            timers: RefCell::default(),
+            running: Cell::new(None),
+            uncaught: RefCell::default(),
+        }))
+    }
+
+    /// The loop of the realm.
+    pub fn of(context: &Context) -> Rc<EventLoop> {
+        context
+            .downcast_job_executor::<EventLoop>()
+            .expect("the realm runs on bun_runtime_js's event loop")
+    }
+
+    pub fn reactor(&self) -> &Rc<Reactor> {
+        &self.reactor
+    }
+
+    /// Queues `task` for the next tick, as a task posted to Bun's loop.
+    pub fn enqueue(&self, task: impl FnOnce(&mut Context) -> JsResult<()> + 'static) {
+        self.tasks.borrow_mut().push_back(Queued::Native(Box::new(task)));
+    }
+
+    fn has_queued_work(&self) -> bool {
+        !self.microtasks.borrow().is_empty()
+            || !self.async_jobs.borrow().is_empty()
+            || !self.tasks.borrow().is_empty()
+    }
+
+    /// Whether anything could still run JavaScript: queued work, a ref'd timer or immediate, a ref'd I/O handle.
+    pub fn is_alive(&self) -> bool {
+        let timers = self.timers.borrow();
+        self.has_queued_work()
+            || timers.refed > 0
+            || timers.refed_immediates > 0
+            || self.reactor.is_alive()
+    }
+
+    fn report(&self, error: JsError) {
+        let mut uncaught = self.uncaught.borrow_mut();
+        if uncaught.is_none() {
+            *uncaught = Some(error);
+        }
+    }
+
+    fn take_uncaught(&self) -> JsResult<()> {
+        match self.uncaught.borrow_mut().take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Runs the microtasks (promise reactions, then module loading) until none are queued.
+    pub fn drain_microtasks(&self, context: &mut Context) -> JsResult<()> {
+        loop {
+            let job = self.microtasks.borrow_mut().pop_front();
+            if let Some(job) = job {
+                if let Err(error) = job.call(context) {
+                    self.report(error);
+                }
+                continue;
+            }
+            let job = self.async_jobs.borrow_mut().pop_front();
+            let Some(job) = job else { break };
+            let cell = RefCell::new(&mut *context);
+            let mut future = job.call(&cell);
+            // Boa's own async jobs (module loading, dynamic import) are done after one poll, the module loader
+            // being synchronous; one that is not is dropped.
+            let mut cx = TaskContext::from_waker(Waker::noop());
+            if let Poll::Ready(Err(error)) = std::pin::Pin::new(&mut future).poll(&mut cx) {
+                drop(future);
+                self.report(error);
+            }
+        }
+        context.clear_kept_objects();
+        self.take_uncaught()
+    }
+
+    /// Bun's `tick`: the queued tasks, each followed by the microtasks.
+    pub fn tick(&self, context: &mut Context) -> JsResult<()> {
+        self.drain_microtasks(context)?;
+        loop {
+            let task = self.tasks.borrow_mut().pop_front();
+            let Some(task) = task else { break };
+            let result = match task {
+                Queued::Generic(job) => job.call(context).map(drop),
+                Queued::Native(task) => task(context),
+            };
+            if let Err(error) = result {
+                self.report(error);
+            }
+            self.drain_microtasks(context)?;
+        }
+        Ok(())
+    }
+
+    /// Bun's `autoTick`: the immediates queued before it, a wait for I/O, the timers that are due.
+    fn auto_tick(&self, context: &mut Context) -> JsResult<()> {
+        self.run_immediates(context)?;
+        let timeout = if self.has_queued_work() || !self.timers.borrow().immediate_queue.is_empty() {
+            Some(Duration::ZERO)
+        } else {
+            self.next_deadline().map(|at| at.saturating_duration_since(Instant::now()))
+        };
+        if !self.reactor.is_alive() && timeout.is_none() {
+            return Ok(());
+        }
+        self.reactor
+            .turn(timeout)
+            .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
+        self.reactor.take_woken();
+        self.tick(context)?;
+        self.run_timers(context)
+    }
+
+    /// Runs the loop until `done` or until nothing is left that could run JavaScript.
+    pub fn run_until(&self, context: &mut Context, mut done: impl FnMut() -> bool) -> JsResult<()> {
+        loop {
+            self.tick(context)?;
+            if done() || !self.is_alive() {
+                return Ok(());
+            }
+            self.auto_tick(context)?;
+        }
+    }
+
+    /// Runs the loop until nothing is left that could run JavaScript.
+    pub fn run(&self, context: &mut Context) -> JsResult<()> {
+        self.run_until(context, || false)
+    }
+
+    // ───────────────────────────── timers ─────────────────────────────
+
+    fn next_deadline(&self) -> Option<Instant> {
+        let timers = self.timers.borrow();
+        timers.queue.keys().next().map(|(at, _)| *at)
+    }
+
+    pub(crate) fn add_timer(&self, callback: Callback, delay: Duration, repeat: bool) -> u32 {
+        let mut timers = self.timers.borrow_mut();
+        timers.next_id = timers.next_id.wrapping_add(1).max(1);
+        let id = timers.next_id;
+        let seq = timers.next_seq;
+        timers.next_seq += 1;
+        let deadline = Instant::now() + delay;
+        timers.queue.insert((deadline, seq), id);
+        timers.refed += 1;
+        timers.active.insert(
+            id,
+            Timer {
+                callback,
+                repeat: repeat.then_some(delay),
+                delay,
+                deadline,
+                seq,
+                refed: true,
+            },
+        );
+        id
+    }
+
+    pub(crate) fn clear_timer(&self, id: u32) {
+        let mut timers = self.timers.borrow_mut();
+        if let Some(timer) = timers.active.remove(&id) {
+            timers.queue.remove(&(timer.deadline, timer.seq));
+            if timer.refed {
+                timers.refed -= 1;
+            }
+        }
+        // A Boa interval clearing itself from its callback.
+        if self.running.get() == Some(id) {
+            self.running.set(None);
+        }
+    }
+
+    pub(crate) fn has_timer(&self, id: u32) -> bool {
+        self.timers.borrow().active.contains_key(&id)
+    }
+
+    pub(crate) fn set_timer_ref(&self, id: u32, refed: bool) {
+        let mut timers = self.timers.borrow_mut();
+        let Some(timer) = timers.active.get_mut(&id) else { return };
+        if timer.refed == refed {
+            return;
+        }
+        timer.refed = refed;
+        if refed {
+            timers.refed += 1;
+        } else {
+            timers.refed -= 1;
+        }
+    }
+
+    pub(crate) fn timer_has_ref(&self, id: u32) -> bool {
+        self.timers.borrow().active.get(&id).is_some_and(|t| t.refed)
+    }
+
+    /// `timeout.refresh()`: due its delay from now, again.
+    pub(crate) fn refresh_timer(&self, id: u32) {
+        let mut timers = self.timers.borrow_mut();
+        let seq = timers.next_seq;
+        timers.next_seq += 1;
+        let Some(timer) = timers.active.get_mut(&id) else { return };
+        let old = (timer.deadline, timer.seq);
+        timer.deadline = Instant::now() + timer.delay;
+        timer.seq = seq;
+        let key = (timer.deadline, seq);
+        timers.queue.remove(&old);
+        timers.queue.insert(key, id);
+    }
+
+    fn run_timers(&self, context: &mut Context) -> JsResult<()> {
+        let now = Instant::now();
+        loop {
+            let due = {
+                let mut timers = self.timers.borrow_mut();
+                match timers.queue.first_key_value() {
+                    Some((&(at, _), _)) if at <= now => timers.queue.pop_first().map(|(_, id)| id),
+                    _ => None,
+                }
+            };
+            let Some(id) = due else { break };
+            let result = self.fire(id, context);
+            // The timer stays active while its callback runs, so that the callback can unref, refresh or clear it.
+            let mut timers = self.timers.borrow_mut();
+            let next_seq = timers.next_seq;
+            if let Some(timer) = timers.active.get_mut(&id) {
+                let refreshed_by_callback = timer.deadline > now;
+                match timer.repeat {
+                    _ if refreshed_by_callback => {}
+                    Some(interval) => {
+                        timer.deadline = Instant::now() + interval;
+                        timer.seq = next_seq;
+                        let key = (timer.deadline, timer.seq);
+                        timers.next_seq += 1;
+                        timers.queue.insert(key, id);
+                    }
+                    None => {
+                        let refed = timer.refed;
+                        timers.active.remove(&id);
+                        if refed {
+                            timers.refed -= 1;
+                        }
+                    }
+                }
+            }
+            drop(timers);
+            if let Err(error) = result {
+                self.report(error);
+            }
+            self.drain_microtasks(context)?;
+        }
+        Ok(())
+    }
+
+    /// Calls the callback of timer `id`, which is due.
+    fn fire(&self, id: u32, context: &mut Context) -> JsResult<()> {
+        let mut timers = self.timers.borrow_mut();
+        let Some(timer) = timers.active.get(&id) else { return Ok(()) };
+        if let Callback::Function { function, args } = &timer.callback {
+            let (function, args) = (function.clone(), args.clone());
+            drop(timers);
+            return function.call(&JsValue::undefined(), &args, context).map(drop);
+        }
+        // Boa's own jobs: out of the table while they run.
+        let Some(timer) = timers.active.remove(&id) else { return Ok(()) };
+        if timer.refed {
+            timers.refed -= 1;
+        }
+        drop(timers);
+        self.running.set(Some(id));
+        let result = match timer.callback {
+            Callback::Timeout(job) => return job.call(context).map(drop),
+            Callback::Interval(ref job) => job.call(context).map(drop),
+            Callback::Function { .. } => Ok(()),
+        };
+        if self.running.replace(None) == Some(id) {
+            let mut timers = self.timers.borrow_mut();
+            if timer.refed {
+                timers.refed += 1;
+            }
+            timers.active.insert(id, timer);
+        }
+        result
+    }
+
+    // ───────────────────────────── immediates ─────────────────────────────
+
+    pub(crate) fn add_immediate(&self, function: JsObject, args: Vec<JsValue>) -> u32 {
+        let mut timers = self.timers.borrow_mut();
+        timers.next_id = timers.next_id.wrapping_add(1).max(1);
+        let id = timers.next_id;
+        timers.immediates.insert(
+            id,
+            Immediate {
+                function,
+                args,
+                refed: true,
+            },
+        );
+        timers.immediate_queue.push(id);
+        timers.refed_immediates += 1;
+        id
+    }
+
+    pub(crate) fn clear_immediate(&self, id: u32) {
+        let mut timers = self.timers.borrow_mut();
+        if let Some(immediate) = timers.immediates.remove(&id)
+            && immediate.refed
+        {
+            timers.refed_immediates -= 1;
+        }
+    }
+
+    pub(crate) fn set_immediate_ref(&self, id: u32, refed: bool) {
+        let mut timers = self.timers.borrow_mut();
+        let Some(immediate) = timers.immediates.get_mut(&id) else { return };
+        if immediate.refed == refed {
+            return;
+        }
+        immediate.refed = refed;
+        if refed {
+            timers.refed_immediates += 1;
+        } else {
+            timers.refed_immediates -= 1;
+        }
+    }
+
+    pub(crate) fn immediate_has_ref(&self, id: u32) -> bool {
+        self.timers.borrow().immediates.get(&id).is_some_and(|i| i.refed)
+    }
+
+    /// The immediates queued before this call; those they queue run in the next turn.
+    fn run_immediates(&self, context: &mut Context) -> JsResult<()> {
+        let batch = std::mem::take(&mut self.timers.borrow_mut().immediate_queue);
+        for id in batch {
+            let immediate = {
+                let mut timers = self.timers.borrow_mut();
+                let immediate = timers.immediates.remove(&id);
+                if immediate.as_ref().is_some_and(|i| i.refed) {
+                    timers.refed_immediates -= 1;
+                }
+                immediate
+            };
+            let Some(immediate) = immediate else { continue };
+            if let Err(error) = immediate.function.call(&JsValue::undefined(), &immediate.args, context) {
+                self.report(error);
+            }
+            self.drain_microtasks(context)?;
+        }
+        Ok(())
+    }
+}
+
+impl JobExecutor for EventLoop {
+    fn enqueue_job(self: Rc<Self>, job: Job, context: &mut Context) {
+        match bun_js::carry_async_context(job, context) {
+            Job::PromiseJob(job) => self.microtasks.borrow_mut().push_back(job),
+            Job::AsyncJob(job) => self.async_jobs.borrow_mut().push_back(job),
+            Job::GenericJob(job) => self.tasks.borrow_mut().push_back(Queued::Generic(job)),
+            Job::TimeoutJob(job) => {
+                let delay = Duration::from_millis(job.timeout().as_millis());
+                self.add_timer(Callback::Timeout(job), delay, false);
+            }
+            Job::IntervalJob(job) => {
+                let delay = Duration::from_millis(job.interval().as_millis());
+                self.add_timer(Callback::Interval(job), delay, true);
+            }
+            // A cleanup waits for the collector, which this loop does not run.
+            Job::FinalizationRegistryCleanupJob(_) => {}
+            _ => {}
+        }
+    }
+
+    /// Runs what is queued without waiting: microtasks, then tasks. The loop itself runs from [`EventLoop::run`].
+    fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
+        self.drain_microtasks(context)
+    }
+}

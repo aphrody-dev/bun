@@ -49,6 +49,22 @@ impl JSGlobalObject {
     }
 }
 
+/// `job` as a job executor queues it: once tracking is on, a promise job runs in the async context it was queued in.
+pub fn carry_async_context(job: Job, context: &mut Context) -> Job {
+    match job {
+        Job::PromiseJob(job) if slot(context).tracking => {
+            let captured = slot(context).value.clone();
+            Job::PromiseJob(PromiseJob::new(move |context| {
+                let previous = replace(context, captured);
+                let result = job.call(context);
+                replace(context, previous);
+                result
+            }))
+        }
+        job => job,
+    }
+}
+
 /// Boa's [`SimpleJobExecutor`], with promise jobs that carry the async context they were queued in.
 #[derive(Default)]
 pub struct AsyncContextJobExecutor {
@@ -57,18 +73,7 @@ pub struct AsyncContextJobExecutor {
 
 impl JobExecutor for AsyncContextJobExecutor {
     fn enqueue_job(self: Rc<Self>, job: Job, context: &mut Context) {
-        let job = match job {
-            Job::PromiseJob(job) if slot(context).tracking => {
-                let captured = slot(context).value.clone();
-                Job::PromiseJob(PromiseJob::new(move |context| {
-                    let previous = replace(context, captured);
-                    let result = job.call(context);
-                    replace(context, previous);
-                    result
-                }))
-            }
-            job => job,
-        };
+        let job = carry_async_context(job, context);
         Rc::clone(&self.inner).enqueue_job(job, context);
     }
 

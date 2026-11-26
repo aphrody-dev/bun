@@ -20,6 +20,8 @@ const OPS = "__bun_native_ops__";
   createObjectURL(blob: unknown): string;
   revokeObjectURL(url: unknown): void;
   resolveObjectURL(url: unknown): Blob | undefined;
+  serve(options: unknown): unknown;
+  gc(): void;
   // bun_runtime_js::bun_object
   Glob: new (pattern: string) => unknown;
   deepEquals(a: unknown, b: unknown, strict?: boolean, skipPrototype?: boolean): boolean;
@@ -57,6 +59,9 @@ const OPS = "__bun_native_ops__";
     pathToFileURL(path: unknown): URL {
       return new URL(`file://${encodeURI(String(path)).replace(/[?#]/g, encodeURIComponent)}`);
     },
+    serve: native.serve,
+    fetch: globalThis.fetch,
+    gc: (_force?: boolean) => native.gc(),
   };
 
   const process: any = {
