@@ -656,6 +656,7 @@ fn serve_and_fetch_on_the_event_loop() {
     let out = bun().args(["run", "serve.ts"]).current_dir(fixtures().join("http")).output().unwrap();
     let (stdout, stderr) = text(&out);
     let expected = r#"microtask immediate timeout interval
+ephemeral true second
 200 text/plain;charset=utf-8 hello boa from true
 201 Created echo payload
 application/json;charset=utf-8 {"id":"42"}

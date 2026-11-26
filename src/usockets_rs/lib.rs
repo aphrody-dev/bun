@@ -24,6 +24,8 @@ mod socket;
 mod tls;
 mod unsupported;
 
+pub use eventing::{us_internal_async, us_internal_callback_poll_free, us_internal_create_callback_poll};
+
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::sync::atomic::AtomicU32;
 
@@ -127,7 +129,7 @@ pub struct us_loop_t {
     pub(crate) ready_polls: ReadyPolls,
 }
 
-pub(crate) type LoopCb = unsafe extern "C" fn(*mut us_loop_t);
+pub type LoopCb = unsafe extern "C" fn(*mut us_loop_t);
 
 /// `struct us_socket_group_t` of libusockets.h, which `bun_uws_sys::SocketGroup` mirrors. Its owner embeds it.
 #[repr(C)]

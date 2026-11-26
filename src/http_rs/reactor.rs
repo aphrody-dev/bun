@@ -83,6 +83,13 @@ impl Reactor {
         }))
     }
 
+    /// mio's epoll set: readable while a turn would find something ready, so another loop can wait for it.
+    #[cfg(unix)]
+    pub fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd as _;
+        self.poll.borrow().as_raw_fd()
+    }
+
     /// A waker that makes the next [`turn`](Self::turn) return, from any thread.
     pub fn waker(&self) -> Waker {
         Waker::from(Arc::clone(&self.flag))

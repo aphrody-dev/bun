@@ -25,6 +25,10 @@ using server = Bun.serve({
   },
 });
 
+// `port: 0` is an ephemeral port each time, so a second server starts too.
+using second = Bun.serve({ port: 0, fetch: () => new Response("second") });
+console.log("ephemeral", second.port > 0 && second.port !== server.port, await (await fetch(second.url)).text());
+
 const get = await fetch(new URL("/", server.url), { headers: { "X-Name": "boa" } });
 console.log(get.status, get.headers.get("content-type"), await get.text());
 const post = await fetch(server.url, { method: "POST", body: "payload" });
