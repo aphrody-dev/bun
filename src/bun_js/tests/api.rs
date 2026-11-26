@@ -491,3 +491,60 @@ fn microtasks() {
         );
     });
 }
+
+/// What Node's validators ask of a value: `Array.isArray` through a proxy, buffer views and their lengths, a
+/// symbol's description.
+#[test]
+fn arrays_buffers_and_symbols() {
+    JSGlobalObject::with_new(|global| {
+        let proxy = eval(global, "new Proxy([1, 2], {})");
+        assert!(!proxy.is_array() && proxy.is_array_abstract(global).unwrap());
+        assert!(!eval(global, "({ length: 0 })").is_array_abstract(global).unwrap());
+        let revoked = eval(global, "(() => { const p = Proxy.revocable([], {}); p.revoke(); return p.proxy })()");
+        let thrown = revoked.is_array_abstract(global).expect_err("a revoked proxy throws");
+        assert_eq!(global.take_exception(thrown).get(global, "name").unwrap().and_then(|n| n.as_string()).as_deref(), Some("TypeError"));
+
+        let typed = eval(global, "new Uint16Array(3)");
+        assert!(typed.is_array_buffer_view() && eval(global, "new DataView(new ArrayBuffer(4))").is_array_buffer_view());
+        assert!(!eval(global, "new ArrayBuffer(4)").is_array_buffer_view());
+        assert_eq!(typed.array_buffer_length(global).unwrap(), Some(3));
+        assert_eq!(eval(global, "new DataView(new ArrayBuffer(4), 1)").array_buffer_length(global).unwrap(), Some(3));
+        assert_eq!(eval(global, "new ArrayBuffer(5)").array_buffer_length(global).unwrap(), Some(5));
+        assert_eq!(eval(global, "[1]").array_buffer_length(global).unwrap(), None);
+
+        assert_eq!(eval(global, "Symbol('s')").symbol_description().as_deref(), Some("s"));
+        assert_eq!(eval(global, "Symbol()").symbol_description(), None);
+        assert_eq!(JSValue::js_number(1.0).symbol_description(), None);
+    });
+}
+
+/// The async context (`$asyncContext`): once tracking is on, a promise job runs in the context it was queued in,
+/// `await` included, and puts back the one in place after it.
+#[test]
+fn promise_jobs_carry_the_async_context() {
+    fn context_now(global: &JSGlobalObject, _: &CallFrame<'_>) -> JsResult<JSValue> {
+        Ok(global.async_context())
+    }
+    JSGlobalObject::with_new(|global| {
+        global.to_js_value().put(global, "contextNow", JSFunction::create(global, "contextNow", context_now, 0));
+        eval(global, "globalThis.seen = []");
+
+        // Untracked: a job sees whatever is in place when it runs.
+        global.set_async_context(JSValue::from_utf8(b"before"));
+        eval(global, "Promise.resolve().then(() => seen.push(contextNow()))");
+        global.set_async_context(JSValue::from_utf8(b"later"));
+        global.drain_microtasks().unwrap();
+
+        global.enable_async_context_tracking();
+        assert!(global.is_async_context_tracking_enabled());
+        global.set_async_context(JSValue::from_utf8(b"queued"));
+        eval(
+            global,
+            "Promise.resolve().then(() => seen.push(contextNow())); (async () => { await null; seen.push(contextNow()); await 0; seen.push(contextNow()) })()",
+        );
+        global.set_async_context(JSValue::from_utf8(b"outside"));
+        global.drain_microtasks().unwrap();
+        assert_eq!(eval(global, "seen.join()").as_string().as_deref(), Some("later,queued,queued,queued"));
+        assert_eq!(global.async_context().as_string().as_deref(), Some("outside"));
+    });
+}

@@ -349,6 +349,31 @@ fn test_runner_orders_as_bun() {
     assert_eq!(out.status.code(), Some(1), "{stderr}");
 }
 
+/// `--bail` stops at the failure it counts to, inside the file; with more than 20 tests passing, the failed ones are
+/// listed again after the last file.
+#[test]
+fn test_runner_bails_mid_file_and_repeats_failures() {
+    let run = |args: &[&str]| {
+        let out = bun()
+            .args(args)
+            .current_dir(fixtures().join("runner"))
+            .env("AGENT", "0")
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        (text(&out).1, out.status.code())
+    };
+    let (stderr, code) = run(&["test", "order.test.ts", "--bail"]);
+    assert!(stderr.contains("(fail) beforeAll throws > (unnamed)"), "{stderr}");
+    assert!(!stderr.contains("(fail) timeout"), "{stderr}");
+    assert!(stderr.contains("Ran 14 tests across 1 file.") && stderr.contains("Bailed out after 1 failure"), "{stderr}");
+    assert_eq!(code, Some(1), "{stderr}");
+
+    let (stderr, _) = run(&["test", "order.test.ts", "repeat.test.ts"]);
+    let listed = stderr.split_once("tests failed:").map(|(_, rest)| rest).unwrap_or_default();
+    assert!(listed.contains("(fail) beforeAll throws > (unnamed)") && listed.contains("(fail) timeout"), "{stderr}");
+}
+
 /// A file that does not load is an unhandled error and a failure, as in Bun.
 #[test]
 fn test_file_that_does_not_load() {
@@ -362,6 +387,69 @@ fn test_file_that_does_not_load() {
     }
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `performance` (js/performance.ts) on the clock of bun_runtime_js: now() is monotonic from the time origin, and
+/// marks and measures are kept as WebCore's PerformanceUserTiming keeps them.
+#[test]
+fn performance_marks_and_measures() {
+    let code = r#"
+const a = performance.now(), b = performance.now();
+console.log(a <= b, Math.abs(performance.timeOrigin + performance.now() - Date.now()) < 1000);
+const start = performance.mark("start", { startTime: 1, detail: { x: 1 } });
+performance.mark("end", { startTime: 5 });
+const m = performance.measure("span", "start", "end");
+console.log(start instanceof PerformanceEntry, start.detail.x, m.entryType, m.startTime, m.duration);
+console.log(performance.getEntries().map(e => e.name).join(), performance.getEntriesByName("span").length);
+try { performance.measure("x", "missing") } catch (e) { console.log(e.name, e.message) }
+try { new PerformanceEntry() } catch (e) { console.log(e.constructor.name, e.message) }
+performance.clearMarks(); console.log(performance.getEntriesByType("mark").length);
+"#;
+    let out = bun().args(["-e", code]).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    let expected = "true true
+true 1 measure 1 4
+start,span,end 1
+SyntaxError No mark named 'missing' exists
+TypeError Illegal constructor
+0
+";
+    assert_eq!(stdout, expected, "stderr: {stderr}");
+}
+
+/// AsyncLocalStorage (src/js/node/async_hooks.ts) on bun_js's async context: a store set by run() is there after an
+/// await, in a microtask and in a timer that the callback queued, and not outside of it.
+#[test]
+fn async_local_storage_carries_across_await_and_timers() {
+    let code = r#"
+import { AsyncLocalStorage } from "node:async_hooks";
+const als = new AsyncLocalStorage();
+als.run("a", async () => {
+  await null;
+  console.log("await", als.getStore());
+  queueMicrotask(() => console.log("microtask", als.getStore()));
+  setTimeout(() => console.log("timer", als.getStore()), 0);
+  Promise.resolve().then(() => als.run("b", () => console.log("nested", als.getStore())));
+});
+console.log("outside", als.getStore());
+"#;
+    let out = bun().args(["-e", code]).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    assert_eq!(stdout, "outside undefined\nawait a\nmicrotask a\nnested b\ntimer a\n", "stderr: {stderr}");
+}
+
+/// mock.module() through the loader: import and require see the mock, of a missing package and of a builtin.
+#[test]
+fn mock_module_replaces_modules() {
+    let out = bun()
+        .args(["test", "mock-module.test.ts"])
+        .current_dir(fixtures().join("mock-module"))
+        .env("AGENT", "0")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let stderr = text(&out).1;
+    assert!(stderr.contains(" 4 pass") && stderr.contains(" 0 fail"), "{stderr}");
 }
 
 #[test]

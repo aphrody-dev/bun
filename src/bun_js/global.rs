@@ -68,6 +68,7 @@ impl JSGlobalObject {
         let loader = Loader::new(Rc::new(IdleModuleLoader));
         let mut context = Context::builder()
             .module_loader(Rc::new(loader))
+            .job_executor(Rc::new(crate::AsyncContextJobExecutor::default()))
             .build()
             .expect("a context with Boa's defaults builds");
         f(Self::from_context(&mut context))

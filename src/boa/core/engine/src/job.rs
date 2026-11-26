@@ -906,6 +906,19 @@ impl SimpleJobExecutor {
         Arc::clone(&self.stop)
     }
 
+    /// A microtask checkpoint: runs the promise jobs, and those they queue, until there are none.
+    fn drain_promise_jobs(&self, context: &mut Context) -> JsResult<()> {
+        loop {
+            let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
+            if jobs.is_empty() {
+                return Ok(());
+            }
+            for job in jobs {
+                job.call(context)?;
+            }
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.promise_jobs.borrow().is_empty()
             && self.async_jobs.borrow().is_empty()
@@ -967,6 +980,12 @@ impl JobExecutor for SimpleJobExecutor {
                 fr_group.insert(job.call(context));
             }
 
+            // As HTML's event loop: the microtasks run before a timer does, and again after each timer.
+            if let Err(err) = self.drain_promise_jobs(&mut context.borrow_mut()) {
+                self.clear();
+                return Err(err);
+            }
+
             // Dispatch all past-due timeout jobs before the termination check.
             {
                 let now = context.borrow().clock().now();
@@ -1003,6 +1022,10 @@ impl JobExecutor for SimpleJobExecutor {
                                         .or_default()
                                         .push(ClockJob::Interval(job));
                                 }
+                            }
+                            if let Err(err) = self.drain_promise_jobs(&mut context.borrow_mut()) {
+                                self.clear();
+                                return Err(err);
                             }
                         }
                     }

@@ -220,6 +220,21 @@ fn write_file(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<
     Ok(written.is_ok().into())
 }
 
+/// `mockModule(specifier, fromDir, exports)`: what `mock.module()` gives the loader, keyed by the path that the
+/// specifier resolves to from `fromDir`, or by the specifier when it resolves to nothing.
+fn mock_module(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let specifier = path_arg(args, context)?;
+    let dir = args
+        .get_or_undefined(1)
+        .to_string(context)?
+        .to_std_string_escaped();
+    let loader = crate::loader::installed(context)
+        .ok_or_else(|| JsNativeError::error().with_message("no module loader"))?;
+    let key = crate::loader::resolve(&specifier, Path::new(&dir)).unwrap_or_else(|| PathBuf::from(&specifier));
+    loader.mock(key, args.get_or_undefined(2).clone(), context)?;
+    Ok(JsValue::undefined())
+}
+
 /// Bun's `enable_ansi_colors_stderr`: a terminal, unless NO_COLOR, or FORCE_COLOR.
 fn colors() -> bool {
     let set = |name| std::env::var_os(name).is_some_and(|v| !v.is_empty() && v != "0");
@@ -231,7 +246,7 @@ fn colors() -> bool {
 
 /// `globalThis.__bun_test_native__`, which js/test/state.ts takes: printDiff.rs from bun_runtime_js, promise
 /// inspection, files, and the flags.
-fn install_natives(options: &Options, context: &mut Context) -> JsResult<JsObject> {
+fn install_natives(options: &Options, failures_before: u64, context: &mut Context) -> JsResult<JsObject> {
     let global = bun_js::JSGlobalObject::from_context(context);
     let mut diff = JsValue::undefined();
     for (name, value) in bun_runtime_js::generated_bindgen::test_runner::namespaces(global)
@@ -259,7 +274,9 @@ fn install_natives(options: &Options, context: &mut Context) -> JsResult<JsObjec
                 js_string!("maxConcurrency"),
                 options.max_concurrency.unwrap_or(20.0),
                 Attribute::all(),
-            );
+            )
+            .property(js_string!("bail"), options.bail as f64, Attribute::all())
+            .property(js_string!("failuresBefore"), failures_before as f64, Attribute::all());
         if let Some(pattern) = &options.name_pattern {
             flags.property(js_string!("namePattern"), JsString::from(pattern.as_str()), Attribute::all());
         }
@@ -281,6 +298,7 @@ fn install_natives(options: &Options, context: &mut Context) -> JsResult<JsObjec
         ("promiseResult", crate::builtins::promise_result, 1),
         ("readFile", read_file, 1),
         ("writeFile", write_file, 2),
+        ("mockModule", mock_module, 3),
     ] {
         native.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);
     }
@@ -310,16 +328,42 @@ fn unhandled(err: JsError, native: &JsObject, context: &mut Context) {
     }
 }
 
-fn run_file(path: &Path, options: &Options) -> Counts {
+/// The lines of the tests that failed, were skipped or are todo, which `bun test` prints again after the last file
+/// (`failures_to_repeat_buf` and the others).
+#[derive(Default)]
+struct Repeats {
+    fail: String,
+    skip: String,
+    todo: String,
+}
+
+/// What one file's run gave.
+#[derive(Default)]
+struct FileRun {
+    counts: Counts,
+    repeats: Repeats,
+    /// `--bail`'s count was reached in this file.
+    bailed: bool,
+}
+
+fn run_file(path: &Path, rel: &Path, options: &Options, failures_before: u64, colors: bool) -> FileRun {
     let loader = Rc::new(BunModuleLoader::default());
     let argv = vec![
         std::env::args().next().unwrap_or_else(|| "bun".into()),
         path.display().to_string(),
     ];
-    let failed_to_load = Counts {
-        fail: 1,
-        errors: 1,
-        ..Counts::default()
+    // As test_command.rs: a file that does not load has no test to list, so the file is listed.
+    let failed_to_load = FileRun {
+        counts: Counts {
+            fail: 1,
+            errors: 1,
+            ..Counts::default()
+        },
+        repeats: Repeats {
+            fail: format!("{} {}\n", pretty("<r><red>(fail)<r>", colors), rel.display()),
+            ..Repeats::default()
+        },
+        bailed: false,
     };
     let mut context = match crate::runtime::context(loader.clone(), None, argv) {
         Ok(context) => context,
@@ -329,7 +373,7 @@ fn run_file(path: &Path, options: &Options) -> Counts {
         }
     };
     let loaded = (|| -> JsResult<JsObject> {
-        let native = install_natives(options, &mut context)?;
+        let native = install_natives(options, failures_before, &mut context)?;
         let runner = loader
             .builtin("bun:test", &mut context)
             .expect("bun:test is built in")?;
@@ -366,7 +410,20 @@ fn run_file(path: &Path, options: &Options) -> Counts {
     match finished {
         Ok(stats) => {
             let snapshots = get(&stats, "snapshots", &mut context);
-            Counts {
+            let repeats = get(&stats, "repeats", &mut context);
+            let mut text = |key: &str| {
+                get(&repeats, key, &mut context)
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default()
+            };
+            let repeats = Repeats {
+                fail: text("fail"),
+                skip: text("skip"),
+                todo: text("todo"),
+            };
+            let bailed = get(&stats, "bailed", &mut context).to_boolean();
+            let counts = Counts {
                 pass: number(&stats, "pass", &mut context),
                 fail: number(&stats, "fail", &mut context),
                 skip: number(&stats, "skip", &mut context),
@@ -378,7 +435,8 @@ fn run_file(path: &Path, options: &Options) -> Counts {
                 snapshots_passed: number(&snapshots, "passed", &mut context),
                 snapshots_failed: number(&snapshots, "failed", &mut context),
                 snapshots_added: number(&snapshots, "added", &mut context),
-            }
+            };
+            FileRun { counts, repeats, bailed }
         }
         Err(err) => {
             unhandled(err, &native, &mut context);
@@ -472,6 +530,31 @@ fn summary(total: &Counts, files: usize, start: std::time::Instant, colors: bool
     ran(total, files, start, colors);
 }
 
+/// After the last file, as test_command.rs does when more than 20 tests passed: the skipped, todo and failed tests
+/// again, so that they are not lost in what scrolled by.
+fn print_repeats(total: &Counts, repeats: &Repeats, colors: bool) {
+    let mut err = String::new();
+    if total.skip > 0 {
+        err += &pretty(&format!("\n<r><d>{} tests skipped:<r>\n", total.skip), colors);
+        err += &repeats.skip;
+    }
+    if total.todo > 0 {
+        if total.skip > 0 {
+            err.push('\n');
+        }
+        err += &pretty(&format!("\n<r><d>{} tests todo:<r>\n", total.todo), colors);
+        err += &repeats.todo;
+    }
+    if total.fail > 0 {
+        if total.skip > 0 || total.todo > 0 {
+            err.push('\n');
+        }
+        err += &pretty(&format!("\n<r><d>{} tests failed:<r>\n", total.fail), colors);
+        err += &repeats.fail;
+    }
+    let _ = std::io::stderr().write_all(err.as_bytes());
+}
+
 /// `print_summary`: what ran, and how long it took.
 fn ran(total: &Counts, files: usize, start: std::time::Instant, colors: bool) {
     let tests = total.pass + total.fail + total.skip + total.todo;
@@ -497,13 +580,18 @@ pub fn main(args: &[String]) -> i32 {
     }
     let start = std::time::Instant::now();
     let mut total = Counts::default();
+    let mut repeats = Repeats::default();
     let mut files_run = 0;
     for file in &files {
         let rel = file.strip_prefix(&cwd).unwrap_or(file);
         eprintln!("\n{}:", rel.display());
-        total += run_file(file, &options);
+        let run = run_file(file, rel, &options, total.fail, colors);
+        total += run.counts;
+        repeats.fail += &run.repeats.fail;
+        repeats.skip += &run.repeats.skip;
+        repeats.todo += &run.repeats.todo;
         files_run += 1;
-        if options.bail > 0 && total.fail >= options.bail {
+        if run.bailed || (options.bail > 0 && total.fail >= options.bail) {
             ran(&total, files_run, start, colors);
             eprintln!(
                 "\nBailed out after {} failure{}",
@@ -512,6 +600,9 @@ pub fn main(args: &[String]) -> i32 {
             );
             return 1;
         }
+    }
+    if total.pass > 20 && !bun_core::output::is_ai_agent() && !options.only_failures {
+        print_repeats(&total, &repeats, colors);
     }
     eprintln!();
     summary(&total, files_run, start, colors);

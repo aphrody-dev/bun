@@ -1,4 +1,6 @@
 // mock(), jest.fn(), vi.fn() and spyOn(): a port of src/jsc/bindings/JSMockFunction.cpp.
+import { native } from "./state.ts";
+
 type Fn = (...args: any[]) => any;
 
 type Kind = "call" | "returnValue" | "returnThis" | "rejectedValue" | "throwValue" | "nothing";
@@ -33,6 +35,10 @@ interface MockData {
   isVitest: boolean;
   isJest: boolean;
   isSpy: boolean;
+  /** Made by vi.mockObject(): an instance it constructs gets mocks of the mocked methods of its prototype. */
+  isAutomock?: boolean;
+  /** Of such an instance's method mock: the mock of the same method on the class prototype, which also records. */
+  prototypeMock?: Fn;
   spy?: { target: any; key: PropertyKey; original: PropertyDescriptor | undefined; accessor?: "get" | "set" | "value" };
   prototype?: object;
 }
@@ -176,7 +182,8 @@ function createMock(isVitest: boolean): Fn {
   };
   const f = function (this: unknown, ...args: unknown[]) {
     const isNew = new.target !== undefined;
-    const impl = takeNext(data);
+    const prototypeMock = data.prototypeMock;
+    const impl = takeNext(data) ?? (prototypeMock ? takeNext(check(prototypeMock)) : undefined);
     if (!isNew) {
       invocationId++;
       const runs = impl && (impl.kind === "call" || impl.kind === "throwValue");
@@ -185,6 +192,7 @@ function createMock(isVitest: boolean): Fn {
       if (impl && !runs) value = run(impl, this, args);
       result.value = value;
       record(f, data, args, this, result, false);
+      if (prototypeMock) record(prototypeMock, check(prototypeMock), args, this, result, false);
       if (!runs) return value;
       try {
         value = run(impl!, this, args);
@@ -204,6 +212,7 @@ function createMock(isVitest: boolean): Fn {
     const thisValue = constructs ? undefined : this;
     const result: Result = { type: "incomplete", value: undefined };
     record(f, data, args, thisValue, result, true);
+    if (prototypeMock) record(prototypeMock, check(prototypeMock), args, thisValue, result, true);
     let returned: unknown;
     try {
       if (constructs) returned = Reflect.construct(constructor!, args, new.target);
@@ -216,11 +225,17 @@ function createMock(isVitest: boolean): Fn {
     let resultValue = returned;
     if (typeof returned !== "object" || returned === null) returned = thisValue;
     if (isVitest) resultValue = returned;
+    if (data.isAutomock) mockInstanceMethods(f, returned as object);
     result.type = "return";
     result.value = resultValue;
     if (constructs) {
       data.contexts![data.contexts!.length - 1] = returned;
       data.instances![data.instances!.length - 1] = returned;
+      if (prototypeMock) {
+        const protoData = check(prototypeMock);
+        protoData.contexts![protoData.contexts!.length - 1] = returned;
+        protoData.instances![protoData.instances!.length - 1] = returned;
+      }
     }
     return returned;
   } as Fn & Record<PropertyKey, any>;
@@ -662,8 +677,211 @@ export function restoreAllMocks() {
 export const mocked = (value: unknown) => value;
 
 /** mock.module(): replaces a module for the loader. */
+/** The directory of the file that called: the first frame of the stack in a file outside of bun:test. */
+function callerDir(): string {
+  for (const line of String(new Error().stack ?? "").split("\n")) {
+    const file = /\(?((?:\/|[A-Za-z]:\\)[^()]*?):\d+:\d+\)?\s*$/.exec(line)?.[1];
+    if (file) return file.slice(0, Math.max(file.lastIndexOf("/"), file.lastIndexOf("\\")) + 1) || "/";
+  }
+  return "";
+}
+
+/**
+ * `mock.module(specifier, factory)` (JSMock__jsModuleMock): what imports or requires `specifier`, resolved from the
+ * calling file, gets what `factory` returns from now on, or what the promise it returns resolves to.
+ */
 export function moduleMock(specifier: unknown, factory: unknown) {
-  if (typeof specifier !== "string") throw new TypeError("mock.module() expects a string specifier");
-  if (typeof factory !== "function") throw new TypeError("mock.module() expects a function as the second argument");
-  throw new Error("mock.module() is not supported by this build of bun test yet");
+  if (typeof specifier !== "string") throw new TypeError("mock(module, fn) requires a module name string");
+  if (typeof factory !== "function") throw new TypeError("mock(module, fn) requires a function");
+  const dir = callerDir();
+  const exports = factory();
+  if (exports && (typeof exports === "object" || typeof exports === "function") && typeof exports.then === "function") {
+    // Installed by the time the promise settles: an import that runs after an `await` of it sees the mock.
+    return Promise.resolve(exports).then(value => void native.mockModule(specifier, dir, value));
+  }
+  native.mockModule(specifier, dir, exports);
+}
+
+// ── vi.mockObject(): the Automocker of JSMockFunction.cpp ─────────────────────
+/** `mockInstanceMethods`: an instance an automocked class constructs gets a mock of each mocked method of the prototype. */
+function mockInstanceMethods(fn: Fn, instance: object) {
+  const prototype = (fn as any).prototype;
+  if (typeof prototype !== "object" || prototype === null) return;
+  for (const key of Reflect.ownKeys(prototype)) {
+    if (key === "constructor") continue;
+    const desc = Object.getOwnPropertyDescriptor(prototype, key);
+    if (!desc || !("value" in desc)) continue;
+    const method = desc.value;
+    const methodData = dataOf(method);
+    if (!methodData || (instance as any)[key] !== method) continue;
+    const mock = createMock(methodData.isVitest);
+    const data = check(mock);
+    data.isJest = methodData.isJest;
+    copyNameAndLength(mock, method);
+    data.prototypeMock = method;
+    (instance as any)[key] = mock;
+  }
+}
+
+type AutomockKind = "keep" | "array" | "object" | "module" | "function";
+type AutomockRole = "member" | "exports" | "prototype";
+
+class Automocker {
+  replacements = new Map<object, object>();
+  pending: [object, object, AutomockKind][] = [];
+  accessor: Fn | undefined;
+  constructor(
+    readonly spy: boolean,
+    readonly leaveOriginalAlone: boolean,
+  ) {}
+
+  kindOf(value: unknown): AutomockKind {
+    if ((typeof value !== "object" && typeof value !== "function") || value === null || isMockFunction(value)) return "keep";
+    if (value === globalThis) return "keep";
+    if (Array.isArray(value)) return "array";
+    // Object.prototype.toString(): a Map, a Date, a Promise or an instance with a Symbol.toStringTag is kept.
+    let tag: string;
+    try {
+      tag = Object.prototype.toString.call(value);
+    } catch {
+      // A Symbol.toStringTag getter can throw when it is read on the prototype itself: no tag, then.
+      tag = typeof value === "function" ? "[object Function]" : "[object Object]";
+    }
+    if (tag === "[object Object]") return "object";
+    if (tag === "[object Module]") return "module";
+    if (typeof value === "function" && tag.includes("Function")) return "function";
+    return "keep";
+  }
+
+  replacementFor(value: unknown, role: AutomockRole = "member"): unknown {
+    if ((typeof value !== "object" && typeof value !== "function") || value === null) return value;
+    const known = this.replacements.get(value);
+    if (known !== undefined) return known;
+    let kind = this.kindOf(value);
+    const original = value as any;
+    let replacement: any;
+    switch (kind) {
+      case "keep":
+        return value;
+      case "array":
+        replacement = [];
+        break;
+      case "object": {
+        // Spied in place, so that spied methods still find the private fields, slots and prototype of their `this`.
+        let inPlace = this.spy;
+        if (this.spy && this.leaveOriginalAlone && role === "prototype") {
+          replacement = Object.create(original);
+          break;
+        }
+        if (role === "exports" || (this.spy && this.leaveOriginalAlone)) {
+          const prototype = Object.getPrototypeOf(original);
+          if (typeof prototype !== "object" || prototype === null || prototype === Object.prototype) {
+            inPlace = false;
+            if (role === "exports") kind = "module";
+          } else if (this.spy && this.leaveOriginalAlone) return value;
+        }
+        replacement = inPlace ? original : {};
+        break;
+      }
+      case "module":
+        replacement = moduleObject();
+        break;
+      case "function": {
+        const mock = createMock(true);
+        check(mock).isAutomock = true;
+        copyNameAndLength(mock, original);
+        if (this.spy) {
+          const data = check(mock);
+          data.initial = original;
+          setFallback(data, "call", original);
+        }
+        replacement = mock;
+        break;
+      }
+    }
+    this.replacements.set(original, replacement);
+    if (kind !== "array" || this.spy) this.pending.push([original, replacement, kind]);
+    return replacement;
+  }
+
+  mockElements(original: any, replacement: unknown[]) {
+    const length = Number(original.length) >>> 0;
+    // By index: an array can be nearly all holes.
+    for (const key of Object.keys(original)) {
+      const i = Number(key);
+      if (String(i >>> 0) !== key || i >= length) continue;
+      replacement[i] = this.replacementFor(original[i]) as unknown;
+    }
+    replacement.length = length;
+  }
+
+  mockMembers(original: any, replacement: any, kind: AutomockKind) {
+    // A transpiled module (`__esModule`) exports through getters, so those are read. No other getter is called.
+    let isModule = kind === "module";
+    if (!isModule) isModule = !!original.__esModule;
+    const isFunction = kind === "function";
+    const inPlace = original === replacement;
+    const seen = new Set<PropertyKey>();
+    for (
+      let holder: any = original;
+      holder && holder !== Object.prototype && holder !== Function.prototype && holder !== RegExp.prototype;
+      holder = Object.getPrototypeOf(holder)
+    ) {
+      for (const key of Reflect.ownKeys(holder)) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (isFunction && (key === "length" || key === "name" || key === "arguments" || key === "caller")) continue;
+        if (kind === "module" && key === Symbol.toStringTag) continue;
+        const desc = Object.getOwnPropertyDescriptor(holder, key);
+        if (!desc) continue;
+        let value: unknown;
+        if ("value" in desc) value = desc.value;
+        else if (isModule || typeof desc.get !== "function") value = original[key];
+        else {
+          if (inPlace) continue;
+          if (!this.spy) {
+            this.accessor ??= function () {} as Fn;
+            desc.get = this.accessor;
+            if (typeof desc.set === "function") desc.set = this.accessor;
+          }
+          Object.defineProperty(replacement, key, desc);
+          continue;
+        }
+        const mocked = this.replacementFor(value, isFunction && key === "prototype" ? "prototype" : "member");
+        if (inPlace) {
+          if (mocked === value) continue;
+          replacement[key] = mocked;
+        } else if (isFunction && key === "prototype") {
+          Object.defineProperty(replacement, "prototype", { value: mocked, writable: true, enumerable: false, configurable: false });
+        } else {
+          Object.defineProperty(replacement, key, { value: mocked, writable: true, enumerable: true, configurable: true });
+        }
+      }
+      // A module namespace object's prototype only serves `__esModule` to CommonJS interop.
+      if (kind === "module") break;
+    }
+  }
+}
+
+function moduleObject() {
+  const object = Object.create(null);
+  Object.defineProperty(object, Symbol.toStringTag, { value: "Module", writable: false, enumerable: false, configurable: false });
+  return object;
+}
+
+function automock(value: unknown, role: AutomockRole, spy: boolean, leaveOriginalAlone: boolean): unknown {
+  const automocker = new Automocker(spy, leaveOriginalAlone);
+  const result = automocker.replacementFor(value, role);
+  while (automocker.pending.length) {
+    const [original, replacement, kind] = automocker.pending.pop()!;
+    if (kind === "array") automocker.mockElements(original, replacement as unknown[]);
+    else automocker.mockMembers(original, replacement, kind);
+  }
+  return result;
+}
+
+/** `vi.mockObject(value, { spy })`. */
+export function mockObject(value: unknown, options?: unknown) {
+  const spy = typeof options === "object" && options !== null && !!(options as any).spy;
+  return automock(value, "member", spy, false);
 }

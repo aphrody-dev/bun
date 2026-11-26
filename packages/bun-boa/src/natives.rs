@@ -7,6 +7,6 @@ pub fn bindgen(global: &JSGlobalObject, file: &str, symbol: &str) -> Option<JsRe
     bun_runtime_js::generated_bindgen::native(global, file, symbol)
 }
 
-pub fn cpp(_global: &JSGlobalObject, _file: &str, _symbol: &str) -> Option<JsResult<JSValue>> {
-    None
+pub fn cpp(global: &JSGlobalObject, file: &str, symbol: &str) -> Option<JsResult<JSValue>> {
+    bun_runtime_js::cpp(global, file, symbol)
 }

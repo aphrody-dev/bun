@@ -171,7 +171,9 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
     let global = bun_js::JSGlobalObject::from_context(ops.context());
     let bound = bun_semver_js::generated_bindgen::semver_object::namespaces(global)
         .map_err(|error| global.into_engine_error(error))?;
-    for (name, value) in bound {
+    let clock = bun_runtime_js::generated_bindgen::performance::namespaces(global)
+        .map_err(|error| global.into_engine_error(error))?;
+    for (name, value) in bound.into_iter().chain(clock) {
         ops.property(JsString::from(name), value.into_engine(), Attribute::all());
     }
     ops.property(js_string!("env"), env, Attribute::all())
@@ -213,6 +215,7 @@ pub fn context(
     }
     let mut context = Context::builder()
         .module_loader(loader.clone())
+        .job_executor(Rc::new(bun_js::AsyncContextJobExecutor::default()))
         .build()
         .map_err(|err| JsNativeError::error().with_message(err.to_string()))?;
     loader.install(&mut context);
@@ -221,8 +224,12 @@ pub fn context(
         None,
         &mut context,
     )?;
+    bun_runtime_js::web::performance::start();
     let ops = native(&mut context)?;
     context.register_global_property(js_string!("__bun_native_ops__"), ops, Attribute::all())?;
+    let performance = crate::transpile::transpile(b"bun:performance.ts", include_bytes!("js/performance.ts"))
+        .map_err(|err| JsNativeError::syntax().with_message(err))?;
+    context.eval(Source::from_bytes(&performance))?;
     let prelude = crate::transpile::transpile(b"bun:prelude.ts", include_bytes!("js/bun.ts"))
         .map_err(|err| JsNativeError::syntax().with_message(err))?;
     context.eval(Source::from_bytes(&prelude))?;
