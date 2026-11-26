@@ -1,0 +1,47 @@
+# Standalone workspace: Bun's root workspace and lockfile stay untouched. Bun's crates are path dependencies and
+# keep inheriting their settings from the root `Cargo.toml`.
+[workspace]
+resolver = "2"
+
+[package]
+name = "bun-boa"
+description = "Bun on Boa: Bun's Rust crates with a pure-Rust JavaScript engine, no JavaScriptCore and no C++."
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "bun"
+path = "src/main.rs"
+
+[dependencies]
+boa_engine = { version = "0.22", features = ["annex-b", "intl_bundled", "experimental"] }
+boa_gc = "0.22"
+boa_runtime = "0.22"
+bun_ast = { path = "../../src/ast" }
+bun_alloc = { path = "../../src/bun_alloc" }
+bun_core = { path = "../../src/bun_core" }
+bun_js_parser = { path = "../../src/js_parser" }
+bun_js_printer = { path = "../../src/js_printer" }
+bun_sema_standalone = { path = "../../src/sema/standalone" }
+serde_json = "1"
+
+[profile.dev]
+debug = "line-tables-only"
+
+# Boa is an interpreter: unoptimised it is too slow to run anything.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+
+# The series in patches/<crate>-<version>/, applied to the crates.io tarballs by `bun run vendor`.
+[patch.crates-io]
+boa_ast = { path = "vendor/boa_ast-0.22.0" }
+boa_engine = { path = "vendor/boa_engine-0.22.0" }
+boa_gc = { path = "vendor/boa_gc-0.22.0" }
+boa_interner = { path = "vendor/boa_interner-0.22.0" }
+boa_parser = { path = "vendor/boa_parser-0.22.0" }
