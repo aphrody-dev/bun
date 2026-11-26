@@ -18,6 +18,10 @@
   makeError(code: number, message: string): Error;
   createRequire(dir: string): (specifier: string) => unknown;
   errorCode(code: number): string;
+  /** The realm's async context (bun_js): what `$asyncContext`'s internal field 0 holds. */
+  asyncContext(): unknown;
+  setAsyncContext(value: unknown): void;
+  isAsyncContextTracked(): boolean;
   specifiers: string[];
   native: boolean[];
   installed?: { require(id: number): unknown; esm(id: number): [string, unknown][] };
@@ -52,10 +56,34 @@
     if (!list) fields.set(object, (list = []));
     return list;
   };
-  const getInternalField = (object: object, index: number) => fieldsOf(object)[index];
+  // `$asyncContext`'s field 0 is the realm's, which bun_js's job executor carries into promise jobs.
+  const asyncContext = {};
+  const getInternalField = (object: object, index: number) =>
+    object === asyncContext && index === 0 ? native.asyncContext() : fieldsOf(object)[index];
   const putInternalField = (object: object, index: number, value: unknown) => {
-    fieldsOf(object)[index] = value;
+    if (object === asyncContext && index === 0) native.setAsyncContext(value);
+    else fieldsOf(object)[index] = value;
   };
+  // Bun's timers keep the async context they were set in, as its promise jobs do.
+  for (const name of ["setTimeout", "setInterval", "setImmediate"]) {
+    const original = G[name];
+    if (typeof original !== "function") continue;
+    G[name] = {
+      [name](callback: unknown, ...rest: unknown[]) {
+        if (typeof callback !== "function" || !native.isAsyncContextTracked()) return original(callback, ...rest);
+        const captured = native.asyncContext();
+        return original(function (this: unknown, ...args: unknown[]) {
+          const previous = native.asyncContext();
+          native.setAsyncContext(captured);
+          try {
+            return callback.apply(this, args);
+          } finally {
+            native.setAsyncContext(previous);
+          }
+        }, ...rest);
+      },
+    }[name];
+  }
 
   // ───────────────────────── promises ─────────────────────────
   const settlers = new WeakMap<Promise<unknown>, { resolve(v: unknown): void; reject(e: unknown): void }>();
@@ -490,7 +518,7 @@
     createInternalModuleById,
     getInternalField,
     putInternalField,
-    asyncContext: {},
+    asyncContext,
     makeErrorWithCode,
     makeAbortError,
     makeTypeError: (message: string) => new TypeError(message),

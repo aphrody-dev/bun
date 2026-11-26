@@ -15,6 +15,7 @@
 
 #![warn(unused_must_use)]
 
+mod async_context;
 pub mod bindgen;
 mod call_frame;
 pub mod class;
@@ -27,6 +28,7 @@ mod object;
 mod strong;
 mod value;
 
+pub use async_context::AsyncContextJobExecutor;
 pub use bun_core::JsError;
 pub use call_frame::CallFrame;
 pub use class::{ClassRef, JsClass};

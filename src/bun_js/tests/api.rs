@@ -517,3 +517,34 @@ fn arrays_buffers_and_symbols() {
         assert_eq!(JSValue::js_number(1.0).symbol_description(), None);
     });
 }
+
+/// The async context (`$asyncContext`): once tracking is on, a promise job runs in the context it was queued in,
+/// `await` included, and puts back the one in place after it.
+#[test]
+fn promise_jobs_carry_the_async_context() {
+    fn context_now(global: &JSGlobalObject, _: &CallFrame<'_>) -> JsResult<JSValue> {
+        Ok(global.async_context())
+    }
+    JSGlobalObject::with_new(|global| {
+        global.to_js_value().put(global, "contextNow", JSFunction::create(global, "contextNow", context_now, 0));
+        eval(global, "globalThis.seen = []");
+
+        // Untracked: a job sees whatever is in place when it runs.
+        global.set_async_context(JSValue::from_utf8(b"before"));
+        eval(global, "Promise.resolve().then(() => seen.push(contextNow()))");
+        global.set_async_context(JSValue::from_utf8(b"later"));
+        global.drain_microtasks().unwrap();
+
+        global.enable_async_context_tracking();
+        assert!(global.is_async_context_tracking_enabled());
+        global.set_async_context(JSValue::from_utf8(b"queued"));
+        eval(
+            global,
+            "Promise.resolve().then(() => seen.push(contextNow())); (async () => { await null; seen.push(contextNow()); await 0; seen.push(contextNow()) })()",
+        );
+        global.set_async_context(JSValue::from_utf8(b"outside"));
+        global.drain_microtasks().unwrap();
+        assert_eq!(eval(global, "seen.join()").as_string().as_deref(), Some("later,queued,queued,queued"));
+        assert_eq!(global.async_context().as_string().as_deref(), Some("outside"));
+    });
+}

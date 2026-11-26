@@ -392,6 +392,27 @@ TypeError Illegal constructor
     assert_eq!(stdout, expected, "stderr: {stderr}");
 }
 
+/// AsyncLocalStorage (src/js/node/async_hooks.ts) on bun_js's async context: a store set by run() is there after an
+/// await, in a microtask and in a timer that the callback queued, and not outside of it.
+#[test]
+fn async_local_storage_carries_across_await_and_timers() {
+    let code = r#"
+import { AsyncLocalStorage } from "node:async_hooks";
+const als = new AsyncLocalStorage();
+als.run("a", async () => {
+  await null;
+  console.log("await", als.getStore());
+  queueMicrotask(() => console.log("microtask", als.getStore()));
+  setTimeout(() => console.log("timer", als.getStore()), 0);
+  Promise.resolve().then(() => als.run("b", () => console.log("nested", als.getStore())));
+});
+console.log("outside", als.getStore());
+"#;
+    let out = bun().args(["-e", code]).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    assert_eq!(stdout, "outside undefined\nawait a\nmicrotask a\nnested b\ntimer a\n", "stderr: {stderr}");
+}
+
 #[test]
 fn semver_is_bound_through_bun_js() {
     let out = bun()

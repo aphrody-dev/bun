@@ -275,6 +275,25 @@ fn error_code(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<
         .into())
 }
 
+/// `asyncContext()`: what `$getInternalField($asyncContext, 0)` reads, the realm's async context in bun_js.
+fn async_context(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(bun_js::JSGlobalObject::from_context(context).async_context().into_engine())
+}
+
+/// `setAsyncContext(value)`: what `$putInternalField($asyncContext, 0, value)` writes.
+fn set_async_context(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let value = bun_js::JSValue::from_engine(args.get_or_undefined(0).clone());
+    bun_js::JSGlobalObject::from_context(context).set_async_context(value);
+    Ok(JsValue::undefined())
+}
+
+/// `isAsyncContextTracked()`: whether timers and promise jobs carry the async context yet.
+fn is_async_context_tracked(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(bun_js::JSGlobalObject::from_context(context)
+        .is_async_context_tracking_enabled()
+        .into())
+}
+
 /// `createRequire(dir)`: `require` as a module in `dir` calls it (node:module's `createRequire`).
 fn create_require(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let dir = args
@@ -308,6 +327,9 @@ pub fn install(context: &mut Context) -> JsResult<()> {
         ("proxyField", proxy_field, 2),
         ("makeError", make_error, 2),
         ("errorCode", error_code, 1),
+        ("asyncContext", async_context, 0),
+        ("setAsyncContext", set_async_context, 1),
+        ("isAsyncContextTracked", is_async_context_tracked, 0),
         ("createRequire", create_require, 1),
     ] {
         ops.function(NativeFunction::from_fn_ptr(f), JsString::from(name), len);

@@ -215,6 +215,7 @@ pub fn context(
     }
     let mut context = Context::builder()
         .module_loader(loader.clone())
+        .job_executor(Rc::new(bun_js::AsyncContextJobExecutor::default()))
         .build()
         .map_err(|err| JsNativeError::error().with_message(err.to_string()))?;
     loader.install(&mut context);
