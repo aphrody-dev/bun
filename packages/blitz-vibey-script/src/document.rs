@@ -76,8 +76,10 @@ impl ScriptDocument {
     /// [`DocumentConfig`].
     pub fn from_base_document(doc: BaseDocument) -> Self {
         // The default base url (set when `DocumentConfig.base_url` is `None`) is a
-        // meaningless data url. Treat it as "no base url".
-        let base_url = Some(doc.base_url().clone()).filter(|url| url.scheme() != "data");
+        // meaningless data url. Treat it as "no base url"; a page loaded from a
+        // `data:` URL keeps it, as its `location`.
+        let base_url = Some(doc.base_url().clone())
+            .filter(|url| url.as_str() != "data:text/css;charset=utf-8;base64,");
 
         let inner = Rc::new(RefCell::new(doc));
         let fetcher: Rc<RefCell<Box<dyn ScriptFetcher>>> =
