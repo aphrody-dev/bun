@@ -111,7 +111,8 @@ if (command === "apply" || command === "check") {
 } else if (command === "commit") {
   const author = pr.commits[0]!.authors[0]!;
   const date = pr.commits.at(-1)!.committedDate;
-  const body = [`Port of ${pr.url}.`, ...note].join("\n\n");
+  const left = outside.length ? [`Left out, outside the crate: ${outside.join(", ")}.`] : [];
+  const body = [`Port of ${pr.url}.`, ...note, ...left].join("\n\n");
   const names = crates.size ? [...crates.keys()] : [];
   for (const name of names) {
     const dir = join(root, "vendor", name);

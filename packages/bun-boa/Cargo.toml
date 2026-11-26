@@ -71,11 +71,15 @@ blitz-dom = { path = "vendor/blitz-dom-0.3.0-beta.4" }
 blitz-html = { path = "vendor/blitz-html-0.3.0-beta.4" }
 blitz-paint = { path = "vendor/blitz-paint-0.3.0-beta.4" }
 blitz-traits = { path = "vendor/blitz-traits-0.3.0-beta.4" }
+blitz-vibey-script = { path = "vendor/blitz-vibey-script-0.3.0-beta.4" }
 boa_ast = { path = "vendor/boa_ast-0.22.0" }
 boa_engine = { path = "vendor/boa_engine-0.22.0" }
 boa_gc = { path = "vendor/boa_gc-0.22.0" }
 boa_interner = { path = "vendor/boa_interner-0.22.0" }
 boa_parser = { path = "vendor/boa_parser-0.22.0" }
+boa_runtime = { path = "vendor/boa_runtime-0.22.0" }
+boa_string = { path = "vendor/boa_string-0.22.0" }
+boa_wintertc = { path = "vendor/boa_wintertc-0.22.0" }
 parley = { path = "vendor/parley-0.12.0" }
 parley_engine = { path = "vendor/parley_engine-0.12.0" }
 selectors = { path = "vendor/selectors-0.41.0" }

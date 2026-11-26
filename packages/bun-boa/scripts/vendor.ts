@@ -70,11 +70,30 @@ export async function materialise(name: string): Promise<string> {
   return `${name}: ${series.length} patches`;
 }
 
+// Cargo.toml's [patch.crates-io] table (the end of the file) lists every series, so a vendored crate is never left
+// on its crates.io tarball while a patched dependent expects its changes.
+async function patchTable(names: string[]) {
+  const manifest = Bun.file(join(root, "Cargo.toml"));
+  const text = await manifest.text();
+  const header = "[patch.crates-io]\n";
+  const at = text.indexOf(header);
+  if (at < 0) throw new Error(`Cargo.toml: no ${header.trim()} table`);
+  const rows = names
+    .toSorted()
+    .map(name => `${/^(.+)-\d+\.\d+\.\d+/.exec(name)![1]} = { path = "vendor/${name}" }\n`)
+    .join("");
+  const next = text.slice(0, at + header.length) + rows;
+  if (next !== text) await Bun.write(manifest, next);
+}
+
 if (import.meta.main) {
   const names = [...new Bun.Glob("*/{*.patch,SOURCE}").scanSync(join(root, "patches"))]
     .map(p => p.split("/")[0]!)
     .filter((n, i, all) => all.indexOf(n) === i);
-  const results = await Promise.allSettled(names.map(materialise));
-  for (const r of results) r.status === "fulfilled" ? console.log(r.value) : console.error(String(r.reason));
+  const [results] = await Promise.all([Promise.allSettled(names.map(materialise)), patchTable(names)]);
+  for (const r of results) {
+    if (r.status === "fulfilled") console.log(r.value);
+    else console.error(String(r.reason));
+  }
   process.exit(results.some(r => r.status === "rejected") ? 1 : 0);
 }
