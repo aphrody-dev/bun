@@ -4,10 +4,12 @@ Date: Tue, 24 Nov 2026 09:53:58 +0000
 Subject: [PATCH] fix(console): preserve non-string first arguments
 
 Port of https://github.com/boa-dev/boa/pull/5688.
+
+Adapted to boa_wintertc 0.22: its console prints objects across lines, so the test expects that layout.
 ---
  src/console/mod.rs   | 16 ++++++++++++----
- src/console/tests.rs | 35 +++++++++++++++++++++++++++++++++++
- 2 files changed, 47 insertions(+), 4 deletions(-)
+ src/console/tests.rs | 39 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 51 insertions(+), 4 deletions(-)
 
 diff --git a/src/console/mod.rs b/src/console/mod.rs
 index e658261..53d2c0b 100644
@@ -46,10 +48,10 @@ index e658261..53d2c0b 100644
              while let Some(c) = chars.next() {
                  if c == '%' {
 diff --git a/src/console/tests.rs b/src/console/tests.rs
-index 12c1d73..c8c0311 100644
+index 12c1d73..db0860c 100644
 --- a/src/console/tests.rs
 +++ b/src/console/tests.rs
-@@ -417,6 +417,41 @@ fn console_log_date() {
+@@ -417,6 +417,45 @@ fn console_log_date() {
      );
  }
  
@@ -78,8 +80,12 @@ index 12c1d73..c8c0311 100644
 +    assert_eq!(
 +        *logger.log.borrow(),
 +        indoc! {r#"
-+            [] { hello: "world" }
-+            { hello: "world" } tail
++            [] {
++                hello: "world"
++            }
++            {
++                hello: "world"
++            } tail
 +            Symbol(test) tail
 +            [ "%s" ] tail
 +            null undefined false 42 1n
