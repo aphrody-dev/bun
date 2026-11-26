@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: basharkhan7776 <basharkhan7776@gmail.com>
+Date: Sun, 25 Oct 2026 13:24:59 +0000
+Subject: [PATCH] fix(engine): avoid oversized allocation in
+ String.prototype.repeat
+
+Port of https://github.com/boa-dev/boa/pull/5615.
+---
+ src/builtins/string/mod.rs   | 22 +++++++++++++++-------
+ src/builtins/string/tests.rs | 22 ++++++++++++++++++++++
+ 2 files changed, 37 insertions(+), 7 deletions(-)
+
+diff --git a/src/builtins/string/mod.rs b/src/builtins/string/mod.rs
+index 9421b46..fbc1298 100644
+--- a/src/builtins/string/mod.rs
++++ b/src/builtins/string/mod.rs
+@@ -13,7 +13,7 @@ use crate::{
+     Context, JsArgs, JsExpect, JsResult, JsString, JsValue,
+     builtins::{Array, BuiltInObject, Number, RegExp},
+     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
+-    error::JsNativeError,
++    error::{JsNativeError, RuntimeLimitError},
+     js_string,
+     object::{JsObject, internal_methods::get_prototype_from_constructor},
+     property::{Attribute, PropertyDescriptor},
+@@ -733,15 +733,23 @@ impl String {
+ 
+         let n = n as usize;
+ 
+-        // Charge each repetition against the VM loop-iteration limit.
+-        let mut result = Vec::with_capacity(n);
+-        for _ in 0..n {
+-            crate::vm::opcode::IncrementLoopIteration::operation((), context)?;
+-            result.push(string.as_str());
++        // Charge all repetitions against the VM loop-iteration limit in one step
++        // so a huge `n` cannot allocate a `Vec` of `n` views before the limit fires.
++        let max = context.vm.runtime_limits.loop_iteration_limit();
++        let frame = context.vm.frame_mut();
++        let remaining = max.saturating_sub(frame.loop_iteration_count);
++        if n as u64 > remaining {
++            return Err(RuntimeLimitError::LoopIteration.into());
+         }
++        frame.loop_iteration_count = frame.loop_iteration_count.wrapping_add(n as u64);
+ 
+         // 6. Return the String value that is made from n copies of S appended together.
+-        Ok(JsString::concat_array(&result).into())
++        let Some(repeated) = JsString::repeat(string.as_str(), n) else {
++            return Err(JsNativeError::range()
++                .with_message("String.prototype.repeat: cannot allocate the result string")
++                .into());
++        };
++        Ok(repeated.into())
+     }
+ 
+     /// `String.prototype.slice( beginIndex [, endIndex] )`
+diff --git a/src/builtins/string/tests.rs b/src/builtins/string/tests.rs
+index 69215f7..5c2b27b 100644
+--- a/src/builtins/string/tests.rs
++++ b/src/builtins/string/tests.rs
+@@ -165,6 +165,28 @@ fn repeat_throws_when_count_overflows_max_length() {
+     )]);
+ }
+ 
++#[test]
++fn repeat_loop_limit_fails_before_building_result() {
++    run_test_actions([
++        TestAction::inspect_context(|context| {
++            context.runtime_limits_mut().set_loop_iteration_limit(0);
++        }),
++        TestAction::assert_runtime_limit_error(
++            "'x'.repeat(100)",
++            crate::error::RuntimeLimitError::LoopIteration,
++        ),
++    ]);
++}
++
++#[test]
++fn repeat_moderate_count_without_loop_limit() {
++    run_test_actions([
++        TestAction::assert_eq("'ab'.repeat(1000).length", 2000),
++        TestAction::assert_eq("'ab'.repeat(1000).slice(0, 4)", js_str!("abab")),
++        TestAction::assert_eq("'ab'.repeat(1000).slice(-4)", js_str!("abab")),
++    ]);
++}
++
+ #[test]
+ fn repeat_generic() {
+     run_test_actions([

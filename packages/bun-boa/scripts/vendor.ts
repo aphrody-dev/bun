@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
-const env = {
+export const env = {
   ...process.env,
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_SYSTEM: "/dev/null",
@@ -45,7 +45,7 @@ async function fromGit(source: string, dir: string): Promise<string> {
   return `${path} at ${url}@${ref}`;
 }
 
-async function materialise(name: string): Promise<string> {
+export async function materialise(name: string): Promise<string> {
   const [, crate, version] = /^(.+)-(\d+\.\d+\.\d+.*)$/.exec(name) ?? [];
   if (!crate || !version) throw new Error(`patches/${name}: expected <crate>-<version>`);
   const series = [...new Bun.Glob("*.patch").scanSync(join(root, "patches", name))].sort();
@@ -62,14 +62,19 @@ async function materialise(name: string): Promise<string> {
   await $`rm -rf ${dir} && mkdir -p ${dir}`;
   const message = source ? await fromGit(source, dir) : await fromCratesIo(crate, version, dir);
   await $`git init -q && git add -A && git commit -q -m ${message} && git tag vendor-base`.cwd(dir).env(env);
-  if (series.length) await $`git am -q --committer-date-is-author-date ${series.map(p => join(root, "patches", name, p))}`.cwd(dir).env(env);
+  if (series.length)
+    await $`git am -q --committer-date-is-author-date ${series.map(p => join(root, "patches", name, p))}`
+      .cwd(dir)
+      .env(env);
   await Bun.write(marker, `${sha8}\n`);
   return `${name}: ${series.length} patches`;
 }
 
-const names = [...new Bun.Glob("*/{*.patch,SOURCE}").scanSync(join(root, "patches"))]
-  .map(p => p.split("/")[0]!)
-  .filter((n, i, all) => all.indexOf(n) === i);
-const results = await Promise.allSettled(names.map(materialise));
-for (const r of results) r.status === "fulfilled" ? console.log(r.value) : console.error(String(r.reason));
-process.exit(results.some(r => r.status === "rejected") ? 1 : 0);
+if (import.meta.main) {
+  const names = [...new Bun.Glob("*/{*.patch,SOURCE}").scanSync(join(root, "patches"))]
+    .map(p => p.split("/")[0]!)
+    .filter((n, i, all) => all.indexOf(n) === i);
+  const results = await Promise.allSettled(names.map(materialise));
+  for (const r of results) r.status === "fulfilled" ? console.log(r.value) : console.error(String(r.reason));
+  process.exit(results.some(r => r.status === "rejected") ? 1 : 0);
+}
