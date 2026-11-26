@@ -5,6 +5,8 @@ import { $ } from "bun";
 import { join } from "node:path";
 import { lolhtml } from "../../../scripts/build/deps/lolhtml.ts";
 import { rustArgon2 } from "../../../scripts/build/deps/rust-argon2.ts";
+// config.ts first: webkit.ts and config.ts import each other.
+import "../../../scripts/build/config.ts";
 import { WEBKIT_VERSION } from "../../../scripts/build/deps/webkit.ts";
 import type { Dependency } from "../../../scripts/build/source.ts";
 

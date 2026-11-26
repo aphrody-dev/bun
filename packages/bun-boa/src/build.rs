@@ -127,3 +127,7 @@ pub fn main(args: &[String]) -> i32 {
     }
     0
 }
+
+/// The parser asks the macro VM to collect garbage after a file; there is no macro VM here.
+#[unsafe(no_mangle)]
+extern "Rust" fn __bun_macro_collect_vm_garbage() {}
