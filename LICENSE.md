@@ -26,8 +26,8 @@ Bun statically links these libraries:
 | [`llhttp`](https://github.com/nodejs/llhttp) (not linked: `src/http1` is derived from parts of it) | MIT |
 | [`lol-html`](https://github.com/cloudflare/lol-html/tree/master/c-api) | BSD 3-Clause |
 | [`ls-hpack`](https://github.com/litespeedtech/ls-hpack) (not linked: `src/hpack` is derived from parts of it) | MIT |
-| [`ls-qpack`](https://github.com/litespeedtech/ls-qpack) | MIT |
-| [`lsquic`](https://github.com/litespeedtech/lsquic) | MIT (portions derived from [Chromium proto-quic](https://github.com/litespeedtech/lsquic/blob/master/LICENSE.chrome), BSD 3-Clause) |
+| [`ls-qpack`](https://github.com/litespeedtech/ls-qpack) (not linked: `src/qpack` is derived from parts of it) | MIT |
+| [`lsquic`](https://github.com/litespeedtech/lsquic) (not linked: `src/quic` is derived from parts of it) | MIT (portions derived from [Chromium proto-quic](https://github.com/litespeedtech/lsquic/blob/master/LICENSE.chrome), BSD 3-Clause) |
 | [`mimalloc`](https://github.com/microsoft/mimalloc) | MIT |
 | [`picohttpparser`](https://github.com/h2o/picohttpparser) (not linked: `src/http1` is derived from parts of it) | dual-licensed under the Perl License or the MIT License |
 | [`zstd`](https://github.com/facebook/zstd) (not linked: `src/zstd` is derived from parts of it) | dual-licensed under the BSD License or GPLv2 license |
@@ -44,7 +44,8 @@ Bun statically links these libraries:
 | [`libspng`](https://github.com/randy408/libspng) (not linked: `src/png` is derived from parts of it) | BSD 2-Clause |
 | [`stb_image`](https://github.com/nothings/stb) (not linked: the PNG codec finds the Paeth predictor its way) | MIT or public domain |
 | [`libwebp`](https://github.com/webmproject/libwebp) (not linked: `src/webp` is derived from parts of it) | BSD 3-Clause |
-| [`highway`](https://github.com/google/highway) | Apache 2.0 |
+| [`highway`](https://github.com/google/highway) (not linked: `src/simd` follows parts of it, see `src/simd/NOTICE`) | Apache 2.0 |
+| [`musl`](https://musl.libc.org) (the Two-Way search in `src/simd_kernels/substring.rs` is derived from its `memmem`) | MIT |
 | [`uucode`](https://github.com/jacobsandlund/uucode) | MIT |
 | A fork of [`uWebsockets`](https://github.com/jarred-sumner/uwebsockets) (`src/http1` and `src/websocket` are derived from parts of it) | Apache 2.0 licensed |
 | Parts of [Tigerbeetle's IO code](https://github.com/tigerbeetle/tigerbeetle/blob/532c8b70b9142c17e07737ab6d3da68d7500cbca/src/io/windows.zig#L1) | Apache 2.0 licensed |

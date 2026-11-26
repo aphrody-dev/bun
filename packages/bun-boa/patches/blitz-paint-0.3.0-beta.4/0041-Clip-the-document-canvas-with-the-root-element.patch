@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: zhangzhaohong-dev <zhangzhaohong.dev@gmail.com>
+Date: Tue, 24 Nov 2026 18:11:51 +0000
+Subject: [PATCH] Clip the document canvas with the root element
+
+Port of https://github.com/DioxusLabs/blitz/pull/1759.
+
+Adapted to the patched canvas propagation, which paints the propagated background through draw_background rather than a colour fill; the root transform is computed inline (no node_transform helper), the clip path is not rescaled since clip_path_shape returns scaled paths after the #1726 port, and an empty root clip region skips the document.
+---
+ src/render.rs | 97 +++++++++++++++++++++++++++++++++++----------------
+ 1 file changed, 66 insertions(+), 31 deletions(-)
+
+diff --git a/src/render.rs b/src/render.rs
+index d632e5a..3f404d6 100644
+--- a/src/render.rs
++++ b/src/render.rs
+@@ -234,7 +234,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
+     ///
+     /// This assumes styles are resolved and layout is complete.
+     /// Make sure you do those before trying to render
+-    pub fn paint_scene(&self, scene: &mut impl PaintScene) {
++    pub fn paint_scene<S: PaintScene>(&self, scene: &mut S) {
+         if self.dom.has_pending_critical_resources() {
+             return;
+         }
+@@ -280,41 +280,71 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
+             }
+         };
+ 
+-        if let Some(source) = propagation_source {
+-            let canvas_layout = taffy::Layout {
+-                location: taffy::Point { x: 0.0, y: 0.0 },
+-                size: taffy::Size {
+-                    width: bg_width,
+-                    height: bg_height,
+-                },
+-                ..root_element.final_layout()
+-            };
+-            let canvas_cx = self.element_cx(
+-                source,
+-                canvas_layout,
+-                Affine::translate(Vec2 {
+-                    x: self.initial_x,
+-                    y: self.initial_y,
+-                }),
+-                None,
+-            );
+-            canvas_cx.draw_background(scene);
+-        }
++        let root_parent_transform = Affine::translate(Vec2 {
++            x: self.initial_x - (viewport_scroll.x * self.scale),
++            y: self.initial_y - (viewport_scroll.y * self.scale),
++        });
++        let root_layout = root_element.final_layout();
++        let root_transform = root_parent_transform
++            * Affine::translate(
++                Vec2::new(root_layout.location.x as f64, root_layout.location.y as f64)
++                    * self.scale,
++            )
++            * root_element.transform().unwrap_or_default();
++        let root_clip = root_element.primary_styles().and_then(|style| {
++            use style::values::computed::basic_shape::ClipPath;
++            if matches!(style.get_svg().clip_path, ClipPath::None | ClipPath::Url(_)) {
++                return None;
++            }
++            self.element_cx(root_element, root_layout, root_transform, None)
++                .clip_path_shape()
++        });
+ 
+         // The root clip rectangle is the viewport (in screen coordinates, with the
+         // initial offset already subtracted). Elements outside of this are culled, and
+         // scrollports narrow this rectangle further for their descendants.
+         let viewport_clip_rect = Rect::new(0.0, 0.0, self.width as f64, self.height as f64);
+ 
+-        self.render_element(
+-            scene,
+-            root_id,
+-            Affine::translate(Vec2 {
+-                x: self.initial_x - (viewport_scroll.x * self.scale),
+-                y: self.initial_y - (viewport_scroll.y * self.scale),
+-            }),
+-            viewport_clip_rect,
+-        );
++        let draw_document = |scene: &mut S| {
++            if let Some(source) = propagation_source {
++                let canvas_layout = taffy::Layout {
++                    location: taffy::Point { x: 0.0, y: 0.0 },
++                    size: taffy::Size {
++                        width: bg_width,
++                        height: bg_height,
++                    },
++                    ..root_layout
++                };
++                let canvas_cx = self.element_cx(
++                    source,
++                    canvas_layout,
++                    Affine::translate(Vec2 {
++                        x: self.initial_x,
++                        y: self.initial_y,
++                    }),
++                    None,
++                );
++                canvas_cx.draw_background(scene);
++            }
++            self.render_element(scene, root_id, root_parent_transform, viewport_clip_rect);
++        };
++
++        // The propagated canvas background and the root's content share one clip; the root
++        // element skips its own clip-path in render_element. An empty region clips it all away.
++        match root_clip {
++            Some(path) if is_empty_clip_region(Some(&path)) => {}
++            Some(path) => self.layer_manager.maybe_with_layer(
++                scene,
++                true,
++                1.0,
++                root_transform,
++                &path,
++                None,
++                None,
++                draw_document,
++            ),
++            None => draw_document(scene),
++        }
+ 
+         // Render debug overlay
+         if self.dom.devtools().highlight_hover {
+@@ -566,7 +596,12 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
+         };
+ 
+         // Compute clip-path (if any) and wrap all rendering in a clip layer
+-        let clip_path_shape = cx.clip_path_shape();
++        // paint_scene applies the root element's clip-path around the canvas background too.
++        let clip_path_shape = if self.root_element_id == Some(node_id) {
++            None
++        } else {
++            cx.clip_path_shape()
++        };
+         let has_clip_path = clip_path_shape.is_some();
+ 
+         // CSS 2 `clip` property (absolutely positioned elements only). Applies to the whole of

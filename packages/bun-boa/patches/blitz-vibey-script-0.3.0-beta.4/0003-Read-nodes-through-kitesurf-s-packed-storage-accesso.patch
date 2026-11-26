@@ -1,0 +1,696 @@
+From 52b57ffe46f9f54087f75d684798b54b44b5d8a4 Mon Sep 17 00:00:00 2001
+From: aphrody-dev <contact@aphrody.com>
+Date: Thu, 26 Nov 2026 02:25:53 +0100
+Subject: [PATCH 3/5] Read nodes through kitesurf's packed-storage accessors
+
+kitesurf's blitz-dom series packs node storage: parent, children, layout children, inline layouts and
+list markers move behind accessors (parent_id, children, layout_children, inline_layout_data, ...).
+---
+ src/document.rs      |  4 ++--
+ src/dom/document.rs  | 10 +++++-----
+ src/dom/element.rs   | 26 +++++++++++-------------
+ src/dom/mod.rs       |  6 +++---
+ src/dom/node.rs      | 30 +++++++++++++++-------------
+ src/dom/selection.rs | 47 ++++++++++++++++++++------------------------
+ src/inner_text.rs    | 43 ++++++++++++++++++++--------------------
+ src/runtime.rs       | 16 +++++++--------
+ 8 files changed, 89 insertions(+), 93 deletions(-)
+
+diff --git a/src/document.rs b/src/document.rs
+index e2f2dae..555bfc1 100644
+--- a/src/document.rs
++++ b/src/document.rs
+@@ -321,7 +321,7 @@ impl ScriptDocument {
+     fn collect_scripts(&self) -> Vec<PendingScript> {
+         let doc = self.inner.borrow();
+         let mut scripts = Vec::new();
+-        let mut stack = vec![doc.root_node().id];
++        let mut stack = vec![doc.root_node().id()];
+ 
+         while let Some(node_id) = stack.pop() {
+             let Some(node) = doc.get_node(node_id) else {
+@@ -353,7 +353,7 @@ impl ScriptDocument {
+                 }
+             }
+ 
+-            stack.extend(node.children.iter().rev().copied());
++            stack.extend(node.children().iter().rev());
+         }
+ 
+         scripts
+diff --git a/src/dom/document.rs b/src/dom/document.rs
+index 2a366f5..63d88da 100644
+--- a/src/dom/document.rs
++++ b/src/dom/document.rs
+@@ -122,7 +122,7 @@ pub(crate) fn init_document_proto(proto: &JsObject, context: &mut Context) {
+ fn document_element(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+     let ctx = dom_ctx(context)?;
+     let _ = this_node_id(this)?;
+-    let root_id = ctx.doc.borrow().try_root_element().map(|root| root.id);
++    let root_id = ctx.doc.borrow().try_root_element().map(|root| root.id());
+     Ok(node_or_null(&ctx, root_id, context))
+ }
+ 
+@@ -135,14 +135,14 @@ fn scrolling_element(this: &JsValue, args: &[JsValue], context: &mut Context) ->
+ fn body(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+     let ctx = dom_ctx(context)?;
+     let _ = this_node_id(this)?;
+-    let body_id = ctx.doc.borrow().find_body_node().map(|node| node.id);
++    let body_id = ctx.doc.borrow().find_body_node().map(|node| node.id());
+     Ok(node_or_null(&ctx, body_id, context))
+ }
+ 
+ fn head(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+     let ctx = dom_ctx(context)?;
+     let _ = this_node_id(this)?;
+-    let head_id = ctx.doc.borrow().find_head_node().map(|node| node.id);
++    let head_id = ctx.doc.borrow().find_head_node().map(|node| node.id());
+     Ok(node_or_null(&ctx, head_id, context))
+ }
+ 
+@@ -262,7 +262,7 @@ fn get_elements_by_tag_name(
+         .to_ascii_lowercase();
+     let match_all = tag == "*";
+ 
+-    let root_id = ctx.doc.borrow().root_node().id;
++    let root_id = ctx.doc.borrow().root_node().id();
+     let matches = super::collect_matching_descendants(&ctx.doc.borrow(), root_id, |element| {
+         match_all || &*element.name.local == tag.as_str()
+     });
+@@ -287,7 +287,7 @@ fn get_elements_by_class_name(
+     let matches = if class_names.is_empty() {
+         Vec::new()
+     } else {
+-        let root_id = ctx.doc.borrow().root_node().id;
++        let root_id = ctx.doc.borrow().root_node().id();
+         super::collect_matching_descendants(&ctx.doc.borrow(), root_id, |element| {
+             super::matches_class_names(element, &class_names)
+         })
+diff --git a/src/dom/element.rs b/src/dom/element.rs
+index c523c4e..9f759b0 100644
+--- a/src/dom/element.rs
++++ b/src/dom/element.rs
+@@ -231,7 +231,7 @@ pub(crate) fn read_attr(ctx: &DomCtx, node_id: NodeId, name: &str) -> Option<Str
+         .attrs()
+         .iter()
+         .find(|attr| &*attr.name.local == name)
+-        .map(|attr| attr.value.clone())
++        .map(|attr| attr.value.to_string())
+ }
+ 
+ pub(crate) fn write_attr(ctx: &DomCtx, node_id: NodeId, name: &str, value: &str) {
+@@ -296,7 +296,7 @@ fn namespace_uri(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
+     let ns = doc
+         .get_node(node_id)
+         .and_then(|node| node.element_data())
+-        .map(|element| element.name.ns.to_string())
++        .map(|element| element.namespace().to_string())
+         .unwrap_or_default();
+     Ok(js_str(&ns))
+ }
+@@ -305,9 +305,7 @@ fn namespace_uri(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
+ pub(crate) fn element_child_ids(doc: &blitz_dom::BaseDocument, node_id: NodeId) -> Vec<NodeId> {
+     doc.get_node(node_id)
+         .map(|node| {
+-            node.children
+-                .iter()
+-                .copied()
++            node.children().iter()
+                 .filter(|child_id| {
+                     doc.get_node(*child_id)
+                         .is_some_and(|child| child.is_element())
+@@ -373,11 +371,11 @@ fn element_sibling(
+     offset: isize,
+ ) -> Option<NodeId> {
+     let node = doc.get_node(node_id)?;
+-    let parent = doc.get_node(node.parent?)?;
++    let parent = doc.get_node(node.parent_id()?)?;
+     let mut index = parent.index_of_child(node_id)?;
+     loop {
+         index = index.checked_add_signed(offset)?;
+-        let sibling_id = *parent.children.get(index)?;
++        let sibling_id = parent.children().get(index)?;
+         if doc
+             .get_node(sibling_id)
+             .is_some_and(|node| node.is_element())
+@@ -427,7 +425,7 @@ fn read_attrs(ctx: &DomCtx, node_id: NodeId) -> Vec<(String, String)> {
+             element
+                 .attrs()
+                 .iter()
+-                .map(|attr| (attr.name.local.to_string(), attr.value.clone()))
++                .map(|attr| (attr.name.local.to_string(), attr.value.to_string()))
+                 .collect()
+         })
+         .unwrap_or_default()
+@@ -559,7 +557,7 @@ fn get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<J
+                     .attrs()
+                     .iter()
+                     .find(|attr| &*attr.name.local == "value")
+-                    .map(|attr| attr.value.clone())
++                    .map(|attr| attr.value.to_string())
+                     .unwrap_or_default(),
+             })
+             .unwrap_or_default()
+@@ -945,8 +943,8 @@ fn get_inner_html(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsRes
+     let doc = ctx.doc.borrow();
+     let mut html = String::new();
+     if let Some(node) = doc.get_node(node_id) {
+-        for child_id in &node.children {
+-            if let Some(child) = doc.get_node(*child_id) {
++        for child_id in node.children().iter() {
++            if let Some(child) = doc.get_node(child_id) {
+                 child.write_outer_html(&mut html);
+             }
+         }
+@@ -1084,7 +1082,7 @@ fn client_size(
+     let Some(node) = doc.get_node(node_id) else {
+         return Ok(JsValue::from(0.0));
+     };
+-    let value = if node_id == doc.root_element().id {
++    let value = if node_id == doc.root_element().id() {
+         let viewport = doc.viewport();
+         let scale = viewport.scale();
+         let size = (
+@@ -1117,7 +1115,7 @@ fn offset_parent(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
+         doc.resolve(0.0);
+         doc.get_node(node_id)
+             .and_then(|node| node.offset_parent())
+-            .map(|parent| parent.id)
++            .map(|parent| parent.id())
+     };
+     Ok(node_or_null(&ctx, parent_id, context))
+ }
+@@ -1160,7 +1158,7 @@ fn scroll_height(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
+ fn current_scroll_offset(doc: &blitz_dom::BaseDocument, node_id: NodeId) -> blitz_dom::Point<f64> {
+     if doc
+         .try_root_element()
+-        .is_some_and(|root| root.id == node_id)
++        .is_some_and(|root| root.id() == node_id)
+     {
+         doc.viewport_scroll()
+     } else {
+diff --git a/src/dom/mod.rs b/src/dom/mod.rs
+index 22ab4ad..84e668e 100644
+--- a/src/dom/mod.rs
++++ b/src/dom/mod.rs
+@@ -81,7 +81,7 @@ pub(crate) fn node_wrapper(ctx: &DomCtx, node_id: NodeId, context: &mut Context)
+             Some(NodeData::Text(_)) | Some(NodeData::Comment { .. }) => {
+                 protos.character_data.clone()
+             }
+-            None => protos.node.clone(),
++            Some(NodeData::ShadowRoot(_)) | None => protos.node.clone(),
+         };
+         let is_body = matches!(
+             node_data,
+@@ -392,7 +392,7 @@ pub(crate) fn collect_matching_descendants(
+     let mut matches = Vec::new();
+     let mut stack: Vec<NodeId> = doc
+         .get_node(root_id)
+-        .map(|root| root.children.iter().rev().copied().collect())
++        .map(|root| root.children().iter().rev().collect())
+         .unwrap_or_default();
+     while let Some(node_id) = stack.pop() {
+         let Some(node) = doc.get_node(node_id) else {
+@@ -403,7 +403,7 @@ pub(crate) fn collect_matching_descendants(
+                 matches.push(node_id);
+             }
+         }
+-        stack.extend(node.children.iter().rev().copied());
++        stack.extend(node.children().iter().rev());
+     }
+     matches
+ }
+diff --git a/src/dom/node.rs b/src/dom/node.rs
+index 720d45f..ff98dce 100644
+--- a/src/dom/node.rs
++++ b/src/dom/node.rs
+@@ -91,6 +91,7 @@ fn node_type(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<J
+         Some(NodeData::Element(_)) | Some(NodeData::AnonymousBlock(_)) => 1,
+         Some(NodeData::Text(_)) => 3,
+         Some(NodeData::Comment { .. }) => 8,
++        Some(NodeData::ShadowRoot(_)) => 11,
+         None => 0,
+     };
+     Ok(JsValue::from(node_type))
+@@ -109,6 +110,7 @@ fn node_name(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<J
+         }
+         Some(NodeData::Text(_)) => "#text".to_string(),
+         Some(NodeData::Comment { .. }) => "#comment".to_string(),
++        Some(NodeData::ShadowRoot(_)) => "#document-fragment".to_string(),
+         None => String::new(),
+     };
+     Ok(js_str(&name))
+@@ -121,7 +123,7 @@ fn parent_node(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult
+         .doc
+         .borrow()
+         .get_node(node_id)
+-        .and_then(|node| node.parent);
++        .and_then(|node| node.parent_id());
+     Ok(node_or_null(&ctx, parent_id, context))
+ }
+ 
+@@ -129,7 +131,7 @@ fn child_ids(ctx: &crate::state::DomCtx, node_id: NodeId) -> Vec<NodeId> {
+     ctx.doc
+         .borrow()
+         .get_node(node_id)
+-        .map(|node| node.children.to_vec())
++        .map(|node| node.children().to_vec())
+         .unwrap_or_default()
+ }
+ 
+@@ -151,7 +153,7 @@ fn first_child(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult
+         .doc
+         .borrow()
+         .get_node(node_id)
+-        .and_then(|node| node.children.first().copied());
++        .and_then(|node| node.children().first());
+     Ok(node_or_null(&ctx, child_id, context))
+ }
+ 
+@@ -162,17 +164,17 @@ fn last_child(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<
+         .doc
+         .borrow()
+         .get_node(node_id)
+-        .and_then(|node| node.children.last().copied());
++        .and_then(|node| node.children().last());
+     Ok(node_or_null(&ctx, child_id, context))
+ }
+ 
+ fn sibling(ctx: &crate::state::DomCtx, node_id: NodeId, offset: isize) -> Option<NodeId> {
+     let doc = ctx.doc.borrow();
+     let node = doc.get_node(node_id)?;
+-    let parent = doc.get_node(node.parent?)?;
++    let parent = doc.get_node(node.parent_id()?)?;
+     let index = parent.index_of_child(node_id)?;
+     let sibling_index = index.checked_add_signed(offset)?;
+-    parent.children.get(sibling_index).copied()
++    parent.children().get(sibling_index)
+ }
+ 
+ fn previous_sibling(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+@@ -203,7 +205,7 @@ fn is_connected(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResul
+ fn owner_document(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+     let ctx = dom_ctx(context)?;
+     let _ = this_node_id(this)?;
+-    let root_id = ctx.doc.borrow().root_node().id;
++    let root_id = ctx.doc.borrow().root_node().id();
+     Ok(node_or_null(&ctx, Some(root_id), context))
+ }
+ 
+@@ -370,9 +372,9 @@ fn replace_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
+                     "the new child is an inclusive ancestor of this node",
+                 ));
+             }
+-            ancestor_id = doc.get_node(id).and_then(|node| node.parent);
++            ancestor_id = doc.get_node(id).and_then(|node| node.parent_id());
+         }
+-        if doc.get_node(old_id).and_then(|node| node.parent) != Some(parent_id) {
++        if doc.get_node(old_id).and_then(|node| node.parent_id()) != Some(parent_id) {
+             return Err(super::dom_exception(
+                 context,
+                 "NotFoundError",
+@@ -426,7 +428,7 @@ fn insertable_node_ids(ctx: &crate::state::DomCtx, node_id: NodeId) -> Vec<NodeI
+     }
+     let child_ids: Vec<NodeId> = doc
+         .get_node(node_id)
+-        .map(|node| node.children.to_vec())
++        .map(|node| node.children().to_vec())
+         .unwrap_or_default();
+     let mut mutr = doc.mutate();
+     for child_id in &child_ids {
+@@ -540,7 +542,7 @@ fn has_child_nodes(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsRe
+         .doc
+         .borrow()
+         .get_node(node_id)
+-        .is_some_and(|node| !node.children.is_empty());
++        .is_some_and(|node| !node.children().is_empty());
+     Ok(JsValue::from(has_children))
+ }
+ 
+@@ -556,7 +558,7 @@ fn contains(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
+         if current == node_id {
+             return Ok(JsValue::from(true));
+         }
+-        match doc.get_node(current).and_then(|node| node.parent) {
++        match doc.get_node(current).and_then(|node| node.parent_id()) {
+             Some(parent_id) => current = parent_id,
+             None => return Ok(JsValue::from(false)),
+         }
+@@ -581,9 +583,9 @@ fn clone_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
+         } else {
+             let src = match doc.get_node(node_id).map(|node| &node.data) {
+                 Some(NodeData::Element(data)) => {
+-                    CloneSrc::Element(data.name.clone(), data.attrs().to_vec())
++                    CloneSrc::Element(data.qual_name(), data.attrs().to_vec())
+                 }
+-                Some(NodeData::Text(data)) => CloneSrc::Text(data.content.clone()),
++                Some(NodeData::Text(data)) => CloneSrc::Text(data.content.to_string()),
+                 _ => CloneSrc::Other,
+             };
+             let mut mutr = doc.mutate();
+diff --git a/src/dom/selection.rs b/src/dom/selection.rs
+index 199e84a..3a9074f 100644
+--- a/src/dom/selection.rs
++++ b/src/dom/selection.rs
+@@ -94,7 +94,7 @@ fn set_base_and_extent(
+         let length = match &node.data {
+             NodeData::Text(text) => text.content.encode_utf16().count(),
+             NodeData::Comment { contents } => contents.encode_utf16().count(),
+-            _ => node.children.len(),
++            _ => node.children().len(),
+         };
+         if offset > length {
+             return Err(dom_exception(
+@@ -150,15 +150,14 @@ fn range_endpoints(doc: &BaseDocument) -> Option<[Range; 2]> {
+         let node = doc.get_node(id)?;
+         // Anonymous inline roots are rebuilt, so compare their stable location.
+         let (id, index) = if node.is_anonymous() {
+-            let parent = doc.get_node(node.parent?)?;
+-            let children = parent.layout_children.borrow();
++            let parent = doc.get_node(node.parent_id()?)?;
++            let children = parent.layout_children()?;
+             let index = children
+-                .as_ref()?
+                 .iter()
+-                .take_while(|&&child| child != node.id)
++                .take_while(|&&child| child != node.id())
+                 .filter(|&&child| doc.get_node(child).is_some_and(Node::is_anonymous))
+                 .count();
+-            (parent.id, Some(index))
++            (parent.id(), Some(index))
+         } else {
+             (id, None)
+         };
+@@ -187,16 +186,14 @@ fn rendered_point(doc: &BaseDocument, point: Point) -> Option<Point> {
+     if !node.flags.is_in_document() {
+         return None;
+     }
+-    if let Some(root) = inline_root(doc, node.id) {
++    if let Some(root) = inline_root(doc, node.id()) {
+         let layout = doc
+             .get_node(root)?
+-            .element_data()?
+-            .inline_layout_data
+-            .as_ref()?;
++            .element_data()?.inline_layout_data()?;
+         let mut mapper = OffsetMapper {
+             doc,
+             root,
+-            text: &layout.text,
++            text: layout.text(doc.tree()),
+             cursor: 0,
+             collapsed_space: false,
+             point,
+@@ -209,12 +206,13 @@ fn rendered_point(doc: &BaseDocument, point: Point) -> Option<Point> {
+     }
+ 
+     // Block containers have no inline layout of their own. Use the adjacent text.
+-    let offset = point.1.min(node.children.len());
+-    node.children[offset..]
++    let children = node.children().to_vec();
++    let offset = point.1.min(children.len());
++    children[offset..]
+         .iter()
+         .find_map(|&id| subtree_point(doc, id, false))
+         .or_else(|| {
+-            node.children[..offset]
++            children[..offset]
+                 .iter()
+                 .rev()
+                 .find_map(|&id| subtree_point(doc, id, true))
+@@ -226,11 +224,11 @@ fn inline_root(doc: &BaseDocument, mut id: NodeId) -> Option<NodeId> {
+         let node = doc.get_node(id)?;
+         if node
+             .element_data()
+-            .is_some_and(|element| element.inline_layout_data.is_some())
++            .is_some_and(|element| element.inline_layout_data().is_some())
+         {
+             return Some(id);
+         }
+-        id = node.layout_parent.get()?;
++        id = node.layout_parent_id()?;
+     }
+ }
+ 
+@@ -245,14 +243,12 @@ fn subtree_point(doc: &BaseDocument, id: NodeId, end: bool) -> Option<Point> {
+         return rendered_point(doc, (id, offset));
+     }
+     if end {
+-        node.children
++        node.children()
+             .iter()
+-            .rev()
+-            .find_map(|&id| subtree_point(doc, id, end))
++            .rev().find_map(|id| subtree_point(doc, id, end))
+     } else {
+-        node.children
+-            .iter()
+-            .find_map(|&id| subtree_point(doc, id, end))
++        node.children()
++            .iter().find_map(|id| subtree_point(doc, id, end))
+     }
+ }
+ 
+@@ -280,13 +276,12 @@ impl OffsetMapper<'_> {
+         if id != self.root
+             && node
+                 .element_data()
+-                .is_some_and(|element| element.inline_layout_data.is_some())
++                .is_some_and(|element| element.inline_layout_data().is_some())
+         {
+             return;
+         }
+         if let NodeData::Text(data) = &node.data {
+-            let style = node
+-                .parent
++            let style = node.parent_id()
+                 .and_then(|id| self.doc.get_node(id))
+                 .and_then(Node::primary_styles);
+             let transform = style
+@@ -321,7 +316,7 @@ impl OffsetMapper<'_> {
+         if let Some(before) = node.before() {
+             self.visit(before);
+         }
+-        for (index, &child) in node.children.iter().enumerate() {
++        for (index, child) in node.children().iter().enumerate() {
+             if id == self.point.0 && index == self.point.1 {
+                 self.result = Some(self.cursor);
+                 return;
+diff --git a/src/inner_text.rs b/src/inner_text.rs
+index 12be936..c8519f8 100644
+--- a/src/inner_text.rs
++++ b/src/inner_text.rs
+@@ -29,17 +29,17 @@ pub(crate) fn inner_text(element: &Node) -> String {
+         .flatten()
+     {
+         while root.is_anonymous() && !is_generated_pseudo(root) {
+-            let Some(parent) = root.layout_parent.get() else {
++            let Some(parent) = root.layout_parent_id() else {
+                 break;
+             };
+             root = element.with(parent);
+         }
+         start = root;
+-        filter = Some(element.id);
++        filter = Some(element.id());
+     }
+ 
+     let mut collector = InnerTextCollector {
+-        target: element.id,
++        target: element.id(),
+         text: String::new(),
+         pending_line_breaks: 0,
+     };
+@@ -56,7 +56,7 @@ fn display(node: &Node) -> Option<Display> {
+ fn is_rendered(element: &Node) -> bool {
+     let has_box = display(element)
+         .is_some_and(|d| !matches!(d.inside(), DisplayInside::None | DisplayInside::Contents));
+-    let mut ancestors = std::iter::successors(element.parent, |&id| element.with(id).parent);
++    let mut ancestors = std::iter::successors(element.parent_id(), |&id| element.with(id).parent_id());
+     element.flags.is_in_document()
+         && has_box
+         && !ancestors.any(|id| {
+@@ -81,19 +81,19 @@ fn is_replaced_element(name: &markup5ever::LocalName) -> bool {
+ 
+ /// `::before` and `::after` are anonymous nodes referenced by their parent element.
+ fn is_generated_pseudo(node: &Node) -> bool {
+-    node.parent.is_some_and(|parent| {
++    node.parent_id().is_some_and(|parent| {
+         let parent = node.with(parent);
+-        parent.before() == Some(node.id) || parent.after() == Some(node.id)
++        parent.before() == Some(node.id()) || parent.after() == Some(node.id())
+     })
+ }
+ 
+ fn is_inclusive_descendant_of(node: &Node, ancestor: NodeId) -> bool {
+     let mut current = Some(node);
+     while let Some(n) = current {
+-        if n.id == ancestor {
++        if n.id() == ancestor {
+             return true;
+         }
+-        current = n.parent.map(|id| node.with(id));
++        current = n.parent_id().map(|id| node.with(id));
+     }
+     false
+ }
+@@ -149,22 +149,22 @@ impl InnerTextCollector {
+         self.require_line_breaks(line_breaks);
+ 
+         let element_data = node.element_data();
+-        if let Some(layout) = element_data.and_then(|el| el.inline_layout_data.as_deref()) {
++        if let Some(layout) = element_data.and_then(|el| el.inline_layout_data()) {
+             self.visit_inline_layout(node, layout, filter);
+         } else if node.flags.is_table_root() || is_internal_table_part(display.inside()) {
+             // Table layout flattens the rows away, so walk the DOM to find them
+-            for &child_id in &node.children {
++            for child_id in node.children().iter() {
+                 self.visit_child(node.with(child_id), filter);
+             }
+-        } else if let Some(children) = node.layout_children.borrow().as_ref() {
+-            for &child_id in children {
++        } else if let Some(children) = node.layout_children() {
++            for &child_id in children.iter() {
+                 self.visit_child(node.with(child_id), filter);
+             }
+         }
+ 
+         if display.inside() == DisplayInside::TableCell
+             && is_visible
+-            && node.id != self.target
++            && node.id() != self.target
+             && !is_last_table_cell(node)
+         {
+             self.push_str("\t");
+@@ -178,13 +178,13 @@ impl InnerTextCollector {
+         };
+         if is_inclusive_descendant_of(child, target) {
+             self.visit(child, None);
+-        } else if child.is_anonymous() || is_inclusive_descendant_of(child.with(target), child.id) {
++        } else if child.is_anonymous() || is_inclusive_descendant_of(child.with(target), child.id()) {
+             self.visit(child, filter);
+         }
+     }
+ 
+     fn visit_inline_layout(&mut self, root: &Node, layout: &TextLayout, filter: Option<NodeId>) {
+-        let text = layout.text.as_str();
++        let text = layout.text(root.tree());
+         let marker_len = inside_marker_len(root, text);
+ 
+         let mut cached_brush: Option<(NodeId, bool)> = None;
+@@ -204,9 +204,9 @@ impl InnerTextCollector {
+             included
+         };
+ 
+-        let mut boxes = layout.layout.inline_boxes().peekable();
++        let mut boxes = layout.layout(root.tree()).inline_boxes().peekable();
+         let mut runs = Vec::new();
+-        for line in layout.layout.lines() {
++        for line in layout.layout(root.tree()).lines() {
+             // Runs are stored in visual order: restore logical order for bidi text
+             runs.clear();
+             runs.extend(line.runs());
+@@ -248,11 +248,12 @@ fn is_internal_table_part(display: DisplayInside) -> bool {
+ }
+ 
+ fn is_last_table_cell(cell: &Node) -> bool {
+-    let Some(row) = cell.parent.map(|id| cell.with(id)) else {
++    let Some(row) = cell.parent_id().map(|id| cell.with(id)) else {
+         return true;
+     };
+-    let position = row.children.iter().position(|&id| id == cell.id);
+-    row.children[position.map_or(0, |p| p + 1)..]
++    let children = row.children().to_vec();
++    let position = children.iter().position(|&id| id == cell.id());
++    children[position.map_or(0, |p| p + 1)..]
+         .iter()
+         .all(|&id| display(cell.with(id)).is_none_or(|d| d.inside() != DisplayInside::TableCell))
+ }
+@@ -261,7 +262,7 @@ fn is_last_table_cell(cell: &Node) -> bool {
+ fn inside_marker_len(root: &Node, text: &str) -> usize {
+     let Some(list_item) = root
+         .element_data()
+-        .and_then(|el| el.list_item_data.as_deref())
++        .and_then(|el| el.list_item_data())
+     else {
+         return 0;
+     };
+diff --git a/src/runtime.rs b/src/runtime.rs
+index 830677a..c7ec9e8 100644
+--- a/src/runtime.rs
++++ b/src/runtime.rs
+@@ -1371,7 +1371,7 @@ impl ScriptRuntime {
+         crate::dom::init_protos(&ctx, &mut context);
+ 
+         // `document`
+-        let root_id = ctx.doc.borrow().root_node().id;
++        let root_id = ctx.doc.borrow().root_node().id();
+         let document_wrapper = node_wrapper(&ctx, root_id, &mut context);
+         register_global(&mut context, "document", document_wrapper.into());
+ 
+@@ -1575,7 +1575,7 @@ impl ScriptRuntime {
+     pub fn install_body_onload_attribute(&mut self) {
+         let code: Option<String> = {
+             let doc = self.ctx.doc.borrow();
+-            let mut stack = vec![doc.root_node().id];
++            let mut stack = vec![doc.root_node().id()];
+             let mut code = None;
+             while let Some(node_id) = stack.pop() {
+                 let Some(node) = doc.get_node(node_id) else {
+@@ -1589,7 +1589,7 @@ impl ScriptRuntime {
+                         break;
+                     }
+                 }
+-                stack.extend(node.children.iter().rev().copied());
++                stack.extend(node.children().iter().rev());
+             }
+             code
+         };
+@@ -1621,7 +1621,7 @@ impl ScriptRuntime {
+         let ids: Vec<(String, NodeId)> = {
+             let doc = self.ctx.doc.borrow();
+             let mut ids = Vec::new();
+-            let mut stack = vec![doc.root_node().id];
++            let mut stack = vec![doc.root_node().id()];
+             while let Some(node_id) = stack.pop() {
+                 let Some(node) = doc.get_node(node_id) else {
+                     continue;
+@@ -1634,7 +1634,7 @@ impl ScriptRuntime {
+                         ids.push((id.to_string(), node_id));
+                     }
+                 }
+-                stack.extend(node.children.iter().rev().copied());
++                stack.extend(node.children().iter().rev());
+             }
+             ids
+         };
+@@ -1920,7 +1920,7 @@ impl ScriptRuntime {
+ 
+     /// Dispatch a simple event (e.g. `DOMContentLoaded`) targeting the document node
+     pub fn dispatch_document_event(&mut self, name: &str) -> bool {
+-        let root_id = self.ctx.doc.borrow().root_node().id;
++        let root_id = self.ctx.doc.borrow().root_node().id();
+         let mut event_state = EventState::default();
+         let ran = self.dispatch_event_inner(
+             &[root_id],
+@@ -2222,7 +2222,7 @@ fn window_scroll_to(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
+     let ctx = dom_ctx(context)?;
+     let mut doc = ctx.doc.borrow_mut();
+     doc.resolve(0.0);
+-    let Some(root_id) = doc.try_root_element().map(|root| root.id) else {
++    let Some(root_id) = doc.try_root_element().map(|root| root.id()) else {
+         return Ok(JsValue::undefined());
+     };
+     let current = doc.viewport_scroll();
+@@ -2240,7 +2240,7 @@ fn window_scroll_by(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
+     let ctx = dom_ctx(context)?;
+     let mut doc = ctx.doc.borrow_mut();
+     doc.resolve(0.0);
+-    let Some(root_id) = doc.try_root_element().map(|root| root.id) else {
++    let Some(root_id) = doc.try_root_element().map(|root| root.id()) else {
+         return Ok(JsValue::undefined());
+     };
+     doc.scroll_by(
+-- 
+2.56.1
+

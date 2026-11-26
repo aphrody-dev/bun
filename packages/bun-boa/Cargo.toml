@@ -1,0 +1,100 @@
+# Standalone workspace: Bun's root workspace and lockfile stay untouched. Bun's crates are path dependencies and
+# keep inheriting their settings from the root `Cargo.toml`.
+[workspace]
+resolver = "2"
+members = ["cdp"]
+
+[package]
+name = "bun-boa"
+description = "Bun on Boa: Bun's Rust crates with a pure-Rust JavaScript engine, no JavaScriptCore and no C++."
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "bun"
+path = "src/main.rs"
+
+[features]
+# `bun build`: links Bun's bundler, whose graph still reaches C/C++ (uws, BoringSSL, Highway, lol-html).
+build = ["dep:bun_bundler", "dep:bun_event_loop", "dep:bun_options_types"]
+
+[dependencies]
+boa_engine = { version = "0.22", features = ["annex-b", "intl_bundled", "experimental"] }
+boa_gc = "0.22"
+boa_runtime = "0.22"
+bun_ast = { path = "../../src/ast" }
+bun_alloc = { path = "../../src/bun_alloc" }
+bun_bundler = { path = "../../src/bundler", optional = true, features = ["test_support"] }
+bun_clap = { path = "../../src/clap" }
+bun_event_loop = { path = "../../src/event_loop", optional = true }
+bun_core = { path = "../../src/bun_core" }
+bun_js_parser = { path = "../../src/js_parser" }
+bun_js_printer = { path = "../../src/js_printer" }
+bun_lint_driver = { path = "../../src/lint/driver" }
+bun_parsers = { path = "../../src/parsers" }
+bun_options_types = { path = "../../src/options_types", optional = true }
+bun_paths = { path = "../../src/paths" }
+bun_sys = { path = "../../src/sys" }
+bun_sema = { path = "../../src/sema" }
+bun_sema_driver = { path = "../../src/sema/driver" }
+bun_sema_standalone = { path = "../../src/sema/standalone" }
+bun_threading = { path = "../../src/threading" }
+bun_zstd = { path = "../../src/zstd" }
+icu_normalizer = { version = "~2.3.0", features = ["compiled_data", "utf16_iter"] }
+regress = { version = "0.12", features = ["utf16"] }
+serde_json = "1"
+
+[dev-dependencies]
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
+
+[profile.dev]
+debug = "line-tables-only"
+
+# Boa is an interpreter: unoptimised it is too slow to run anything.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Unoptimized, every operation on a vector is a call that passes it through the stack.
+[profile.dev.package.bun_simd]
+opt-level = 3
+debug-assertions = false
+[profile.dev.package.bun_simd_kernels]
+opt-level = 3
+[profile.dev.package.bun_simdutf_sys]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# The series in patches/<crate>-<version>/, applied to the crates.io tarballs by `bun run vendor`: kitesurf's
+# (Boa and the Blitz stack) first, ours on top.
+[patch.crates-io]
+anyrender = { path = "vendor/anyrender-0.14.0" }
+anyrender_svg = { path = "vendor/anyrender_svg-0.15.0" }
+anyrender_vello_cpu = { path = "vendor/anyrender_vello_cpu-0.18.0" }
+blitz-dom = { path = "vendor/blitz-dom-0.3.0-beta.4" }
+blitz-html = { path = "vendor/blitz-html-0.3.0-beta.4" }
+blitz-paint = { path = "vendor/blitz-paint-0.3.0-beta.4" }
+blitz-traits = { path = "vendor/blitz-traits-0.3.0-beta.4" }
+blitz-vibey-script = { path = "vendor/blitz-vibey-script-0.3.0-beta.4" }
+boa_ast = { path = "vendor/boa_ast-0.22.0" }
+boa_engine = { path = "vendor/boa_engine-0.22.0" }
+boa_gc = { path = "vendor/boa_gc-0.22.0" }
+boa_interner = { path = "vendor/boa_interner-0.22.0" }
+boa_parser = { path = "vendor/boa_parser-0.22.0" }
+boa_runtime = { path = "vendor/boa_runtime-0.22.0" }
+boa_string = { path = "vendor/boa_string-0.22.0" }
+boa_wintertc = { path = "vendor/boa_wintertc-0.22.0" }
+parley = { path = "vendor/parley-0.12.0" }
+parley_engine = { path = "vendor/parley_engine-0.12.0" }
+selectors = { path = "vendor/selectors-0.41.0" }
+stylo = { path = "vendor/stylo-0.22.0" }
+stylo_taffy = { path = "vendor/stylo_taffy-0.3.0-beta.4" }
+taffy = { path = "vendor/taffy-0.15.0" }
+usvg = { path = "vendor/usvg-0.48.1" }
+vello_common = { path = "vendor/vello_common-0.3.0" }
+vello_cpu = { path = "vendor/vello_cpu-0.3.0" }

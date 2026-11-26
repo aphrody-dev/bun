@@ -65,7 +65,8 @@ Library/Caches
 /test.js
 /test.ts
 /testdir
-/build/
+/build/*
+!/build/build-bench.jsonl
 cmake/sources
 build.ninja
 bun-binary

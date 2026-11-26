@@ -150,18 +150,22 @@ pub(crate) unsafe extern "C" fn main(argc: c_int, argv: *const *const c_char) ->
         Bun__askForAddressSpaceToStart();
     }
 
+    if is_simd_dispatch_disabled() {
+        bun_simd_kernels::level::lower_to_baseline();
+    }
+
     // 0. Capture argv FIRST — before the crash handler, whose panic path
     //    dumps the command line via `bun_core::argv()`.
     //    SAFETY: `argc`/`argv` come from the C runtime; the argv block lives
     //    for the entire process.
     unsafe { bun_core::init_argv(argc, argv) };
 
-    // Everything below calls into simdutf, including the crash handler.
-    if !bun_simdutf_sys::simdutf::has_any_implementation() {
+    // Everything below calls into WebKit's simdutf, from C++, including the crash handler.
+    {
         unsafe extern "C" {
-            safe fn bun_abort_missing_simd() -> !;
+            safe fn bun_abort_unless_simdutf_runs();
         }
-        bun_abort_missing_simd();
+        bun_abort_unless_simdutf_runs();
     }
 
     // 1. Crash handler first so anything below gets a usable trace.
@@ -210,6 +214,18 @@ pub(crate) unsafe extern "C" fn main(argc: c_int, argv: *const *const c_char) ->
     crate::cli::Cli::start();
     // `Global::exit` is `-> !`; it coerces to the `c_int` return type.
     Global::exit(0)
+}
+
+/// It is read before the first kernel. On Windows, `env_var` is not ready then, and runs kernels itself.
+fn is_simd_dispatch_disabled() -> bool {
+    // SAFETY: the name ends with NUL, and nothing changes the environment yet.
+    let value = unsafe { libc::getenv(c"BUN_FEATURE_FLAG_DISABLE_SIMD_DISPATCH".as_ptr()) };
+    if value.is_null() {
+        return false;
+    }
+    // SAFETY: `getenv` returns a C string, which stays for the same reason.
+    let value = unsafe { core::ffi::CStr::from_ptr(value) };
+    bun_core::env_var::string_is_truthy(value.to_bytes())
 }
 
 /// Linux's `expand_fdtable()` waits for an RCU grace period (tens of ms on a

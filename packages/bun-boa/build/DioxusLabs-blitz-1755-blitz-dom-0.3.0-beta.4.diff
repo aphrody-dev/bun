@@ -1,0 +1,151 @@
+diff --git a/src/node/element.rs b/src/node/element.rs
+index 695c3c3d63..fe6d6eee90 100644
+--- a/src/node/element.rs
++++ b/src/node/element.rs
+@@ -497,6 +497,25 @@ impl ElementData {
+         &self.attrs
+     }
+ 
++    /// Language declared on this element, before inheritance.
++    pub(crate) fn declared_language(&self) -> Option<&str> {
++        use markup5ever::ns;
++        let mut language = None;
++        for attr in self
++            .attrs
++            .iter()
++            .filter(|attr| attr.name.local == local_name!("lang"))
++        {
++            if attr.name.ns == ns!(xml) {
++                return Some(&attr.value);
++            }
++            if attr.name.ns == ns!() && matches!(self.name.ns, ns!(html) | ns!(svg)) {
++                language = Some(attr.value.as_str());
++            }
++        }
++        language
++    }
++
+     pub fn attr(&self, name: impl PartialEq<LocalName>) -> Option<&str> {
+         let attr = self.attrs.iter().find(|attr| name == attr.name.local)?;
+         Some(&attr.value)
+diff --git a/src/stylo/dom.rs b/src/stylo/dom.rs
+index 6e2d18fdb5..1c0158dadc 100644
+--- a/src/stylo/dom.rs
++++ b/src/stylo/dom.rs
+@@ -174,6 +174,31 @@ impl<'a> TNode for BlitzNode<'a> {
+     }
+ }
+ 
++// RFC 4647 extended filtering skips unmatched subtags until a singleton.
++fn language_range_matches(range: &str, language: &str) -> bool {
++    if range.is_empty() || language.is_empty() {
++        return range.is_empty() && language.is_empty();
++    }
++    let mut range = range.split('-');
++    let mut language = language.split('-');
++    let first_range = range.next().unwrap();
++    let first_tag = language.next().unwrap();
++    if first_range != "*" && !first_range.eq_ignore_ascii_case(first_tag) {
++        return false;
++    }
++    range.filter(|part| *part != "*").all(|part| {
++        for tag in language.by_ref() {
++            if part.eq_ignore_ascii_case(tag) {
++                return true;
++            }
++            if tag.len() == 1 {
++                return false;
++            }
++        }
++        false
++    })
++}
++
+ impl selectors::Element for BlitzNode<'_> {
+     type Impl = SelectorImpl;
+ 
+@@ -295,7 +320,7 @@ impl selectors::Element for BlitzNode<'_> {
+             NonTSPseudoClass::Fullscreen => false,
+             NonTSPseudoClass::Hover => self.element_state().contains(ElementState::HOVER),
+             NonTSPseudoClass::Indeterminate => false,
+-            NonTSPseudoClass::Lang(_) => false,
++            NonTSPseudoClass::Lang(ref range) => self.match_element_lang(None, range),
+             NonTSPseudoClass::CustomState(_) => false,
+             NonTSPseudoClass::Link => self.element_state().contains(ElementState::UNVISITED),
+             NonTSPseudoClass::PlaceholderShown => false,
+@@ -671,15 +696,32 @@ impl<'a> TElement for BlitzNode<'a> {
+     }
+ 
+     fn lang_attr(&self) -> Option<style::selector_parser::AttrValue> {
+-        None
++        self.element_data()?
++            .declared_language()
++            .map(AtomString::from)
+     }
+ 
+     fn match_element_lang(
+         &self,
+-        _override_lang: Option<Option<style::selector_parser::AttrValue>>,
+-        _value: &style::selector_parser::Lang,
++        override_lang: Option<Option<style::selector_parser::AttrValue>>,
++        range: &style::selector_parser::Lang,
+     ) -> bool {
+-        false
++        if let Some(language) = override_lang {
++            return language_range_matches(range, language.as_ref().map_or("", |value| &value.0));
++        }
++
++        let mut current = Some(*self);
++        while let Some(node) = current {
++            if let Some(language) = node
++                .element_data()
++                .and_then(|element| element.declared_language())
++            {
++                return language_range_matches(range, language);
++            }
++            current = node.parent_node();
++        }
++
++        language_range_matches(range, "")
+     }
+ 
+     fn is_html_document_body_element(&self) -> bool {
+diff --git a/src/stylo/presentational_hints.rs b/src/stylo/presentational_hints.rs
+index 96c5b8fffe..52aaf6ecf8 100644
+--- a/src/stylo/presentational_hints.rs
++++ b/src/stylo/presentational_hints.rs
+@@ -320,10 +320,6 @@ fn compute_presentational_hints(node: &Node, elem: &ElementData) -> Presentation
+     let is_solid_hr = *tag == local_name!("hr")
+         && (elem.has_attr(local_name!("color")) || elem.has_attr(local_name!("noshade")));
+ 
+-    // https://html.spec.whatwg.org/multipage/#the-lang-and-xml:lang-attributes
+-    let accepts_lang = elem.name.ns == ns!(html) || elem.name.ns == ns!(svg);
+-    let mut lang = None;
+-
+     #[cfg(feature = "svg")]
+     let svg_url_data =
+         (elem.name.ns == ns!(svg)).then(|| crate::url::DocumentUrl::default().url_extra_data());
+@@ -336,14 +332,6 @@ fn compute_presentational_hints(node: &Node, elem: &ElementData) -> Presentation
+         let name = &attr.name.local;
+         let value = attr.value.as_str();
+ 
+-        if *name == local_name!("lang") {
+-            if attr.name.ns == ns!(xml) {
+-                lang = Some(value);
+-            } else if attr.name.ns == ns!() && accepts_lang {
+-                lang = lang.or(Some(value));
+-            }
+-        }
+-
+         // A `font` element's `face` sets `font-family` to the attribute's value, and
+         // its `size` maps to a font size keyword.
+         // https://html.spec.whatwg.org/multipage/rendering.html#phrasing-content-3
+@@ -636,7 +624,7 @@ fn compute_presentational_hints(node: &Node, elem: &ElementData) -> Presentation
+         }
+     }
+ 
+-    if let Some(lang) = lang {
++    if let Some(lang) = elem.declared_language() {
+         hints.push(PropertyDeclaration::XLang(XLang(Atom::from(lang))));
+     }
+ 

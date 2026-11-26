@@ -126,7 +126,6 @@ const patterns = {
       "src/runtime/webview/*.cpp",
       "src/runtime/bake/*.cpp",
       "src/uws_sys/*.cpp",
-      "src/simdutf_sys/*.cpp",
       "src/jsc/bindings/vm/*.cpp",
       "packages/bun-usockets/src/*.cpp",
       "packages/bun-usockets/src/crypto/*.cpp",

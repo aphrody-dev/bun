@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ju=CC=88rg=20Lehni?= <juerg@scratchdisk.com>
+Date: Tue, 24 Nov 2026 21:27:18 +0000
+Subject: [PATCH] fix(ast): give nested arrow functions the `this` of their
+ enclosing function
+
+Port of https://github.com/boa-dev/boa/pull/5691.
+
+Adapted to the kitesurf scope patches: Inner also has lookup/lookup_dropped, and the new arrow flag is carried through KsScopeParts (ks_parts/ks_rebuild) and stored as bit 2 of the scope flags byte in ks_body.rs, so a rebuilt arrow scope stays an arrow scope.
+---
+ src/scope.rs          | 22 ++++++++++++++++++++--
+ src/scope_analyzer.rs |  9 +++++++--
+ 2 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/src/scope.rs b/src/scope.rs
+index 28f1886..a37454a 100644
+--- a/src/scope.rs
++++ b/src/scope.rs
+@@ -109,6 +109,8 @@ pub(crate) struct Inner {
+     // query (a direct eval) rebuilds it. Compiled code resolves names by index, not here.
+     lookup_dropped: Cell<bool>,
+     function: bool,
++    // An arrow function's scope, which has the `this` of the function around it.
++    arrow: bool,
+     // Has the `this` been accessed/escaped outside the function environment boundary.
+     this_escaped: Cell<bool>,
+ 
+@@ -158,6 +160,7 @@ impl Scope {
+                 lookup: RefCell::default(),
+                 lookup_dropped: Cell::new(false),
+                 function: true,
++                arrow: false,
+                 this_escaped: Cell::new(false),
+                 context: Rc::default(),
+             }),
+@@ -167,6 +170,16 @@ impl Scope {
+     /// Creates a new scope.
+     #[must_use]
+     pub fn new(parent: Self, function: bool) -> Self {
++        Self::with_kind(parent, function, false)
++    }
++
++    /// Creates a new arrow function scope.
++    #[must_use]
++    pub fn new_arrow(parent: Self) -> Self {
++        Self::with_kind(parent, true, true)
++    }
++
++    fn with_kind(parent: Self, function: bool, arrow: bool) -> Self {
+         Self {
+             inner: Rc::new(Inner {
+                 unique_id: parent.inner.context.next_unique_id(),
+@@ -175,6 +188,7 @@ impl Scope {
+                 lookup: RefCell::default(),
+                 lookup_dropped: Cell::new(false),
+                 function,
++                arrow,
+                 this_escaped: Cell::new(false),
+                 context: parent.inner.context.clone(),
+                 outer: Some(parent),
+@@ -386,13 +400,14 @@ impl Scope {
+         }
+     }
+ 
+-    /// Escape enclosing function environment's `this`.
++    /// Escape enclosing function environment's `this`: of the first function around this one that
++    /// isn't an arrow function, as arrow functions have the `this` of theirs.
+     pub fn escape_this_in_enclosing_function_scope(&self) {
+         let mut current = self;
+         let mut crossed_function_border = false;
+ 
+         loop {
+-            if crossed_function_border && current.is_function() {
++            if crossed_function_border && current.is_function() && !current.inner.arrow {
+                 current.inner.this_escaped.set(true);
+                 return;
+             }
+@@ -582,6 +597,7 @@ impl Scope {
+             unique_id: self.inner.unique_id,
+             index: self.inner.index.get(),
+             function: self.inner.function,
++            arrow: self.inner.arrow,
+             this_escaped: self.inner.this_escaped.get(),
+             bindings: self
+                 .inner
+@@ -617,6 +633,7 @@ impl Scope {
+                 lookup: RefCell::default(),
+                 lookup_dropped: Cell::new(dropped),
+                 function: parts.function,
++                arrow: parts.arrow,
+                 this_escaped: Cell::new(parts.this_escaped),
+                 context,
+             }),
+@@ -643,6 +660,7 @@ pub struct KsScopeParts {
+     pub unique_id: u32,
+     pub index: u32,
+     pub function: bool,
++    pub arrow: bool,
+     pub this_escaped: bool,
+     pub bindings: Vec<(JsString, u32, u8)>,
+ }
+diff --git a/src/scope_analyzer.rs b/src/scope_analyzer.rs
+index f1210e3..1a97ab6 100644
+--- a/src/scope_analyzer.rs
++++ b/src/scope_analyzer.rs
+@@ -1191,9 +1191,14 @@ impl BindingCollectorVisitor<'_> {
+             let name = name.to_js_string(self.interner);
+             scope.create_immutable_binding(name, strict);
+             *name_scope = Some(scope.clone());
+-            Scope::new(scope, true)
++            scope
+         } else {
+-            Scope::new(self.scope.clone(), true)
++            self.scope.clone()
++        };
++        let function_scope = if arrow {
++            Scope::new_arrow(function_scope)
++        } else {
++            Scope::new(function_scope, true)
+         };
+ 
+         let function_scopes = function_declaration_instantiation(

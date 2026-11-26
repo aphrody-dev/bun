@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Wleeaf <179125857+wleeaf@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 20:12:21 +0000
+Subject: [PATCH] fix(engine): propagate Set errors in TypedArray with and
+ filter
+
+Port of https://github.com/boa-dev/boa/pull/5614.
+---
+ src/builtins/typed_array/builtin.rs | 11 ++++-------
+ src/builtins/typed_array/tests.rs   | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 32 insertions(+), 7 deletions(-)
+
+diff --git a/src/builtins/typed_array/builtin.rs b/src/builtins/typed_array/builtin.rs
+index 5dae075..c124b24 100644
+--- a/src/builtins/typed_array/builtin.rs
++++ b/src/builtins/typed_array/builtin.rs
+@@ -848,9 +848,8 @@ impl BuiltinTypedArray {
+         // 10. Let n be 0.
+         // 11. For each element e of kept, do
+         for (n, e) in kept.iter().enumerate() {
+-            // a. Perform ! Set(A, ! ToString(𝔽(n)), e, true).
+-            a.set(n, e.clone(), true, context)
+-                .js_expect("Set cannot fail here")?;
++            // a. Perform ? Set(A, ! ToString(𝔽(n)), e, true).
++            a.set(n, e.clone(), true, context)?;
+             // b. Set n to n + 1.
+         }
+ 
+@@ -2650,10 +2649,8 @@ impl BuiltinTypedArray {
+                 // c. Else, let fromValue be ! Get(O, Pk).
+                 ta.get(k, context).js_expect("cannot fail per the spec")?
+             };
+-            // d. Perform ! Set(A, Pk, fromValue, true).
+-            new_array
+-                .set(k, value, true, context)
+-                .js_expect("cannot fail per the spec")?;
++            // d. Perform ? Set(A, Pk, fromValue, true).
++            new_array.set(k, value, true, context)?;
+ 
+             // e. Set k to k + 1.
+         }
+diff --git a/src/builtins/typed_array/tests.rs b/src/builtins/typed_array/tests.rs
+index ff2a7bd..11f9934 100644
+--- a/src/builtins/typed_array/tests.rs
++++ b/src/builtins/typed_array/tests.rs
+@@ -228,3 +228,31 @@ fn typedarray_exotic_prevent_extensions() {
+         TestAction::assert("!Object.isExtensible(fixedLengthWithOffset1)"),
+     ]);
+ }
++
++#[test]
++fn bigint_typed_array_with_throws_when_buffer_shrinks() {
++    run_test_actions([
++        TestAction::run(
++            "let rab = new ArrayBuffer(16, { maxByteLength: 16 }); let ta = new BigInt64Array(rab);",
++        ),
++        TestAction::assert_native_error(
++            "ta.with(0, { valueOf() { rab.resize(8); return 0n; } })",
++            JsNativeErrorKind::Type,
++            "cannot convert undefined to a BigInt",
++        ),
++    ]);
++}
++
++#[test]
++fn bigint_typed_array_filter_throws_when_buffer_shrinks() {
++    run_test_actions([
++        TestAction::run(
++            "let rab = new ArrayBuffer(16, { maxByteLength: 16 }); let ta = new BigInt64Array(rab);",
++        ),
++        TestAction::assert_native_error(
++            "ta.filter(() => { rab.resize(8); return true; })",
++            JsNativeErrorKind::Type,
++            "cannot convert undefined to a BigInt",
++        ),
++    ]);
++}

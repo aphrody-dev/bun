@@ -8,7 +8,9 @@ use crate::ir::element::{Interned, TextWidth};
 use crate::js::ast_nodes::node_as_ast_nodes;
 use crate::js::comments::{self, NO_COMMENTS};
 use crate::js::context::JsFormatContext;
-use crate::js::print::program::{FormatStatements, write_hashbang};
+use crate::js::print::program::{
+    FormatSeparatedStatements, FormatStatements, surely_prints_semicolon, write_hashbang,
+};
 use crate::js::sort_imports::{SortImports, sorted_text};
 use crate::js::utils::tailwindcss::{Collapse, Texts, collapse_among, ends_in_template};
 use crate::options::{Code, Flavor, HtmlRoot, InHtml, JavaScriptParser, ParseJavaScript, Then};
@@ -106,7 +108,14 @@ pub(crate) fn options_in_html(options: &FormatOptions, in_html: InHtml) -> Forma
 
 /// A way to parse code.
 #[derive(Copy, Clone)]
-pub(crate) enum Parse<'p> {
+pub(crate) struct Parse<'p> {
+    parser: Parser<'p>,
+    /// [`InHtml::is_read_by_babel`]
+    is_read_by_babel: bool,
+}
+
+#[derive(Copy, Clone)]
+enum Parser<'p> {
     Function(ParseJavaScript),
     Closure(JavaScriptParser<'p>),
 }
@@ -117,10 +126,14 @@ impl<'p> Parse<'p> {
         parse: Option<JavaScriptParser<'p>>,
         options: &FormatOptions,
     ) -> Option<Parse<'p>> {
-        match parse {
-            Some(parse) => Some(Parse::Closure(parse)),
-            None => options.parse_javascript.map(Parse::Function),
-        }
+        let parser = match parse {
+            Some(parse) => Parser::Closure(parse),
+            None => Parser::Function(options.parse_javascript?),
+        };
+        Some(Parse {
+            parser,
+            is_read_by_babel: false,
+        })
     }
 
     /// Returns the parser for the code in the HTML that `f` writes.
@@ -128,15 +141,24 @@ impl<'p> Parse<'p> {
         Parse::new(f.context().parse_javascript, f.options())
     }
 
+    /// The same parser for code that has [`InHtml::is_read_by_babel`] if `yes`.
+    pub(crate) fn read_by_babel(self, yes: bool) -> Parse<'p> {
+        Parse {
+            is_read_by_babel: self.is_read_by_babel || yes,
+            ..self
+        }
+    }
+
     pub(crate) fn call(self, path: &[u8], text: &[u8], is_script: bool, then: Then<'_>) {
         let code = Code {
             path,
             text,
             is_script,
+            is_read_by_babel: self.is_read_by_babel,
         };
-        match self {
-            Parse::Function(parse) => parse(code, then),
-            Parse::Closure(parse) => parse(code, then),
+        match self.parser {
+            Parser::Function(parse) => parse(code, then),
+            Parser::Closure(parse) => parse(code, then),
         }
     }
 }
@@ -179,6 +201,9 @@ pub(crate) fn with_file(
     let Some(parse) = Parse::from_formatter(f) else {
         return false;
     };
+    // Prettier parses a binding with Babel, like an expression.
+    let is_binding = matches!(piece, Piece::Binding(_));
+    let parse = parse.read_by_babel(is_binding || in_html.is_read_by_babel());
     let mut options = options_in_html(f.options(), in_html);
     // In Prettier the file name is still the HTML file's, so `<T,>() => {}` keeps its comma because the name isn't
     // `.ts`. oxfmt prints a script like a separate file.
@@ -263,6 +288,79 @@ pub(crate) fn with_file(
                 return is_written;
             }
         }
+    }
+    false
+}
+
+/// How the statements of a Vue event handler are printed.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum VueStatements {
+    /// As Prettier prints them: Vue compiles that like the source.
+    AsPrettier,
+    /// As Prettier prints them if that has no `;` either, and else not at all: the source has none.
+    WithoutSemicolon,
+    /// With a `;` between them: see `FormatSeparatedStatements`.
+    Separated,
+    /// Not at all. The handler stays as written.
+    AsWritten,
+}
+
+impl VueStatements {
+    /// See "The statements of a Vue event handler" in `src/format/CLAUDE.md`.
+    fn of<'b>(file: &'b File<'b>, f: &Formatter<'b>) -> VueStatements {
+        let has_semicolon = has_semicolon_in_vue(file.text());
+        let mut statements =
+            (file.body().iter()).filter(|it| !matches!(it.kind(), StmtKind::Empty));
+        let Some(first) = statements.next() else {
+            // `/* comment */;`: without its `;`, the comment is an expression, which doesn't compile.
+            return match has_semicolon && file.comment_count() > 0 {
+                true => VueStatements::AsWritten,
+                false => VueStatements::AsPrettier,
+            };
+        };
+        let is_only_an_expression =
+            file.body().len() == 1 && matches!(first.kind(), StmtKind::Expr(_));
+        if is_only_an_expression || surely_prints_semicolon(file.body(), f) {
+            return VueStatements::AsPrettier;
+        }
+        // A copy of the source under `prettier-ignore` ends with a `;` or not, whatever is written after it.
+        match (has_semicolon, f.comments().has_suppression_comments()) {
+            (false, _) => VueStatements::WithoutSemicolon,
+            (true, true) => VueStatements::AsWritten,
+            (true, false) => VueStatements::Separated,
+        }
+    }
+}
+
+/// True if a text that `f` has written since `f.elements().len()` was `start` has a `;` for Vue, printed or not.
+fn may_print_semicolon(start: usize, f: &Formatter<'_>) -> bool {
+    let elements = f.elements().get(start..).unwrap_or_default();
+    elements.iter().any(|element| {
+        let text = match element {
+            FormatElement::Token(token) | FormatElement::TokenIfBreaks(token) => {
+                Some(token.as_bytes())
+            }
+            FormatElement::SourceText(text) => f.source_text().as_bytes().get(text.range()),
+            FormatElement::OwnedText(text) => f.storage.text.get(text.range()),
+            _ => None,
+        };
+        text.is_some_and(has_semicolon_in_vue)
+    })
+}
+
+/// True if `text` has a `;` once Vue has decoded its character references: one that doesn't end `&nbsp;` or `&#160;`.
+fn has_semicolon_in_vue(text: &[u8]) -> bool {
+    let mut rest = text;
+    while let Some(at) = strings::index_of_char_usize(rest, b';') {
+        let name_len = rest[..at]
+            .iter()
+            .rev()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'#')
+            .count();
+        if name_len == 0 || !rest[..at - name_len].ends_with(b"&") {
+            return true;
+        }
+        rest = &rest[at + 1..];
     }
     false
 }
@@ -403,6 +501,8 @@ pub(crate) fn with_sorted_classes(
     const BEFORE: &[u8] = b"let __prettier_temp__ = ";
     let source = [BEFORE, code].concat();
     let mut changes = None;
+    // What sorts the classes reads the expression as what prints it does.
+    let parse = parse.read_by_babel(true);
     for path in paths_of(Syntax::BabelTs, code) {
         parse.call(path, &source, false, &mut |file| {
             if !file.has_parse_errors() {
@@ -481,6 +581,21 @@ fn write_statements<'b>(file: &'b File<'b>, f: &mut Formatter<'b>) {
         [
             leading_comments(program),
             FormatStatements(file.body()),
+            dangling_comments(program)
+        ]
+    );
+}
+
+/// [`write_statements`] for [`VueStatements::Separated`].
+#[inline(never)]
+fn write_separated_statements<'b>(file: &'b File<'b>, f: &mut Formatter<'b>) {
+    let program = node_as_ast_nodes(Node::File(file));
+    write_hashbang(false, f);
+    write!(
+        f,
+        [
+            leading_comments(program),
+            FormatSeparatedStatements(file.body()),
             dangling_comments(program)
         ]
     );
@@ -813,9 +928,20 @@ pub(crate) fn write_program_in_attribute(
         in_html,
         Piece::Other,
         &mut |file, f| {
-            let content = format_with(|f| write_statements(file, f));
+            let statements = match in_html.root {
+                HtmlRoot::VueEventBinding => VueStatements::of(file, f),
+                _ => VueStatements::AsPrettier,
+            };
+            if statements == VueStatements::AsWritten {
+                return false;
+            }
+            let start = f.elements().len();
+            let content = format_with(|f| match statements {
+                VueStatements::Separated => write_separated_statements(file, f),
+                _ => write_statements(file, f),
+            });
             write_hugged(hug.should_hug_non_expression(), &content, f);
-            true
+            statements != VueStatements::WithoutSemicolon || !may_print_semicolon(start, f)
         },
     )
 }

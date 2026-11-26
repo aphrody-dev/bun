@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: zhangzhaohong-dev <zhangzhaohong.dev@gmail.com>
+Date: Tue, 24 Nov 2026 16:09:22 +0000
+Subject: [PATCH] Keep namespaced attributes out of ID and class matching
+
+Port of https://github.com/DioxusLabs/blitz/pull/1749.
+
+Same namespace checks on the patched set_attribute/clear_attribute (which also keep shadow-tree ids out of the id map) and on ElementData::new, which takes Attributes here and uses the imported ns! macro.
+---
+ src/mutator.rs      | 13 +++++++------
+ src/node/element.rs |  4 ++--
+ 2 files changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/src/mutator.rs b/src/mutator.rs
+index 5e6e945..9d08939 100644
+--- a/src/mutator.rs
++++ b/src/mutator.rs
+@@ -461,7 +461,8 @@ impl DocumentMutator<'_> {
+         }
+ 
+         // Shadow-tree ids stay out of the document id map, as in process_added_subtree.
+-        if name.local == local_name!("id")
++        if name.ns == ns!()
++            && name.local == local_name!("id")
+             && node_is_in_document
+             && self.doc.nodes[node_id].containing_shadow_root_id().is_none()
+         {
+@@ -538,11 +539,11 @@ impl DocumentMutator<'_> {
+         let tag = &element.name.local;
+         let attr = &name.local;
+ 
+-        if *attr == local_name!("id") {
++        if name.ns == ns!() && *attr == local_name!("id") {
+             element.id = Some(Atom::from(value))
+         }
+ 
+-        if *attr == local_name!("class") {
++        if name.ns == ns!() && *attr == local_name!("class") {
+             element.classes = crate::node::parse_class_list(value);
+         }
+ 
+@@ -689,7 +690,7 @@ impl DocumentMutator<'_> {
+             self.restyle_inherited_attr_write(node_id, &name);
+         }
+ 
+-        if name.local == local_name!("id") && node_is_in_document {
++        if name.ns == ns!() && name.local == local_name!("id") && node_is_in_document {
+             if let Some(old_id) = self.doc.nodes[node_id]
+                 .element_data()
+                 .and_then(|element| element.id.clone())
+@@ -720,7 +721,7 @@ impl DocumentMutator<'_> {
+                 .attribute_changed(&name.local, old_value, None);
+         }
+ 
+-        if name.local == local_name!("id") {
++        if name.ns == ns!() && name.local == local_name!("id") {
+             element.id = None;
+         }
+ 
+@@ -737,7 +738,7 @@ impl DocumentMutator<'_> {
+             element.flush_link_state();
+         }
+ 
+-        if name.local == local_name!("class") {
++        if name.ns == ns!() && name.local == local_name!("class") {
+             element.classes = Default::default();
+         }
+ 
+diff --git a/src/node/element.rs b/src/node/element.rs
+index f295067..2048914 100644
+--- a/src/node/element.rs
++++ b/src/node/element.rs
+@@ -1289,13 +1289,13 @@ impl ElementData {
+         let attrs: Attributes = attrs.into();
+         let id_attr_atom = attrs
+             .iter()
+-            .find(|attr| &attr.name.local == "id")
++            .find(|attr| *attr.namespace() == ns!() && &attr.name.local == "id")
+             .map(|attr| attr.value.as_ref())
+             .map(|value: &str| Atom::from(value));
+ 
+         let class_atoms = attrs
+             .iter()
+-            .find(|attr| &attr.name.local == "class")
++            .find(|attr| *attr.namespace() == ns!() && &attr.name.local == "class")
+             .map(|attr| parse_class_list(attr.value.as_ref()))
+             .unwrap_or_default();
+ 

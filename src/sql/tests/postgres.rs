@@ -27,8 +27,7 @@ returns! {
         X509_ALGOR_get0 X509_digest X509_get0_signature X509_get_signature_nid RSA_PSS_PARAMS_free
         d2i_RSA_PSS_PARAMS EVP_get_digestbynid EVP_blake2b256 EVP_blake2b512 EVP_md4 EVP_ripemd160
         EVP_sha1 EVP_sha224 EVP_sha384 EVP_sha3_224 EVP_sha3_256 EVP_sha3_384 EVP_sha3_512
-        EVP_sha512 EVP_sha512_224 EVP_sha512_256 mi_free mi_malloc mi_realloc mi_usable_size
-        highway_memmem;
+        EVP_sha512 EVP_sha512_224 EVP_sha512_256 mi_free mi_malloc mi_realloc mi_usable_size;
     1: SSL_library_init EVP_sha256 EVP_md5 EVP_Digest EVP_DigestInit EVP_DigestUpdate
         EVP_DigestFinal EVP_MD_CTX_cleanup RAND_bytes PKCS5_PBKDF2_HMAC;
 }
@@ -51,42 +50,6 @@ unsafe extern "C" fn HMAC(
 unsafe extern "C" fn CRYPTO_memcmp(a: *const u8, b: *const u8, len: usize) -> i32 {
     // SAFETY: the caller passes two slices of that length.
     unsafe { (std::slice::from_raw_parts(a, len) != std::slice::from_raw_parts(b, len)) as i32 }
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn simdutf__base64_length_from_binary(len: usize, _: i32) -> usize {
-    len
-}
-
-/// One `A` per byte.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn simdutf__base64_encode(_: usize, len: usize, out: *mut u8, _: i32) -> usize {
-    // SAFETY: `out` has room for `simdutf__base64_length_from_binary(len)` bytes.
-    unsafe { out.write_bytes(b'A', len) };
-    len
-}
-
-#[repr(C)]
-struct Decoded(i32, usize);
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn simdutf__base64_decode_from_binary(
-    _: usize,
-    _: usize,
-    out: *mut u8,
-    room: usize,
-    _: i32,
-) -> Decoded {
-    // SAFETY: `out` has room for `room` bytes.
-    unsafe { out.write_bytes(0, room) };
-    Decoded(0, room)
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn highway_index_of_char(text: *const u8, len: usize, needle: u8) -> usize {
-    // SAFETY: the caller passes a slice, as a pointer and a length.
-    let text = unsafe { std::slice::from_raw_parts(text, len) };
-    text.iter().take_while(|&&byte| byte != needle).count()
 }
 
 mod handshake {

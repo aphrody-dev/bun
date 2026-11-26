@@ -12,6 +12,9 @@ export const rc = (rules: readonly string[] = RULE_NAMES) =>
     rules: Object.fromEntries(rules.map(rule => [rule, "error"])),
   });
 
+/** The same for inputs with files in `node_modules`, which `bun lint` skips unless the config brings it back. */
+export const rcWithNodeModules = () => JSON.stringify({ ...JSON.parse(rc()), ignorePatterns: ["!**/node_modules/"] });
+
 export type Files = Record<string, string>;
 
 const readsRef = (comment: string) => `function Component() {
@@ -409,6 +412,23 @@ function NotNull(props: Props) {
 /** The small input directories, keyed by test name. */
 export const small: Record<string, Files> = {
   comments,
+  // A shared value is made to be written to. oxlint doesn't know that, even with the package installed.
+  reanimated: {
+    ".oxlintrc.json": rc(["react/immutability"]),
+    "node_modules/react-native-reanimated/package.json": `{ "name": "react-native-reanimated", "version": "4.7.1" }\n`,
+    "node_modules/react-native-reanimated/index.js": `exports.useSharedValue = value => ({ value });\n`,
+    "shared-value.jsx": `import { useEffect } from "react";
+import { useSharedValue } from "react-native-reanimated";
+
+export function A() {
+  const progress = useSharedValue(0);
+  useEffect(() => {
+    progress.value = 1;
+  }, [progress]);
+  return null;
+}
+`,
+  },
   "not React": {
     ".oxlintrc.json": rc(),
     // Nothing here creates JSX or calls a hook, and nothing is named like a component or a hook.
@@ -645,7 +665,7 @@ function Component(props) {
   },
   lowering: { ".oxlintrc.json": rc(), "forever.tsx": forever, "defaults.tsx": defaults },
   node_modules: {
-    ".oxlintrc.json": rc(),
+    ".oxlintrc.json": rcWithNodeModules(),
     "a.jsx": impure,
     "node_modules/package/a.jsx": impure,
     "vendor/node_modules/package/a.jsx": impure,

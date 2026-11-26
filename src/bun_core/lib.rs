@@ -491,6 +491,19 @@ impl OutputSink {
     };
 }
 
+// The `Sys` arm for this crate's own tests, which do not link `bun_sys`.
+#[cfg(test)]
+link_impl_OutputSink! {
+    Sys for extern () => |_this| {
+        stderr() => output::File(Fd::stderr()),
+        create_file(_cwd, _path) => Err(Error::Unexpected),
+        write_all_quiet(_fd, bytes) => std::io::Write::write_all(&mut std::io::stderr(), bytes).is_ok(),
+        tty_winsize(_fd) => None,
+        is_terminal(_fd) => false,
+        read(_fd, _buf) => Err(Error::Unexpected),
+    }
+}
+
 // `bun_core` (T0) cannot name `bun_errno` (cycle). Single-variant link-interface
 // (owner is unused / null); `bun_errno` provides the `Sys` arm. Gives `result.rs`
 // access to the per-OS `SystemErrno` strum table without duplicating it here.
@@ -1148,7 +1161,7 @@ pub(crate) mod strings_impl {
         }
         let mut size = input.len();
         let mut i = 0usize;
-        while let Some(pos) = ::bun_highway::memmem(&input[i..], needle) {
+        while let Some(pos) = ::bun_simd_kernels::memmem(&input[i..], needle) {
             size = size - needle.len() + replacement.len();
             i += pos + needle.len();
         }
@@ -1167,7 +1180,7 @@ pub(crate) mod strings_impl {
         let mut o = 0usize;
         let mut count = 0usize;
         loop {
-            match ::bun_highway::memmem(&input[i..], needle) {
+            match ::bun_simd_kernels::memmem(&input[i..], needle) {
                 Some(pos) => {
                     output[o..o + pos].copy_from_slice(&input[i..i + pos]);
                     o += pos;
@@ -1192,7 +1205,7 @@ pub(crate) mod strings_impl {
         }
         let mut out = Vec::with_capacity(replacement_size(input, needle, replacement));
         let mut i = 0usize;
-        while let Some(pos) = ::bun_highway::memmem(&input[i..], needle) {
+        while let Some(pos) = ::bun_simd_kernels::memmem(&input[i..], needle) {
             out.extend_from_slice(&input[i..i + pos]);
             out.extend_from_slice(replacement);
             i += pos + needle.len();
@@ -1323,16 +1336,13 @@ pub(crate) mod strings_impl {
 
     #[inline]
     pub fn is_all_ascii(slice: &[u8]) -> bool {
-        // Short-string fast path: for ≤32 bytes the scalar loop wins. Without
-        // cross-LTO the FFI path is Rust → `simdutf__validate_ascii` shim
-        // (push/mov/pop/jmp) → `simdutf::validate_ascii` (runtime CPU-dispatch
-        // vtable load + indirect call) → impl; on the `path.dirname` micro the
-        // 2-hop dispatch was ~60% of the SIMD work for 14-byte inputs.
+        // Short-string fast path: for ≤32 bytes the scalar loop beats the
+        // runtime CPU dispatch of the kernel (on the `path.dirname` micro the
+        // dispatch was ~60% of the SIMD work for 14-byte inputs).
         if slice.len() <= 32 {
             return slice.iter().all(|&b| b < 0x80);
         }
-        // SAFETY: FFI reads exactly slice.len() bytes.
-        unsafe { simdutf::simdutf__validate_ascii(slice.as_ptr(), slice.len()) }
+        simdutf::validate::ascii(slice)
     }
 
     /// Byte index of the first non-ASCII byte, or None if all-ASCII.
@@ -1341,14 +1351,12 @@ pub(crate) mod strings_impl {
     /// this; `_usize` is the raw form for callers that index with the result.
     #[inline]
     pub(crate) fn first_non_ascii_usize(slice: &[u8]) -> Option<usize> {
-        // Short-string fast path: see is_all_ascii() above for the FFI-dispatch
-        // cost rationale. position() autovectorizes; ≤32B beats the shim.
+        // Short-string fast path: see is_all_ascii() above for the dispatch
+        // cost rationale. position() autovectorizes; ≤32B beats the kernel.
         if slice.len() <= 32 {
             return slice.iter().position(|&b| b >= 0x80);
         }
-        // SAFETY: FFI reads exactly slice.len() bytes.
-        let r =
-            unsafe { simdutf::simdutf__validate_ascii_with_errors(slice.as_ptr(), slice.len()) };
+        let r = simdutf::validate::with_errors::ascii(slice);
         if r.status == simdutf::Status::SUCCESS {
             None
         } else {
@@ -1652,10 +1660,10 @@ pub(crate) mod strings_impl {
                 written: latin1.len(),
             };
         }
-        const MIN_LEN_FOR_SIMDUTF: usize = 64;
-        if (MIN_LEN_FOR_SIMDUTF..=buf.len()).contains(&latin1.len()) {
-            let input = WithUtf8Len::latin1(latin1);
-            if buf.len() >= input.utf8_len() {
+        if latin1.len() >= MIN_LEN_FOR_SIMDUTF {
+            let most = latin1.len().min(buf.len());
+            let input = WithUtf8Len::latin1(&latin1[..most]);
+            if most == latin1.len() && buf.len() >= input.utf8_len() {
                 let mut out = BorrowedBuf::from(buf);
                 simdutf::convert::latin1::to::utf8(input, out.unfilled());
                 return EncodeIntoResult {
@@ -1663,8 +1671,37 @@ pub(crate) mod strings_impl {
                     written: out.len(),
                 };
             }
+            // Long runs of ASCII are copied faster than they are converted.
+            let is_dense = input.utf8_len() - most > most / 64 + 4;
+            if is_dense && buf.len() >= 2 * MIN_LEN_FOR_SIMDUTF {
+                return fill_utf8_from_latin1(buf, input);
+            }
         }
         copy_latin1_into_utf8_stop_on_non_ascii::<false>(buf, latin1)
+    }
+
+    const MIN_LEN_FOR_SIMDUTF: usize = 64;
+
+    /// [`copy_latin1_into_utf8`] if `buf` is too short for all of `input`.
+    #[inline(never)]
+    fn fill_utf8_from_latin1(buf: &mut [u8], input: WithUtf8Len<'_, u8>) -> EncodeIntoResult {
+        let latin1 = input.slice();
+        // A character takes one or two bytes, so all but the excess fit, and half as many as there is room.
+        let end = latin1.len().saturating_sub(input.utf8_len() - buf.len());
+        let (mut read, mut written, mut fits) = (0, 0, end.max(buf.len() / 2));
+        while fits >= MIN_LEN_FOR_SIMDUTF {
+            let mut out = BorrowedBuf::from(&mut buf[written..]);
+            let input = WithUtf8Len::latin1(&latin1[read..read + fits]);
+            simdutf::convert::latin1::to::utf8(input, out.unfilled());
+            (read, written) = (read + fits, written + out.len());
+            fits = (buf.len() - written) / 2;
+        }
+        let rest =
+            copy_latin1_into_utf8_stop_on_non_ascii::<false>(&mut buf[written..], &latin1[read..]);
+        EncodeIntoResult {
+            read: read + rest.read,
+            written: written + rest.written,
+        }
     }
 
     /// Copies at most 16 bytes with two loads and two stores that overlap. Writes nothing and
@@ -1703,9 +1740,9 @@ pub(crate) mod strings_impl {
     fn copy_ascii_prefix(dst: &mut [u8], src: &[u8]) -> usize {
         debug_assert_eq!(dst.len(), src.len());
 
-        const HIGHWAY_MIN_LEN: usize = 64;
-        if src.len() >= HIGHWAY_MIN_LEN {
-            return bun_highway::copy_ascii_prefix(src, dst);
+        const SIMD_MIN_LEN: usize = 64;
+        if src.len() >= SIMD_MIN_LEN {
+            return bun_simd_kernels::copy_ascii_prefix(src, dst);
         }
 
         const HIGH_BITS: u64 = 0x8080_8080_8080_8080;
@@ -2134,11 +2171,11 @@ pub(crate) mod strings_impl {
         }
         #[inline(always)]
         fn index_of_unit(s: &[u8], unit: u8) -> Option<usize> {
-            bun_highway::index_of_char(s, unit)
+            bun_simd_kernels::index_of_char(s, unit)
         }
         #[inline(always)]
         fn last_index_of_unit(s: &[u8], unit: u8) -> Option<usize> {
-            bun_highway::last_index_of_char(s, unit)
+            bun_simd_kernels::last_index_of_char(s, unit)
         }
     }
     impl PathByte for u16 {
@@ -2156,11 +2193,11 @@ pub(crate) mod strings_impl {
         }
         #[inline(always)]
         fn index_of_unit(s: &[u16], unit: u16) -> Option<usize> {
-            bun_highway::memmem16(s, &[unit])
+            bun_simd_kernels::memmem16(s, &[unit])
         }
         #[inline(always)]
         fn last_index_of_unit(s: &[u16], unit: u16) -> Option<usize> {
-            bun_highway::memrmem16(s, &[unit])
+            bun_simd_kernels::memrmem16(s, &[unit])
         }
     }
 

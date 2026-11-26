@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: zhangzhaohong-dev <zhangzhaohong.dev@gmail.com>
+Date: Tue, 24 Nov 2026 16:20:21 +0000
+Subject: [PATCH] Honor media attributes on stylesheets
+
+Port of https://github.com/DioxusLabs/blitz/pull/1752.
+
+Install-time media for style and link and live link media changes were already done by patches 0014 and 0035, so only the missing part is ported: setting or removing media on a connected style element queues it for the reparse that process_style_element does, since the author sheet cache shares MediaLists and an in-place swap would rescope other style elements.
+---
+ src/mutator.rs | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/mutator.rs b/src/mutator.rs
+index 9d08939..da24125 100644
+--- a/src/mutator.rs
++++ b/src/mutator.rs
+@@ -632,6 +632,9 @@ impl DocumentMutator<'_> {
+             self.load_iframe(node_id);
+         } else if (tag, attr) == tag_and_attr!("link", "media") {
+             self.update_link_stylesheet_media(node_id);
++        } else if name.ns == ns!() && (tag, attr) == tag_and_attr!("style", "media") {
++            // Reparsed at flush: the cached sheet's MediaList is shared, so it is not swapped in place.
++            self.style_nodes.insert(node_id);
+         }
+ 
+         self.note_possible_slot_reassignment(node_id, &name.local);
+@@ -780,6 +783,11 @@ impl DocumentMutator<'_> {
+             self.load_iframe(node_id);
+         } else if (tag, attr) == tag_and_attr!("link", "media") {
+             self.update_link_stylesheet_media(node_id);
++        } else if name.ns == ns!()
++            && (tag, attr) == tag_and_attr!("style", "media")
++            && node_is_in_document
++        {
++            self.style_nodes.insert(node_id);
+         }
+ 
+         self.note_possible_slot_reassignment(node_id, &name.local);

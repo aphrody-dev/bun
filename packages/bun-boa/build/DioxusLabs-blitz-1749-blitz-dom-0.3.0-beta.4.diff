@@ -1,0 +1,69 @@
+diff --git a/src/mutator.rs b/src/mutator.rs
+index a43f2a0d80..0ce915892e 100644
+--- a/src/mutator.rs
++++ b/src/mutator.rs
+@@ -328,7 +328,7 @@ impl DocumentMutator<'_> {
+             self.restyle_for_attribute_change(node_id, &name.local);
+         }
+ 
+-        if name.local == local_name!("id") && node_is_in_document {
++        if name.ns == ns!() && name.local == local_name!("id") && node_is_in_document {
+             if let Some(old_id) = self.doc.nodes[node_id]
+                 .element_data()
+                 .map(|element| element.id.clone())
+@@ -390,11 +390,11 @@ impl DocumentMutator<'_> {
+         let tag = &element.name.local;
+         let attr = &name.local;
+ 
+-        if *attr == local_name!("id") {
++        if name.ns == ns!() && *attr == local_name!("id") {
+             element.id = Some(Atom::from(value))
+         }
+ 
+-        if *attr == local_name!("class") {
++        if name.ns == ns!() && *attr == local_name!("class") {
+             element.classes = crate::node::parse_classes(value);
+         }
+ 
+@@ -469,7 +469,7 @@ impl DocumentMutator<'_> {
+             self.restyle_for_attribute_change(node_id, &name.local);
+         }
+ 
+-        if name.local == local_name!("id") && node_is_in_document {
++        if name.ns == ns!() && name.local == local_name!("id") && node_is_in_document {
+             if let Some(old_id) = self.doc.nodes[node_id]
+                 .element_data()
+                 .and_then(|element| element.id.clone())
+@@ -510,11 +510,11 @@ impl DocumentMutator<'_> {
+                 .attribute_changed(&name.local, old_value, None);
+         }
+ 
+-        if name.local == local_name!("id") {
++        if name.ns == ns!() && name.local == local_name!("id") {
+             element.id = None;
+         }
+ 
+-        if name.local == local_name!("class") {
++        if name.ns == ns!() && name.local == local_name!("class") {
+             element.classes.clear();
+         }
+ 
+diff --git a/src/node/element.rs b/src/node/element.rs
+index 695c3c3d63..c0e7852797 100644
+--- a/src/node/element.rs
++++ b/src/node/element.rs
+@@ -424,12 +424,12 @@ impl ElementData {
+     pub fn new(name: QualName, attrs: Vec<Attribute>) -> Self {
+         let id_attr_atom = attrs
+             .iter()
+-            .find(|attr| &attr.name.local == "id")
++            .find(|attr| attr.name.ns == markup5ever::ns!() && &attr.name.local == "id")
+             .map(|attr| attr.value.as_ref())
+             .map(|value: &str| Atom::from(value));
+         let classes = attrs
+             .iter()
+-            .find(|attr| &attr.name.local == "class")
++            .find(|attr| attr.name.ns == markup5ever::ns!() && &attr.name.local == "class")
+             .map(|attr| parse_classes(&attr.value))
+             .unwrap_or_default();
+ 
