@@ -79,6 +79,7 @@
     "pin-webkit": "bun ./scripts/pin-webkit.ts",
     "sync-webkit-source": "bun ./scripts/sync-webkit-source.ts",
     "cxx:report": "bun scripts/cxx-report.ts",
-    "test:boa": "bun scripts/test-boa.ts"
+    "test:boa": "bun scripts/test-boa.ts",
+    "build:bench": "bun scripts/build-bench.ts"
   }
 }
