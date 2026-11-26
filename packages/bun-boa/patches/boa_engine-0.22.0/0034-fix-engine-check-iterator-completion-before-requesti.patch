@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Berserk <tushar.18246@gmail.com>
+Date: Tue, 10 Nov 2026 20:28:19 +0000
+Subject: [PATCH] fix(engine): check iterator completion before requesting rest
+ values (#5648)
+
+Port of https://github.com/boa-dev/boa/pull/5656.
+
+Boa 0.22 has no bytecompiler/iterator.rs: rest elements run the IteratorToArray opcode, so the completion check moves into its loop (while !iterator.done()).
+---
+ src/tests/iterators.rs              | 145 ++++++++++++++++++++++++++++
+ src/vm/opcode/iteration/iterator.rs |   2 +-
+ 2 files changed, 146 insertions(+), 1 deletion(-)
+
+diff --git a/src/tests/iterators.rs b/src/tests/iterators.rs
+index cab9fe7..454d041 100644
+--- a/src/tests/iterators.rs
++++ b/src/tests/iterators.rs
+@@ -217,3 +217,148 @@ fn mixed_iterators_close_in_continue() {
+         "#}),
+     ]);
+ }
++
++#[test]
++fn array_rest_iterator_first_result_done() {
++    run_test_actions([
++        TestAction::run_harness(),
++        TestAction::run(indoc! {r#"
++            let calls = 0;
++            const it = {
++                [Symbol.iterator]() {
++                    return this;
++                },
++                next() {
++                    calls++;
++                    return { done: true };
++                }
++            };
++            const [x, ...y] = it;
++
++            let assignCalls = 0;
++            const it2 = {
++                [Symbol.iterator]() {
++                    return this;
++                },
++                next() {
++                    assignCalls++;
++                    return { done: true };
++                }
++            };
++            let a, b;
++            [a, ...b] = it2;
++        "#}),
++        TestAction::assert_eq("calls", 1),
++        TestAction::assert("x === undefined"),
++        TestAction::assert("arrayEquals(y, [])"),
++        TestAction::assert_eq("assignCalls", 1),
++        TestAction::assert("a === undefined"),
++        TestAction::assert("arrayEquals(b, [])"),
++    ]);
++}
++
++#[test]
++fn array_rest_iterator_multiple_values() {
++    run_test_actions([
++        TestAction::run_harness(),
++        TestAction::run(indoc! {r#"
++            let calls = 0;
++            const values = [1, 2, 3];
++            const it = {
++                [Symbol.iterator]() {
++                    return this;
++                },
++                next() {
++                    calls++;
++                    if (values.length > 0) {
++                        return { value: values.shift(), done: false };
++                    }
++                    return { done: true };
++                }
++            };
++            const [first, ...rest] = it;
++        "#}),
++        TestAction::assert_eq("first", 1),
++        TestAction::assert("arrayEquals(rest, [2, 3])"),
++        TestAction::assert_eq("calls", 4),
++    ]);
++}
++
++#[test]
++fn array_rest_iterator_next_throws() {
++    run_test_actions([
++        TestAction::run(indoc! {r#"
++            let calls = 0;
++            const it = {
++                [Symbol.iterator]() {
++                    return this;
++                },
++                next() {
++                    calls++;
++                    if (calls === 2) {
++                        throw new Error("iterator next error");
++                    }
++                    return { value: calls, done: false };
++                }
++            };
++            let caught = false;
++            let errorMsg = "";
++            try {
++                const [first, ...rest] = it;
++            } catch (err) {
++                caught = true;
++                errorMsg = err.message;
++            }
++        "#}),
++        TestAction::assert("caught"),
++        TestAction::assert_eq("calls", 2),
++        TestAction::assert("errorMsg === 'iterator next error'"),
++    ]);
++}
++
++#[test]
++fn array_rest_normal_destructuring() {
++    run_test_actions([
++        TestAction::run_harness(),
++        TestAction::run(indoc! {r#"
++            const [a, b, ...rest] = [1, 2, 3, 4, 5];
++            const [...all] = [10, 20];
++            const [x, ...empty] = [42];
++            const [...emptyAll] = [];
++        "#}),
++        TestAction::assert_eq("a", 1),
++        TestAction::assert_eq("b", 2),
++        TestAction::assert("arrayEquals(rest, [3, 4, 5])"),
++        TestAction::assert("arrayEquals(all, [10, 20])"),
++        TestAction::assert_eq("x", 42),
++        TestAction::assert("arrayEquals(empty, [])"),
++        TestAction::assert("arrayEquals(emptyAll, [])"),
++    ]);
++}
++
++#[test]
++fn array_rest_iterator_already_done_before_rest() {
++    run_test_actions([
++        TestAction::run_harness(),
++        TestAction::run(indoc! {r#"
++            let calls = 0;
++            const it = {
++                [Symbol.iterator]() {
++                    return this;
++                },
++                next() {
++                    calls++;
++                    if (calls === 1) {
++                        return { value: "first", done: false };
++                    }
++                    return { done: true };
++                }
++            };
++            const [a, b, ...rest] = it;
++        "#}),
++        TestAction::assert_eq("calls", 2),
++        TestAction::assert("a === 'first'"),
++        TestAction::assert("b === undefined"),
++        TestAction::assert("arrayEquals(rest, [])"),
++    ]);
++}
+diff --git a/src/vm/opcode/iteration/iterator.rs b/src/vm/opcode/iteration/iterator.rs
+index b053816..cb14367 100644
+--- a/src/vm/opcode/iteration/iterator.rs
++++ b/src/vm/opcode/iteration/iterator.rs
+@@ -362,7 +362,7 @@ impl IteratorToArray {
+ 
+         let mut values = Vec::new();
+ 
+-        loop {
++        while !iterator.done() {
+             let done = match iterator.step(context) {
+                 Ok(done) => done,
+                 Err(err) => {

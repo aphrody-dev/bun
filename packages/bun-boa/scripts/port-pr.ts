@@ -5,6 +5,8 @@
 //   bun scripts/port-pr.ts commit boa-dev/boa#5683 [note…]
 //                                                     working trees → commit (PR author, PR title) →
 //                                                     patches/<crate>-<version>/NNNN-<title>.patch
+//   bun scripts/port-pr.ts check boa-dev/boa#5683     does it apply as is?
+//   bun scripts/port-pr.ts export boa_engine-0.22.0   vendor/ commits past the series → its next patches
 //
 // Files outside a vendored crate (workspace Cargo.lock, repo-level test suites) are left out and listed.
 import { $ } from "bun";
@@ -77,10 +79,43 @@ function split(repo: string, diff: string): Split {
   }
   return { crates, outside };
 }
+// PORT_VENDOR=<dir>: work in clones under <dir> instead of vendor/ (one per concurrent porter); commits stay there
+// until `export` picks them up from vendor/.
+const work = Bun.env.PORT_VENDOR;
+const vendorRoot = work ?? join(root, "vendor");
+
+async function crateDir(name: string): Promise<string> {
+  const own = join(root, "vendor", name);
+  if (!(await Bun.file(join(own, ".patch-sha8")).exists())) {
+    await mkdir(join(root, "patches", name), { recursive: true });
+    console.log(await materialise(name));
+  }
+  const dir = join(vendorRoot, name);
+  if (work && !(await Bun.file(join(dir, ".git/HEAD")).exists())) await $`git clone -q ${own} ${dir}`.env(env);
+  return dir;
+}
+
+// Writes the commits of vendor/<name> that the series does not have yet as its next patches.
+async function exportSeries(name: string) {
+  const dir = join(root, "vendor", name);
+  const out = join(root, "patches", name);
+  const have = [...new Bun.Glob("*.patch").scanSync(out)].length;
+  const total = Number((await $`git rev-list --count vendor-base..HEAD`.cwd(dir).text()).trim());
+  if (total <= have) return console.log(`${name}: nothing to export`);
+  await $`git format-patch -q -N --zero-commit --no-signature --start-number ${have + 1} -o ${out} HEAD~${total - have}`.cwd(
+    dir,
+  );
+  console.log(`${name}: patches ${have + 1}..${total}`);
+}
 
 const [command, ref, ...note] = Bun.argv.slice(2);
+if (command === "export") {
+  for (const name of [ref, ...note]) if (name) await exportSeries(name);
+  process.exit(0);
+}
 const [, repo, number] = /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(ref ?? "") ?? [];
-if (!command || !repo || !number || !layout[repo]) throw new Error("usage: port-pr.ts apply|commit <owner/repo>#<n>");
+if (!command || !repo || !number || !layout[repo])
+  throw new Error("usage: port-pr.ts check|apply|commit <owner/repo>#<n> [note…] | export <crate>-<version>…");
 
 const pr = JSON.parse(await $`gh pr view ${number} -R ${repo} --json title,url,commits`.quiet().text()) as {
   title: string;
@@ -91,11 +126,7 @@ const { crates, outside } = split(repo, await $`gh pr diff ${number} -R ${repo}`
 
 if (command === "apply" || command === "check") {
   for (const [name, patch] of crates) {
-    const dir = join(root, "vendor", name);
-    if (!(await Bun.file(join(dir, ".patch-sha8")).exists())) {
-      await mkdir(join(root, "patches", name), { recursive: true });
-      console.log(await materialise(name));
-    }
+    const dir = await crateDir(name);
     const file = join(root, "build", `${repo.replace("/", "-")}-${number}-${name}.diff`);
     await Bun.write(file, patch);
     const clean = await $`git apply --check ${file}`.cwd(dir).nothrow().quiet();
@@ -105,7 +136,9 @@ if (command === "apply" || command === "check") {
         : clean.exitCode === 0
           ? await $`git apply ${file}`.cwd(dir).nothrow()
           : await $`git apply --reject ${file}`.cwd(dir).nothrow().quiet();
-    console.log(`${name}: ${clean.exitCode === 0 ? "applied" : `REJECTS\n${res.stderr.toString().trim()}`}`);
+    console.log(
+      `${name}: ${clean.exitCode === 0 ? "applied" : `REJECTS (diff: ${file})\n${res.stderr.toString().trim()}`}`,
+    );
   }
   if (outside.length) console.log(`outside the vendored crates: ${outside.join(", ")}`);
 } else if (command === "commit") {
@@ -113,29 +146,23 @@ if (command === "apply" || command === "check") {
   const date = pr.commits.at(-1)!.committedDate;
   const left = outside.length ? [`Left out, outside the crate: ${outside.join(", ")}.`] : [];
   const body = [`Port of ${pr.url}.`, ...note, ...left].join("\n\n");
-  const names = crates.size ? [...crates.keys()] : [];
-  for (const name of names) {
-    const dir = join(root, "vendor", name);
+  for (const name of crates.keys()) {
+    const dir = await crateDir(name);
     await $`git add -A -- . ':!.patch-sha8' ':!*.rej' ':!*.orig'`.cwd(dir);
     if ((await $`git diff --cached --quiet`.cwd(dir).nothrow()).exitCode === 0) {
       console.log(`${name}: nothing staged, skipped`);
       continue;
     }
-    await $`git commit -q --author ${`${author.name} <${author.email}>`} --date ${date} -m ${pr.title} -m ${body}`
-      .cwd(dir)
-      .env({
-        ...env,
-        GIT_AUTHOR_NAME: author.name,
-        GIT_AUTHOR_EMAIL: author.email,
-        GIT_AUTHOR_DATE: date,
-        GIT_COMMITTER_DATE: date,
-      });
-    const out = join(root, "patches", name);
-    const next = [...new Bun.Glob("*.patch").scanSync(out)].length + 1;
-    const file = (
-      await $`git format-patch -q -1 HEAD --zero-commit --no-signature --start-number ${next} -o ${out}`.cwd(dir).text()
-    ).trim();
-    console.log(`${name}: ${file || `patches/${name}/${String(next).padStart(4, "0")}-*.patch`}`);
+    await $`git commit -q -m ${pr.title} -m ${body}`.cwd(dir).env({
+      ...env,
+      GIT_AUTHOR_NAME: author.name,
+      GIT_AUTHOR_EMAIL: author.email,
+      GIT_AUTHOR_DATE: date,
+      GIT_COMMITTER_DATE: date,
+    });
+    if (work)
+      console.log(`${name}: committed ${(await $`git rev-parse --short HEAD`.cwd(dir).text()).trim()} in ${dir}`);
+    else await exportSeries(name);
   }
 } else {
   throw new Error(`unknown command ${command}`);
