@@ -51,7 +51,9 @@ fn main() {
         let name = name.map_or("None".to_owned(), |name| format!("Some({name:?})"));
         format!("ErrorCode {{ code: {code:?}, kind: ErrorKind::{kind}, name: {name} }}")
     };
-    // As src/codegen/generate-node-errors.ts, which writes `bun_jsc`'s.
+    // As src/codegen/generate-node-errors.ts, which writes `bun_jsc`'s. `ALL` is in its order, which is what
+    // `$makeErrorWithCode(<number>, …)` in src/js numbers a code by.
+    let mut all = Vec::new();
     for fields in &entries {
         let (code, constructor) = (fields[0], fields[1]);
         let name = fields
@@ -59,6 +61,7 @@ fn main() {
             .copied()
             .filter(|name| !name.is_empty() && *name != "undefined");
         let kind = kind_of(code, constructor);
+        all.push(code.to_owned());
         writeln!(
             out,
             "    pub const {code}: ErrorCode = {};",
@@ -76,6 +79,7 @@ fn main() {
         for other in fields.iter().skip(3).filter(|other| **other != "undefined") {
             let kind = kind_of(code, other);
             let variant = format!("{}_{other}", short.unwrap_or(code));
+            all.push(variant.clone());
             writeln!(
                 out,
                 "    pub const {variant}: ErrorCode = {};",
@@ -85,6 +89,15 @@ fn main() {
         }
     }
     assert!(!entries.is_empty(), "{}: no error codes", list.display());
+    writeln!(
+        out,
+        "    pub const ALL: &[ErrorCode] = &[{}];",
+        all.iter()
+            .map(|c| format!("ErrorCode::{c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .unwrap();
     out.push_str("}\n");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     fs::write(out_dir.join("error_codes.rs"), out).unwrap();

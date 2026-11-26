@@ -1,0 +1,440 @@
+// The intrinsics of Bun's builtin modules (src/js) on Boa: what JavaScriptCore has as private names (`$call`,
+// `$isPromise`, `$getInternalField`, …). src/builtins.rs puts its native operations on globalThis.__bun_intrinsics_ops__
+// (a script: no top-level `const`, which would clash with bun.ts's), and reads
+// back `{ require, esm }` from them. Each module's function takes the intrinsics it names as parameters (build.rs).
+//
+// A member intrinsic (`fn.$call(…)`, `map.$get(k)`) is a property named `__intrinsic__<name>`, which this file puts
+// on the prototypes, not enumerable. Unlike a private name, Object.getOwnPropertyNames lists it.
+(function install(native: {
+  compile(id: number): ((...intrinsics: unknown[]) => () => unknown) | undefined;
+  intrinsicNames(id: number): string[];
+  lazy(id: number): unknown;
+  nativeName(id: number): string;
+  className(id: number): string | undefined;
+  brand(value: unknown): string | undefined;
+  promiseState(promise: Promise<unknown>): 0 | 1 | 2;
+  promiseResult(promise: Promise<unknown>): unknown;
+  proxyField(proxy: object, field: 0 | 1): object | null | undefined;
+  makeError(code: number, message: string): Error;
+  errorCode(code: number): string;
+  specifiers: string[];
+  native: boolean[];
+  installed?: { require(id: number): unknown; esm(id: number): [string, unknown][] };
+}) {
+  const G = globalThis as any;
+  const { defineProperty, getOwnPropertyDescriptor, getOwnPropertyNames, getOwnPropertySymbols, keys } = Object;
+  const ArrayIsArray = Array.isArray;
+  const ReflectApply = Reflect.apply;
+
+  // ───────────────────────── member intrinsics ─────────────────────────
+  const member = (target: object, name: string, value: unknown) =>
+    defineProperty(target, "__intrinsic__" + name, { value, writable: true, configurable: true, enumerable: false });
+  member(Function.prototype, "call", Function.prototype.call);
+  member(Function.prototype, "apply", Function.prototype.apply);
+  member(Promise, "resolve", Promise.resolve);
+  member(Promise, "reject", Promise.reject);
+  member(Promise.prototype, "then", Promise.prototype.then);
+  for (const C of [Map, WeakMap, Set, WeakSet] as any[])
+    for (const name of ["get", "set", "has", "delete", "add", "clear", "forEach", "keys"])
+      if (name in C.prototype) member(C.prototype, name, C.prototype[name]);
+  member(String.prototype, "charCodeAt", String.prototype.charCodeAt);
+  member(Object, "defineProperty", defineProperty);
+  member(Object, "getOwnPropertyNames", getOwnPropertyNames);
+  member(Object, "getOwnPropertySymbols", getOwnPropertySymbols);
+  member(Object, "getOwnPropertyDescriptor", getOwnPropertyDescriptor);
+  member(G, "Array", Array);
+
+  // ───────────────────────── internal fields ─────────────────────────
+  const fields = new WeakMap<object, unknown[]>();
+  const fieldsOf = (object: object) => {
+    let list = fields.get(object);
+    if (!list) fields.set(object, (list = []));
+    return list;
+  };
+  const getInternalField = (object: object, index: number) => fieldsOf(object)[index];
+  const putInternalField = (object: object, index: number, value: unknown) => {
+    fieldsOf(object)[index] = value;
+  };
+
+  // ───────────────────────── promises ─────────────────────────
+  const settlers = new WeakMap<Promise<unknown>, { resolve(v: unknown): void; reject(e: unknown): void }>();
+  function newPromise() {
+    let settle: any;
+    const promise = new Promise((resolve, reject) => (settle = { resolve, reject }));
+    settlers.set(promise, settle);
+    return promise;
+  }
+  const resolvePromise = (promise: Promise<unknown>, value: unknown) => settlers.get(promise)?.resolve(value);
+  const rejectPromise = (promise: Promise<unknown>, reason: unknown) => settlers.get(promise)?.reject(reason);
+  const noop = () => {};
+  const pokePromiseAsHandled = (promise: Promise<unknown>) =>
+    void ReflectApply(Promise.prototype.then, promise, [noop, noop]);
+
+  // ───────────────────────── errors ─────────────────────────
+  const describeFunction = (fn: Function) => (fn.name ? `function ${fn.name}` : "function ");
+  function stringOf(value: unknown, quotes = false): string {
+    if (typeof value === "string") {
+      if (!quotes) return value;
+      const quote = value.includes("'") ? '"' : "'";
+      return quote + value.replaceAll(quote, "\\" + quote) + quote;
+    }
+    if (typeof value === "symbol") return value.toString();
+    if (typeof value === "function") return value.name ? `[Function: ${value.name}]` : "[Function (anonymous)]";
+    if (value === null || typeof value !== "object") return String(value);
+    if (typeof G.Bun?.inspect === "function") return G.Bun.inspect(value, { compact: true, breakLength: Infinity });
+    if (ArrayIsArray(value)) return `[ ${value.map(v => stringOf(v, true)).join(", ")} ]`;
+    const entries = keys(value).map(k => `${k}: ${stringOf((value as any)[k], true)}`);
+    const prefix = Object.getPrototypeOf(value) === null ? "[Object: null prototype] " : "";
+    return prefix + (entries.length ? `{ ${entries.join(", ")} }` : "{}");
+  }
+  // determineSpecificType in src/jsc/bindings/ErrorCode.cpp, after Node's lib/internal/errors.js.
+  function specificType(value: unknown): string {
+    if (value === null) return "null";
+    if (value === undefined) return "undefined";
+    switch (typeof value) {
+      case "number":
+        return `type number (${Object.is(value, -0) ? "-0" : value})`;
+      case "boolean":
+        return `type boolean (${value})`;
+      case "bigint":
+        return `type bigint (${value}n)`;
+      case "symbol":
+        return `type symbol (${value.toString()})`;
+      case "function":
+        return describeFunction(value);
+      case "string": {
+        const shown = value.length > 28 ? value.slice(0, 25) + "..." : value;
+        return value.includes("'") ? `type string ("${shown.replaceAll('"', '\\"')}")` : `type string ('${shown}')`;
+      }
+    }
+    const constructor = (value as any).constructor;
+    if (constructor) return `an instance of ${String(constructor.name)}`;
+    return stringOf(value);
+  }
+  const list = (items: string[]) =>
+    items.length <= 2
+      ? items.join(" or ")
+      : items.length === 3
+        ? `${items[0]}, ${items[1]}, or ${items[2]}`
+        : `${items.slice(0, -1).join(", ")}, or ${items.at(-1)}`;
+  const parameter = (name: string) =>
+    name.endsWith(" argument") ? name : `"${name}" ${name.includes(".") ? "property" : "argument"}`;
+  const PRIMITIVES = ["string", "function", "number", "object", "Function", "Object", "boolean", "bigint", "symbol"];
+  function invalidArgType(name: unknown, expected: unknown, actual: unknown) {
+    let message = `The ${parameter(String(name))} must be `;
+    if (ArrayIsArray(expected)) {
+      const types: string[] = [];
+      const instances: string[] = [];
+      const other: string[] = [];
+      for (const entry of expected.map(String)) {
+        if (PRIMITIVES.includes(entry)) types.push(entry.toLowerCase());
+        else if (/^[A-Z][a-zA-Z0-9]*$/.test(entry)) instances.push(entry);
+        else other.push(entry);
+      }
+      if (instances.length && types.includes("object")) {
+        types.splice(types.indexOf("object"), 1);
+        instances.push("Object");
+      }
+      if (types.length) {
+        message += `${types.length > 1 ? "one of type" : "of type"} ${list(types)}`;
+        if (instances.length || other.length) message += " or ";
+      }
+      if (instances.length) {
+        message += `an instance of ${list(instances)}`;
+        if (other.length) message += " or ";
+      }
+      if (other.length)
+        message +=
+          other.length > 1 ? `one of ${list(other)}` : (other[0].toLowerCase() !== other[0] ? "an " : "") + other[0];
+    } else {
+      const text = String(expected);
+      const phrase = text.includes(" ") && !text.includes(", ") && !text.includes(" or ");
+      message += phrase ? (/[A-Z]/.test(text) ? "an " : "") + text : `of type ${text}`;
+    }
+    return `${message}. Received ${specificType(actual)}`;
+  }
+  const separated = (digits: string) => {
+    const sign = digits.startsWith("-") ? "-" : "";
+    let rest = sign ? digits.slice(1) : digits;
+    let out = "";
+    while (rest.length > 3) {
+      out = "_" + rest.slice(-3) + out;
+      rest = rest.slice(0, -3);
+    }
+    return sign + rest + out;
+  };
+  function outOfRangeReceived(input: unknown) {
+    if (typeof input === "number") {
+      if (Number.isInteger(input) && Math.abs(input) > 2 ** 32) return separated(String(input));
+      if (Object.is(input, -0)) return "-0";
+    } else if (typeof input === "bigint") {
+      const digits = String(input);
+      return (input > 2n ** 32n || input < -(2n ** 32n) ? separated(digits) : digits) + "n";
+    }
+    return stringOf(input);
+  }
+  // jsFunctionMakeErrorWithCode in src/jsc/bindings/ErrorCode.cpp.
+  const MESSAGES: Record<string, (...args: any[]) => string> = {
+    ERR_INVALID_ARG_TYPE: invalidArgType,
+    ERR_INVALID_ARG_VALUE: (name, value, reason = "is invalid") =>
+      `The ${String(name).includes(".") ? "property" : "argument"} '${String(name)}' ${reason}. Received ${stringOf(value, true)}`,
+    ERR_OUT_OF_RANGE: (name, range, input) =>
+      `The value of "${name}" is out of range. It must be ${range}. Received ${outOfRangeReceived(input)}`,
+    ERR_MISSING_ARGS: (...names) => {
+      const all = ArrayIsArray(names[0]) ? names[0] : names;
+      const wrapped = all.map((name: unknown) =>
+        ArrayIsArray(name) ? name.map(n => `"${n}"`).join(" or ") : `"${name}"`,
+      );
+      return `The ${list(wrapped)} argument${all.length > 1 ? "s" : ""} must be specified`;
+    },
+    ERR_UNKNOWN_ENCODING: encoding => `Unknown encoding: ${stringOf(encoding)}`,
+    ERR_INVALID_IP_ADDRESS: address => `Invalid IP address: ${address}`,
+    ERR_OPERATION_FAILED: reason => `Operation failed: ${stringOf(reason)}`,
+    ERR_INVALID_THIS: type => `Value of "this" must be of type ${type}`,
+    ERR_METHOD_NOT_IMPLEMENTED: method => `The ${method} method is not implemented`,
+    ERR_STREAM_DESTROYED: method => `Cannot call ${method} after a stream was destroyed`,
+    ERR_STREAM_ALREADY_FINISHED: method => `Cannot call ${method} after a stream was finished`,
+    ERR_INVALID_STATE: state => `Invalid state: ${state}`,
+    ERR_USE_AFTER_CLOSE: what => `${what} was closed`,
+    ERR_INVALID_URL_SCHEME: scheme => `The URL must be of scheme ${scheme}`,
+  };
+  function makeErrorWithCode(code: number, ...args: unknown[]) {
+    const format = MESSAGES[native.errorCode(code)];
+    return native.makeError(code, format ? format(...args) : args.map(arg => stringOf(arg)).join(" "));
+  }
+  function makeAbortError(message = "The operation was aborted", options?: { cause?: unknown }) {
+    const error: any = new Error(message, options?.cause === undefined ? undefined : { cause: options.cause });
+    error.name = "AbortError";
+    error.code = "ABORT_ERR";
+    return error;
+  }
+
+  // ───────────────────────── the module registry ─────────────────────────
+  const internalModuleRegistry = {};
+  // What Boa has no implementation of yet: a module that reads one still loads. Calling it, or what it holds
+  // (`const { a, b } = $cpp(…)`, `[a, b] = $cpp(…)`), throws and names it.
+  const missing = (what: string): any =>
+    new Proxy(
+      function () {
+        throw new Error(`${what} is not implemented on Boa yet`);
+      },
+      {
+        get(target, key) {
+          if (key === Symbol.iterator)
+            return function* () {
+              for (let i = 0; ; i++) yield missing(`${what}[${i}]`);
+            };
+          if (typeof key === "symbol" || key === "then" || key === "prototype") return (target as any)[key];
+          // `binding.readSync.bind(binding)` runs when a module loads; the function it makes is what throws.
+          if (key === "bind") return () => missing(what);
+          return missing(`${what}.${key}`);
+        },
+        construct() {
+          throw new Error(`${what} is not implemented on Boa yet`);
+        },
+      },
+    );
+  const intrinsic = (name: string) => (name in intrinsics ? intrinsics[name] : missing("$" + name));
+
+  const NATIVE_MODULES: Record<string, () => unknown> = {
+    "bun": () => G.Bun,
+    "node:process": () => G.process,
+    "node:buffer": () => ({ Buffer: G.Buffer, kMaxLength: 2 ** 32, constants: { MAX_LENGTH: 2 ** 32 } }),
+    "node:util/types": () => utilTypes,
+    "node:constants": () => ({ ...processBindingConstants.os, ...processBindingConstants.fs }),
+  };
+  function createInternalModuleById(id: number) {
+    const existing = getInternalField(internalModuleRegistry, id);
+    if (existing !== undefined) return existing;
+    let exports: unknown;
+    if (native.native[id]) {
+      const make = NATIVE_MODULES[native.specifiers[id]];
+      if (!make) throw new Error(`${native.specifiers[id]} is not implemented on Boa yet`);
+      exports = make();
+    } else {
+      const factory = native.compile(id)!;
+      exports = ReflectApply(factory(...native.intrinsicNames(id).map(intrinsic)), undefined, []);
+    }
+    putInternalField(internalModuleRegistry, id, exports);
+    return exports;
+  }
+
+  const lazyValues = new Map<number, unknown>();
+  function lazy(id: number) {
+    if (lazyValues.has(id)) return lazyValues.get(id);
+    const value = native.lazy(id) ?? missing(native.nativeName(id));
+    lazyValues.set(id, value);
+    return value;
+  }
+
+  // ───────────────────────── node:util/types and process.binding('constants') ─────────────────────────
+  const brand = native.brand;
+  const isTypedArray = (value: unknown) => brand(value) === "TypedArray";
+  const tag = (value: unknown) =>
+    isTypedArray(value)
+      ? (Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag)!.get!.call(
+          value,
+        ) as string)
+      : undefined;
+  const utilTypes = {
+    isPromise: (v: unknown) => brand(v) === "Promise",
+    isMap: (v: unknown) => brand(v) === "Map",
+    isSet: (v: unknown) => brand(v) === "Set",
+    isWeakMap: (v: unknown) => brand(v) === "WeakMap",
+    isWeakSet: (v: unknown) => brand(v) === "WeakSet",
+    isRegExp: (v: unknown) => brand(v) === "RegExp",
+    isProxy: (v: unknown) => brand(v) === "Proxy",
+    isDataView: (v: unknown) => brand(v) === "DataView",
+    isArrayBuffer: (v: unknown) => brand(v) === "ArrayBuffer",
+    isAnyArrayBuffer: (v: unknown) => brand(v) === "ArrayBuffer" || v instanceof SharedArrayBuffer,
+    isSharedArrayBuffer: (v: unknown) => v instanceof SharedArrayBuffer,
+    isArrayBufferView: (v: unknown) => ArrayBuffer.isView(v),
+    isTypedArray,
+    isUint8Array: (v: unknown) => tag(v) === "Uint8Array",
+    isUint8ClampedArray: (v: unknown) => tag(v) === "Uint8ClampedArray",
+    isUint16Array: (v: unknown) => tag(v) === "Uint16Array",
+    isUint32Array: (v: unknown) => tag(v) === "Uint32Array",
+    isInt8Array: (v: unknown) => tag(v) === "Int8Array",
+    isInt16Array: (v: unknown) => tag(v) === "Int16Array",
+    isInt32Array: (v: unknown) => tag(v) === "Int32Array",
+    isFloat16Array: (v: unknown) => tag(v) === "Float16Array",
+    isFloat32Array: (v: unknown) => tag(v) === "Float32Array",
+    isFloat64Array: (v: unknown) => tag(v) === "Float64Array",
+    isBigInt64Array: (v: unknown) => tag(v) === "BigInt64Array",
+    isBigUint64Array: (v: unknown) => tag(v) === "BigUint64Array",
+    isDate: (v: unknown) => v instanceof Date,
+    isNativeError: (v: unknown) => v instanceof Error,
+    isGeneratorFunction: (v: unknown) =>
+      typeof v === "function" && /^(async\s+)?function\s*\*/.test(Function.prototype.toString.call(v)),
+    isAsyncFunction: (v: unknown) => typeof v === "function" && /^async\b/.test(Function.prototype.toString.call(v)),
+    isBoxedPrimitive: (v: unknown) =>
+      v instanceof Number || v instanceof String || v instanceof Boolean || v instanceof BigInt || v instanceof Symbol,
+    isNumberObject: (v: unknown) => v instanceof Number,
+    isStringObject: (v: unknown) => v instanceof String,
+    isBooleanObject: (v: unknown) => v instanceof Boolean,
+    isBigIntObject: (v: unknown) => v instanceof BigInt,
+    isSymbolObject: (v: unknown) => v instanceof Symbol,
+    isMapIterator: (v: unknown) => Object.prototype.toString.call(v) === "[object Map Iterator]",
+    isSetIterator: (v: unknown) => Object.prototype.toString.call(v) === "[object Set Iterator]",
+    isGeneratorObject: (v: unknown) => Object.prototype.toString.call(v) === "[object Generator]",
+    isModuleNamespaceObject: (v: unknown) => Object.prototype.toString.call(v) === "[object Module]",
+    isArgumentsObject: (v: unknown) => Object.prototype.toString.call(v) === "[object Arguments]",
+    isExternal: () => false,
+    isKeyObject: () => false,
+    isCryptoKey: () => false,
+  };
+  const processBindingConstants: Record<string, Record<string, unknown>> = { os: {}, fs: {}, crypto: {}, zlib: {} };
+
+  // ───────────────────────── the intrinsics ─────────────────────────
+  const natives = new Proxy({} as Record<string | symbol, unknown>, {
+    get: (snapshot, key) => (key in snapshot ? snapshot[key] : G[key]),
+  });
+  for (const name of [
+    "setTimeout",
+    "setInterval",
+    "setImmediate",
+    "clearTimeout",
+    "clearInterval",
+    "clearImmediate",
+    "queueMicrotask",
+  ])
+    if (name in G) (natives as any)[name] = G[name];
+
+  const intrinsics: Record<string, unknown> = {
+    undefined: undefined,
+    Infinity,
+    Array,
+    ArrayBuffer,
+    String,
+    Object,
+    Promise,
+    Map,
+    RegExp,
+    Uint8Array,
+    Uint8ClampedArray,
+    Uint16Array,
+    Uint32Array,
+    Int8Array,
+    Int16Array,
+    Int32Array,
+    Float16Array: G.Float16Array,
+    Float32Array,
+    Float64Array,
+    BigInt64Array,
+    BigUint64Array,
+    Buffer: G.Buffer,
+    AbortSignal: G.AbortSignal,
+    ReadableStream: G.ReadableStream,
+    WritableStream: G.WritableStream,
+    TransformStream: G.TransformStream,
+    min: Math.min,
+    isFinite: Number.isFinite,
+    natives,
+    lazy,
+    internalModuleRegistry,
+    createInternalModuleById,
+    getInternalField,
+    putInternalField,
+    asyncContext: {},
+    makeErrorWithCode,
+    makeAbortError,
+    makeTypeError: (message: string) => new TypeError(message),
+    throwTypeError: (message: string) => {
+      throw new TypeError(message);
+    },
+    throwRangeError: (message: string) => {
+      throw new RangeError(message);
+    },
+    isCallable: (v: unknown) => typeof v === "function",
+    isObject: (v: unknown) => (typeof v === "object" && v !== null) || typeof v === "function",
+    isArray: ArrayIsArray,
+    isJSArray: (v: unknown) => brand(v) === "Array",
+    isPromise: utilTypes.isPromise,
+    isMap: utilTypes.isMap,
+    isSet: utilTypes.isSet,
+    isRegExpObject: utilTypes.isRegExp,
+    isProxyObject: utilTypes.isProxy,
+    isTypedArrayView: (v: unknown) => ArrayBuffer.isView(v),
+    isUndefinedOrNull: (v: unknown) => v == null,
+    proxyFieldTarget: 0,
+    proxyFieldHandler: 1,
+    getProxyInternalField: (proxy: object, field: 0 | 1) => native.proxyField(proxy, field),
+    inherits: (id: number, value: unknown) => {
+      const name = native.className(id);
+      return name !== undefined && typeof G[name] === "function" && value instanceof G[name];
+    },
+    toLength: (v: unknown) => {
+      const n = Math.trunc(Number(v)) || 0;
+      return n <= 0 ? 0 : Math.min(n, Number.MAX_SAFE_INTEGER);
+    },
+    newArrayWithSize: (n: number) => new Array(n),
+    arrayPush: (array: unknown[], value: unknown) =>
+      void defineProperty(array, array.length, { value, writable: true, enumerable: true, configurable: true }),
+    getByIdDirect: (object: any, key: PropertyKey) => object[key],
+    putByValDirect: (object: object, key: PropertyKey, value: unknown) =>
+      void defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true }),
+    putByIdDirectPrivate: (object: object, key: string, value: unknown) => member(object, key, value),
+    newPromise,
+    resolvePromise,
+    rejectPromise,
+    resolvePromiseWithFirstResolvingFunctionCallCheck: resolvePromise,
+    rejectPromiseWithFirstResolvingFunctionCallCheck: rejectPromise,
+    pokePromiseAsHandled,
+    peekPromiseStatus: native.promiseState,
+    peekPromiseSettledValue: native.promiseResult,
+    processBindingConstants,
+    requireMap: new Map(),
+  };
+
+  native.installed = {
+    require: createInternalModuleById,
+    esm(id: number) {
+      const exports: any = createInternalModuleById(id);
+      const pairs: [string, unknown][] = [["default", exports]];
+      if ((typeof exports === "object" && exports !== null) || typeof exports === "function")
+        for (const key of keys(exports)) if (key !== "default") pairs.push([key, exports[key]]);
+      return pairs;
+    },
+  };
+})((globalThis as any).__bun_intrinsics_ops__);
+delete (globalThis as any).__bun_intrinsics_ops__;

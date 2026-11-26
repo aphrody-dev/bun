@@ -37,6 +37,26 @@ async function generated() {
   return `codegen: ${commands.length + 1} generators`;
 }
 
+// src/js as the Boa build embeds it (build.rs): bundle-modules.ts writes build/debug/js-boa when BUN_BOA_JS_DIR
+// names it. The trim's builtin-uses.json is an output of the native codegen, which this build does not run: without
+// it every builtin is kept.
+async function boaModules() {
+  if (!(await Bun.file(join(repo, "build/debug/build.ninja")).exists()))
+    await $`bun run build --configure-only`.cwd(repo).quiet();
+  const command = (await $`ninja -C build/debug -t commands`.cwd(repo).quiet().text())
+    .split("\n")
+    .find(line => line.includes("src/codegen/bundle-modules.ts"));
+  if (!command) throw new Error("build.ninja has no bundle-modules.ts command");
+  const uses = command.match(/ --builtin-uses=(\S+)/);
+  const runnable = uses && !(await Bun.file(uses[1]).exists()) ? command.replace(uses[0], "") : command;
+  const out = join(repo, "build/debug/js-boa");
+  await $`sh -c ${runnable}`
+    .cwd(join(repo, "build/debug"))
+    .env({ ...process.env, BUN_BOA_JS_DIR: out, CLAUDECODE: "1" })
+    .quiet();
+  return `codegen: src/js for Boa in ${out}`;
+}
+
 // Every `.bind.ts` of a member of this workspace, as Rust against bun_js. The crate is the member's package.
 async function bunJsBindings() {
   const root = join(import.meta.dir, "..");
@@ -110,6 +130,7 @@ const steps = [
   rustDep(rustArgon2, "rust-argon2"),
   $`bun scripts/vendor.ts`.cwd(join(import.meta.dir, "..")).text(),
   generated(),
+  boaModules(),
   bunJsBindings(),
   fonts(),
 ];

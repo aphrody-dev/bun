@@ -319,3 +319,18 @@ fn semver_is_bound_through_bun_js() {
     assert!(all.contains(" 4 pass") && all.contains(" 0 fail"), "{all}");
     assert!(out.status.success(), "{all}");
 }
+
+/// Bun's builtin modules (src/js), `require` and `__dirname` in an ES module, CommonJS modules, tsconfig.json
+/// `paths`, and the helpers the transpiler imports from `bun:wrap` (`using`).
+#[test]
+fn builtin_modules_require_and_commonjs() {
+    let out = bun().args(["run", "main.ts"]).current_dir(fixtures().join("modules")).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    let expected = "function / function true true
+mapped 1 2 counter.cjs
+true 3 modules /
+using true
+";
+    assert_eq!(stdout, expected, "stderr: {stderr}");
+    assert!(out.status.success(), "stderr: {stderr}");
+}
