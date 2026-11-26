@@ -11,6 +11,7 @@
 //! - [`server`]: `Bun.serve()` on `bun_http_rs`'s server.
 
 pub mod api;
+pub mod crypto;
 mod engine;
 pub mod event_loop;
 pub mod generated_bindgen;
