@@ -20,7 +20,7 @@ const roots = dirs.length ? dirs : ["test/js/bun", "test/js/node", "test/js/web"
 const TIMEOUT_MS = Number(Bun.env.BUN_BOA_TEST_TIMEOUT ?? 30_000);
 const JOBS = Number(Bun.env.BUN_BOA_TEST_JOBS ?? availableParallelism());
 
-let inPartition = (_: string) => true;
+let inPartition: (file: string) => boolean = () => true;
 if (values.partition) {
   const m = values.partition.match(/^hash:(\d+)(?:-(\d+))?\/(\d+)$/);
   if (!m) throw new Error(`--partition ${values.partition}: expected hash:M/N or hash:M1-M2/N`);

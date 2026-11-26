@@ -18,7 +18,9 @@ const scratch = `/srv/xbuild/scratch/${name}`;
 const exe = `${scratch}/bun-boa`;
 type Result = { file: string; pass: number; fail: number; skip: number; todo: number; exit: number | null; ms: number };
 
-const ssh = (host: string, script: string) => $`ssh -o BatchMode=yes ${host} ${script}`;
+// The revision the hosts get, before anything else can move HEAD.
+const revision = (await $`git -C ${root} rev-parse --short HEAD`.text()).trim();
+const ssh = (host: string, script: string) => $`ssh -o BatchMode=yes ${host} ${script}`.quiet();
 // The builder knows the other hosts under other aliases: it is pointed at the address this machine resolves them to.
 const address = async (host: string) => {
   const config = Object.fromEntries((await $`ssh -G ${host}`.text()).split("\n").map(line => line.split(" ", 2)));
@@ -118,10 +120,13 @@ for (const r of results) {
     if (key) groups.set(key, [...(groups.get(key) ?? []), r]);
 }
 
-const previous = (await Bun.file(out).exists()) ? await Bun.file(out).json() : undefined;
+// Only a report over the same directories is comparable.
+const last = (await Bun.file(out).exists()) ? await Bun.file(out).json() : undefined;
+const previous = last?.roots?.join() === roots.join() ? last : undefined;
 const report = {
-  revision: (await $`git -C ${root} rev-parse --short HEAD`.text()).trim(),
+  revision,
   date: new Date().toISOString(),
+  roots,
   hosts: runs.map(({ host, partition, results, ms }) => ({ host, partition, files: results.length, ms })),
   wall_ms: Math.round(performance.now() - started),
   total: summary(results),
