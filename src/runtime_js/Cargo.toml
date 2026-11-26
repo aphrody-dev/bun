@@ -29,6 +29,7 @@ bun_node_path = { path = "../node_path" }
 bun_paths = { path = "../paths" }
 bun_sys = { path = "../sys" }
 bun_text_diff = { path = "../text_diff" }
+bun_threading = { path = "../threading" }
 const_format = "0.2"
 getrandom = "0.4"
 libc = "0.2"

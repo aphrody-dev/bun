@@ -2,13 +2,7 @@
 
 use bun_js::{JSGlobalObject, JSObject, JSValue};
 
-/// What bun_crash_handler provides to a binary of Bun, as src/sys/native_test_shims.rs does for bun_sys's tests.
-#[unsafe(no_mangle)]
-extern "Rust" fn __bun_crash_handler_dump_stack_trace(
-    _first_address: Option<usize>,
-    _limits: bun_core::DumpStackTraceOptions,
-) {
-}
+use bun_sema_standalone as _;
 
 /// A realm with `Blob`, `File` and `Bun.{file,write,stdin,stdout,stderr}`.
 fn with_runtime(f: impl FnOnce(&JSGlobalObject)) {

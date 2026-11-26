@@ -7,6 +7,7 @@
 //!
 //! - [`event_loop`]: Boa's job executor with Bun's turn, over `bun_http_rs`'s reactor.
 //! - [`timer`]: `setTimeout`, `setInterval`, `setImmediate`.
+//! - `work_pool`: `EventLoop::run_on_work_pool`, what the async functions of node:fs run on.
 //! - [`webcore`]: `Blob`, `Headers`, `Request`, `Response`, `fetch()` on `bun_http_rs`'s client.
 //! - [`server`]: `Bun.serve()` on `bun_http_rs`'s server.
 
@@ -21,6 +22,7 @@ pub mod test_runner;
 pub mod timer;
 pub mod web;
 pub mod webcore;
+mod work_pool;
 
 use boa_engine::property::{Attribute, PropertyDescriptor};
 use boa_engine::{Context, JsResult, JsString, JsValue};

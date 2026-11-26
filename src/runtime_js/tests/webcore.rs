@@ -2,19 +2,7 @@
 //! Bun answers for the same expression (test/js/web/fetch/headers.test.ts, response.test.ts).
 
 use bun_js::JSGlobalObject;
-
-// What bun_crash_handler provides to a binary of Bun, as src/sys/native_test_shims.rs does for bun_sys's tests.
-#[unsafe(no_mangle)]
-extern "Rust" fn __bun_crash_handler_out_of_memory() -> ! {
-    panic!("out of memory");
-}
-
-#[unsafe(no_mangle)]
-extern "Rust" fn __bun_crash_handler_dump_stack_trace(
-    _first_address: Option<usize>,
-    _limits: bun_core::DumpStackTraceOptions,
-) {
-}
+use bun_sema_standalone as _;
 
 fn check(cases: &[(&str, &str)]) {
     JSGlobalObject::with_new(|global| {
