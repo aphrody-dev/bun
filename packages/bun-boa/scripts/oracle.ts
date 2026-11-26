@@ -149,7 +149,7 @@ function around(text: Buffer, at: number): string {
 }
 
 function compare(id: string, checkpoint: Checkpoint, a: Output, b: Output): Record {
-  for (const stream of ["exit", "stdout", "stderr"] as const) {
+  for (const stream of ["stdout", "stderr", "exit"] as const) {
     if (a[stream] === b[stream]) continue;
     const [x, y] = [Buffer.from(a[stream]), Buffer.from(b[stream])];
     const at = firstDifference(x, y);
@@ -253,7 +253,7 @@ async function coordinate() {
   // The corpus is n1's tree; packages are installed there once, and n1 copies all of it to the others.
   await ssh(
     builder,
-    `set -e; rsync -a --delete --exclude node_modules --exclude .git ${tree}/test/ ${DIR}/corpus/test/; ` +
+    `set -e; mkdir -p ${DIR}/corpus/packages; rsync -a --delete --exclude node_modules --exclude .git ${tree}/test/ ${DIR}/corpus/test/; ` +
       `cp -f ${tree}/bunfig.toml ${tree}/tsconfig.json ${tree}/tsconfig.base.json ${DIR}/corpus/; ` +
       // test/package.json links these from the root of the repository.
       `for p in bun-types bun-plugin-svelte; do rsync -a --delete --exclude node_modules ${tree}/packages/$p/ ${DIR}/corpus/packages/$p/; done`,
@@ -296,7 +296,9 @@ async function coordinate() {
       const r = await ssh(
         host,
         `cd ${DIR} && bun oracle.ts worker ${DIR} ${i + 1}/${hosts.length} ${values.limit ?? ""}`,
-      ).nothrow();
+      )
+        .nothrow()
+        .quiet();
       if (r.exitCode) console.error(`oracle: ${host} exited ${r.exitCode}: ${r.stderr.toString().slice(-2000)}`);
       return r.stdout
         .toString()
