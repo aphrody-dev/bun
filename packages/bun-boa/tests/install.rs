@@ -3,7 +3,7 @@
 #![cfg(feature = "install")]
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -76,7 +76,7 @@ struct Registry {
     requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
-fn respond(mut stream: TcpStream, port: u16, requests: &std::sync::Mutex<Vec<String>>) {
+fn respond(mut stream: impl Read + Write, origin: &str, requests: &std::sync::Mutex<Vec<String>>) {
     let mut request = Vec::new();
     let mut buf = [0u8; 4096];
     while !request.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -91,7 +91,7 @@ fn respond(mut stream: TcpStream, port: u16, requests: &std::sync::Mutex<Vec<Str
     let packages = ["foo", "bar"];
     let (status, body): (&str, Vec<u8>) = if let Some(name) = packages.iter().find(|name| path == format!("/{name}")) {
         let packument = format!(
-            r#"{{"name":"{name}","dist-tags":{{"latest":"1.0.0"}},"versions":{{"1.0.0":{{"name":"{name}","version":"1.0.0","dist":{{"tarball":"http://127.0.0.1:{port}/{name}/-/{name}-1.0.0.tgz"}}}}}}}}"#
+            r#"{{"name":"{name}","dist-tags":{{"latest":"1.0.0"}},"versions":{{"1.0.0":{{"name":"{name}","version":"1.0.0","dist":{{"tarball":"{origin}{name}/-/{name}-1.0.0.tgz"}}}}}}}}"#
         );
         ("200 OK", packument.into_bytes())
     } else if let Some(name) = packages.iter().find(|name| path == format!("/{name}/-/{name}-1.0.0.tgz")) {
@@ -104,20 +104,59 @@ fn respond(mut stream: TcpStream, port: u16, requests: &std::sync::Mutex<Vec<Str
     let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(&body);
+    let _ = stream.flush();
 }
 
 fn registry() -> Registry {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let origin = format!("http://127.0.0.1:{}/", listener.local_addr().unwrap().port());
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let log = requests.clone();
+    let (log, served) = (requests.clone(), origin.clone());
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let log = log.clone();
-            std::thread::spawn(move || respond(stream, port, &log));
+            let (log, origin) = (log.clone(), served.clone());
+            std::thread::spawn(move || respond(stream, &origin, &log));
         }
     });
-    Registry { url: format!("http://127.0.0.1:{port}/"), requests }
+    Registry { url: origin, requests }
+}
+
+fn tls_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls").join(name)
+}
+
+/// The same registry over TLS, as `https://localhost:<port>/`, with a certificate of tests/fixtures/tls's CA.
+fn tls_registry() -> Registry {
+    use rustls::pki_types::pem::PemObject;
+    let certs = rustls::pki_types::CertificateDer::pem_file_iter(tls_fixture("server.crt"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_file(tls_fixture("server-key.txt")).unwrap();
+    let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(rustls_rustcrypto::provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+    let config = std::sync::Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("https://localhost:{}/", listener.local_addr().unwrap().port());
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (log, served) = (requests.clone(), origin.clone());
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let (log, origin, config) = (log.clone(), served.clone(), config.clone());
+            std::thread::spawn(move || {
+                let connection = rustls::ServerConnection::new(config).unwrap();
+                let mut tls = rustls::StreamOwned::new(connection, stream);
+                respond(&mut tls, &origin, &log);
+                tls.conn.send_close_notify();
+                let _ = tls.flush();
+            });
+        }
+    });
+    Registry { url: origin, requests }
 }
 
 fn project(name: &str, package_json: &str) -> PathBuf {
@@ -189,4 +228,24 @@ fn installs_a_file_dependency() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(read(dir.join("node_modules/local/package.json")).contains("2.0.0"));
     assert!(read(dir.join("bun.lock")).contains("local@file:local"), "{}", read(dir.join("bun.lock")));
+}
+
+/// HTTPS on rustls: the registry's certificate is trusted with `--cafile`, and without it the install fails on it.
+#[test]
+fn installs_over_tls_with_a_ca_file() {
+    let registry = tls_registry();
+    let dir = project("tls", r#"{"name":"app","dependencies":{"foo":"^1.0.0"}}"#);
+    let cafile = format!("--cafile={}", tls_fixture("ca.crt").display());
+
+    let out = run(&dir, &registry, &["install", &cafile]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(read(dir.join("node_modules/foo/index.js")), "module.exports = \"foo\";\n");
+    let requests = registry.requests.lock().unwrap().clone();
+    assert!(requests.contains(&"/foo/-/foo-1.0.0.tgz".to_owned()), "{requests:?}");
+
+    let dir = project("tls-untrusted", r#"{"name":"app","dependencies":{"foo":"^1.0.0"}}"#);
+    let out = run(&dir, &registry, &["install"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("UNABLE_TO_GET_ISSUER_CERT_LOCALLY"), "{}", text(&out));
+    assert!(!dir.join("node_modules/foo").exists());
 }

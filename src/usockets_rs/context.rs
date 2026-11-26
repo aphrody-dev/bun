@@ -255,6 +255,15 @@ unsafe fn connect_resolved(
     unsafe { new_connect_socket(group, fd, kind, options, ext_size) }
 }
 
+/// The SSL of a client socket, on its context, named for `host` until on_open sets SNI.
+unsafe fn with_tls(s: *mut us_socket_t, ssl_ctx: *mut c_void, host: Option<&CStr>) -> *mut us_socket_t {
+    if !s.is_null() && !ssl_ctx.is_null() {
+        // SAFETY: a socket just made, and the caller's context.
+        unsafe { crate::tls::attach(s, ssl_ctx.cast(), host) };
+    }
+    s
+}
+
 /// A `us_socket_t` (`*has_dns_resolved = 1`) for an address, else a `us_connecting_socket_t` that resolves the name;
 /// null if the connect failed at once.
 #[unsafe(no_mangle)]
@@ -272,10 +281,6 @@ pub unsafe extern "C" fn us_socket_group_connect(
 ) -> *mut c_void {
     // SAFETY: the caller passes an initialized group, NUL-terminated strings (or a null local host) and an out-int.
     unsafe {
-        if !ssl_ctx.is_null() {
-            set_errno(libc::EPROTONOSUPPORT);
-            return ptr::null_mut();
-        }
         let port = port as u16;
         let local = (!local_host.is_null())
             .then(|| crate::dns::parse_ip(CStr::from_ptr(local_host), local_port as u16))
@@ -283,7 +288,8 @@ pub unsafe extern "C" fn us_socket_group_connect(
         let host = CStr::from_ptr(host);
         if let Some(address) = crate::dns::parse_ip(host, port) {
             *has_dns_resolved = 1;
-            return connect_resolved(group, kind, &address, local.as_ref(), options, socket_ext_size).cast();
+            let s = connect_resolved(group, kind, &address, local.as_ref(), options, socket_ext_size);
+            return with_tls(s, ssl_ctx, Some(host)).cast();
         }
         *has_dns_resolved = 0;
         let loop_ = (*group).loop_;
@@ -298,6 +304,10 @@ pub unsafe extern "C" fn us_socket_group_connect(
         (*c).long_timeout = 255;
         (*c).pending_resolve_callback = true;
         (*c).port = port;
+        if !ssl_ctx.is_null() {
+            crate::tls::SSL_CTX_up_ref(ssl_ctx.cast());
+            (*c).ssl_ctx = ssl_ctx.cast();
+        }
         group_link_connecting(group, c);
         (*loop_).num_polls += 1;
         crate::dns::resolve_for(c, host);
@@ -317,10 +327,6 @@ pub unsafe extern "C" fn us_socket_group_connect_unix(
 ) -> *mut us_socket_t {
     // SAFETY: the caller passes an initialized group and `pathlen` bytes at `path`.
     unsafe {
-        if !ssl_ctx.is_null() {
-            set_errno(libc::EPROTONOSUPPORT);
-            return ptr::null_mut();
-        }
         let mut addr: libc::sockaddr_un = core::mem::zeroed();
         if pathlen >= addr.sun_path.len() {
             set_errno(libc::ENAMETOOLONG);
@@ -333,7 +339,7 @@ pub unsafe extern "C" fn us_socket_group_connect_unix(
         if fd == -1 {
             return ptr::null_mut();
         }
-        new_connect_socket(group, fd, kind, options, socket_ext_size)
+        with_tls(new_connect_socket(group, fd, kind, options, socket_ext_size), ssl_ctx, None)
     }
 }
 
@@ -427,10 +433,16 @@ pub(crate) unsafe fn us_internal_socket_after_open(s: *mut us_socket_t, error: c
                 }
                 other = next;
             }
+            // TLS now that the winner is known.
+            with_tls(s, (*c).ssl_ctx.cast(), None);
             us_connecting_socket_free(c);
             (*s).connect_state = ptr::null_mut();
         }
-        us_dispatch_open(s, 1, ptr::null_mut(), 0);
+        if (*s).ssl.is_null() {
+            us_dispatch_open(s, 1, ptr::null_mut(), 0);
+        } else {
+            crate::tls::on_open(s);
+        }
     }
 }
 
@@ -442,6 +454,9 @@ unsafe fn connecting_detach(c: *mut us_connecting_socket_t) {
         if !(*c).group.is_null() {
             group_unlink_connecting((*c).group, c);
             (*c).group = ptr::null_mut();
+        }
+        if !(*c).ssl_ctx.is_null() {
+            crate::tls::SSL_CTX_free(core::mem::replace(&mut (*c).ssl_ctx, ptr::null_mut()));
         }
     }
 }

@@ -85,9 +85,15 @@ pub unsafe extern "C" fn us_socket_get_fd(s: *const us_socket_t) -> c_int {
     fd_of(s)
 }
 
-/// The fd as a pointer, for a socket without TLS.
+/// The `SSL` of a TLS socket, else the fd as a pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn us_socket_get_native_handle(s: *mut us_socket_t) -> *mut c_void {
+    // SAFETY: the caller passes a live socket.
+    unsafe {
+        if !(*s).ssl.is_null() {
+            return crate::tls::native_handle(s);
+        }
+    }
     fd_of(s) as usize as *mut c_void
 }
 
@@ -106,7 +112,10 @@ pub unsafe extern "C" fn us_socket_is_established(s: *const us_socket_t) -> c_in
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn us_socket_is_shut_down(s: *const us_socket_t) -> c_int {
     // SAFETY: the caller passes a live socket.
-    unsafe { c_int::from(us_internal_poll_type(&(*s).p) == POLL_TYPE_SOCKET_SHUT_DOWN) }
+    unsafe {
+        let tls_shut_down = !(*s).ssl.is_null() && crate::tls::is_shut_down(s);
+        c_int::from(tls_shut_down || us_internal_poll_type(&(*s).p) == POLL_TYPE_SOCKET_SHUT_DOWN)
+    }
 }
 
 unsafe fn can_raw_write(s: *const us_socket_t) -> bool {
@@ -219,7 +228,7 @@ pub unsafe extern "C" fn us_socket_keepalive(s: *mut us_socket_t, enabled: c_int
     0
 }
 
-unsafe fn rearm_writable(s: *mut us_socket_t) {
+pub(crate) unsafe fn rearm_writable(s: *mut us_socket_t) {
     // SAFETY: the caller passes a live socket.
     unsafe {
         let readable = if (*s).is_paused || (*s).read_eof { 0 } else { LIBUS_SOCKET_READABLE };
@@ -238,10 +247,30 @@ fn send(fd: c_int, data: *const u8, length: usize) -> isize {
     }
 }
 
+/// TLS's ciphertext to the kernel, below the TLS layer: how much it took. A short send arms writable.
+pub(crate) unsafe fn raw_send(s: *mut us_socket_t, data: &[u8]) -> usize {
+    // SAFETY: the caller passes a live socket.
+    unsafe {
+        if !can_raw_write(s) {
+            return 0;
+        }
+        let sent = send(fd_of(s), data.as_ptr(), data.len());
+        if sent != data.len() as isize {
+            (*s).last_write_failed = true;
+            rearm_writable(s);
+        }
+        sent.max(0) as usize
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn us_socket_write(s: *mut us_socket_t, data: *const c_char, length: c_int) -> c_int {
     // SAFETY: the caller passes a live socket and `length` bytes at `data`.
     unsafe {
+        if !(*s).ssl.is_null() {
+            let data = if length <= 0 { &[][..] } else { core::slice::from_raw_parts(data.cast::<u8>(), length as usize) };
+            return crate::tls::write(s, data);
+        }
         if (*s).is_closed || us_socket_is_shut_down(s) != 0 {
             return 0;
         }
@@ -371,6 +400,10 @@ pub unsafe extern "C" fn us_socket_shutdown(s: *mut us_socket_t) {
         if us_socket_is_established(s) == 0 || !can_raw_write(s) {
             return;
         }
+        if !(*s).ssl.is_null() {
+            crate::tls::send_close_notify(s);
+            return;
+        }
         us_internal_poll_set_type(&mut (*s).p, POLL_TYPE_SOCKET_SHUT_DOWN);
         us_poll_change(&mut (*s).p, (*(*s).group).loop_, us_poll_events(&(*s).p) & LIBUS_SOCKET_READABLE);
         libc::shutdown(fd_of(s), libc::SHUT_WR);
@@ -452,7 +485,13 @@ pub unsafe extern "C" fn us_socket_remote_port(s: *const us_socket_t) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn us_socket_verify_error(_s: *const us_socket_t) -> us_bun_verify_error_t {
+pub unsafe extern "C" fn us_socket_verify_error(s: *mut us_socket_t) -> us_bun_verify_error_t {
+    // SAFETY: the caller passes a live socket.
+    unsafe {
+        if !(*s).ssl.is_null() {
+            return crate::tls::verify_error(s);
+        }
+    }
     us_bun_verify_error_t { error: 0, code: ptr::null(), reason: ptr::null() }
 }
 
@@ -481,6 +520,7 @@ unsafe fn close_and_notify(s: *mut us_socket_t, code: c_int, reason: *mut c_void
         } else if (*s).connect_state.is_null() {
             res = us_dispatch_connect_error(s, connect_error);
         }
+        crate::tls::free(s);
         (*s).next = (*loop_).data.closed_head;
         (*loop_).data.closed_head = s;
         res
@@ -499,8 +539,13 @@ pub(crate) unsafe fn us_internal_socket_connect_failed(s: *mut us_socket_t, erro
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn us_socket_close(s: *mut us_socket_t, code: c_int, reason: *mut c_void) -> *mut us_socket_t {
-    // SAFETY: the caller's socket.
-    unsafe { us_internal_socket_close_raw(s, code, reason) }
+    // SAFETY: the caller's socket. A TLS close sends close_notify first, without waiting for the peer's.
+    unsafe {
+        if !(*s).ssl.is_null() && !(*s).is_closed && code != LIBUS_SOCKET_CLOSE_CODE_CONNECTION_RESET {
+            crate::tls::send_close_notify(s);
+        }
+        us_internal_socket_close_raw(s, code, reason)
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -521,7 +566,7 @@ pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut 
 
         if events & LIBUS_SOCKET_WRITABLE != 0 && error == 0 && !(*s).send_rejected {
             (*s).last_write_failed = false;
-            s = us_dispatch_writable(s);
+            s = if (*s).ssl.is_null() { us_dispatch_writable(s) } else { crate::tls::on_writable(s) };
             if s.is_null() || (*s).is_closed {
                 return;
             }
@@ -543,7 +588,11 @@ pub(crate) unsafe fn dispatch_socket(mut s: *mut us_socket_t, error: c_int, mut 
                     break r;
                 };
                 if length > 0 {
-                    s = us_dispatch_data(s, buf.cast(), length as c_int);
+                    s = if (*s).ssl.is_null() {
+                        us_dispatch_data(s, buf.cast(), length as c_int)
+                    } else {
+                        crate::tls::on_data(s, core::slice::from_raw_parts(buf, length as usize))
+                    };
                     if s.is_null() {
                         break;
                     }

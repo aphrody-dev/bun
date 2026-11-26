@@ -3,8 +3,9 @@
 //! `us_dispatch_*` exports of the binary that links this crate, as from the C library.
 //!
 //! What it has: the loop on epoll (wakeups, ready-poll dispatch, the timeout sweep, `Bun__internal_dispatch_ready_poll`
-//! for `bun_io`'s polls), TCP and Unix-socket clients (connect, read, write, timeouts, shutdown, close), and name
-//! resolution on a thread of its own. It has no listen sockets, UDP or QUIC (those entry points fail), and no kqueue.
+//! for `bun_io`'s polls), TCP and Unix-socket clients (connect, read, write, timeouts, shutdown, close), TLS for them on
+//! rustls (`tls.rs`), and name resolution on a thread of its own. It has no listen sockets, UDP or QUIC (those entry
+//! points fail), and no kqueue.
 #![cfg(any(target_os = "linux", target_os = "android"))]
 #![allow(non_camel_case_types, clippy::missing_safety_doc)]
 
@@ -12,6 +13,7 @@ mod context;
 mod dns;
 mod eventing;
 mod socket;
+mod tls;
 mod unsupported;
 
 use core::ffi::{c_char, c_int, c_uint, c_void};
@@ -141,6 +143,8 @@ pub struct us_socket_t {
     pub(crate) send_rejected: bool,
     pub(crate) unclassified_send_failures: u8,
     pub(crate) group: *mut us_socket_group_t,
+    /// Null for plain TCP.
+    pub(crate) ssl: *mut tls::Ssl,
     pub(crate) prev: *mut us_socket_t,
     pub(crate) next: *mut us_socket_t,
     pub(crate) connect_next: *mut us_socket_t,
@@ -154,6 +158,8 @@ pub struct us_socket_t {
 pub struct us_connecting_socket_t {
     pub(crate) group: *mut us_socket_group_t,
     pub(crate) loop_: *mut us_loop_t,
+    /// The context to attach to the candidate that wins (a ref), or null.
+    pub(crate) ssl_ctx: *mut tls::SslCtx,
     pub(crate) next: *mut us_connecting_socket_t,
     pub(crate) connecting_head: *mut us_socket_t,
     pub(crate) next_pending: *mut us_connecting_socket_t,
@@ -202,6 +208,8 @@ const _: () = {
 };
 
 // Event dispatch, defined by the binary (in Bun, src/runtime/socket/uws_dispatch.rs). The loop never reads a vtable.
+// The socket structs hold pointers to this crate's TLS state, which the other side never reads.
+#[allow(improper_ctypes)]
 unsafe extern "C" {
     pub(crate) fn us_dispatch_open(s: *mut us_socket_t, is_client: c_int, ip: *mut c_char, ip_length: c_int) -> *mut us_socket_t;
     pub(crate) fn us_dispatch_data(s: *mut us_socket_t, data: *mut c_char, length: c_int) -> *mut us_socket_t;
@@ -212,6 +220,7 @@ unsafe extern "C" {
     pub(crate) fn us_dispatch_end(s: *mut us_socket_t) -> *mut us_socket_t;
     pub(crate) fn us_dispatch_connect_error(s: *mut us_socket_t, code: c_int) -> *mut us_socket_t;
     pub(crate) fn us_dispatch_connecting_error(c: *mut us_connecting_socket_t, code: c_int) -> *mut us_connecting_socket_t;
+    pub(crate) fn us_dispatch_handshake(s: *mut us_socket_t, success: c_int, err: us_bun_verify_error_t);
 
     /// `bun_io`'s polls, whose pointers in the epoll set are tagged.
     pub(crate) fn Bun__internal_dispatch_ready_poll(loop_: *mut us_loop_t, poll: *mut c_void);

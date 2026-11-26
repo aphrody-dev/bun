@@ -94,6 +94,9 @@ serde_json = "1"
 
 [dev-dependencies]
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
+# The HTTPS registry of tests/install.rs.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.1.0-pre.0"
 
 [profile.dev]
 debug = "line-tables-only"
