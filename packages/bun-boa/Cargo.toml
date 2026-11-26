@@ -15,18 +15,25 @@ publish = false
 name = "bun"
 path = "src/main.rs"
 
+[features]
+# `bun build`: links Bun's bundler, whose graph still reaches C/C++ (uws, BoringSSL, Highway, lol-html).
+build = ["dep:bun_bundler", "dep:bun_event_loop", "dep:bun_options_types"]
+
 [dependencies]
 boa_engine = { version = "0.22", features = ["annex-b", "intl_bundled", "experimental"] }
 boa_gc = "0.22"
 boa_runtime = "0.22"
 bun_ast = { path = "../../src/ast" }
 bun_alloc = { path = "../../src/bun_alloc" }
+bun_bundler = { path = "../../src/bundler", optional = true }
 bun_clap = { path = "../../src/clap" }
+bun_event_loop = { path = "../../src/event_loop", optional = true }
 bun_core = { path = "../../src/bun_core" }
 bun_js_parser = { path = "../../src/js_parser" }
 bun_js_printer = { path = "../../src/js_printer" }
 bun_lint_driver = { path = "../../src/lint/driver" }
 bun_parsers = { path = "../../src/parsers" }
+bun_options_types = { path = "../../src/options_types", optional = true }
 bun_paths = { path = "../../src/paths" }
 bun_sema = { path = "../../src/sema" }
 bun_sema_driver = { path = "../../src/sema/driver" }

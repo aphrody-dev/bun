@@ -146,6 +146,8 @@ pub fn main() -> i32 {
         },
         Some("fmt") => crate::fmt::main(&args[1..]),
         Some("lint") => crate::lint::main(&args[1..]),
+        #[cfg(feature = "build")]
+        Some("build") => crate::build::main(&args[1..]),
         Some("run") => match args.get(1) {
             Some(name) => script_or_file(name, &args[2..]),
             None => crate::scripts::list(),
