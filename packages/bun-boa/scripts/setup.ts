@@ -47,13 +47,23 @@ async function boaModules() {
     .split("\n")
     .find(line => line.includes("src/codegen/bundle-modules.ts"));
   if (!command) throw new Error("build.ninja has no bundle-modules.ts command");
+  let runnable = command;
   const uses = command.match(/ --builtin-uses=(\S+)/);
-  const runnable = uses && !(await Bun.file(uses[1]).exists()) ? command.replace(uses[0], "") : command;
-  const out = join(repo, "build/debug/js-boa");
-  await $`sh -c ${runnable}`
+  if (uses && !(await Bun.file(uses[1]).exists())) runnable = runnable.replace(uses[0], "");
+  // A host without the WebKit that configure found gets the engine's generators from engineAot().
+  const engine = command.match(/ --engine-directory=(\S+)/);
+  const env: Record<string, string> = { BUN_BOA_JS_DIR: join(repo, "build/debug/js-boa"), CLAUDECODE: "1" };
+  if (engine && !(await Bun.file(join(engine[1], "builtins/generator/index.ts")).exists())) {
+    runnable = runnable.replace(engine[0], "");
+    env.AOT_ENGINE_DIRECTORY = await engineAot();
+  }
+  const result = await $`sh -c ${runnable}`
     .cwd(join(repo, "build/debug"))
-    .env({ ...process.env, BUN_BOA_JS_DIR: out, CLAUDECODE: "1" })
-    .quiet();
+    .env({ ...process.env, ...env })
+    .quiet()
+    .nothrow();
+  if (result.exitCode !== 0) throw new Error(`bundle-modules.ts: ${result.stderr.toString().trim().slice(-2000)}`);
+  const out = env.BUN_BOA_JS_DIR;
   return `codegen: src/js for Boa in ${out}`;
 }
 
@@ -73,25 +83,36 @@ async function bunJsBindings() {
   return `codegen: bun_js bindings of ${sources.length} schemas`;
 }
 
-// `bun_aot_interface` includes the Rust half of WebKit's AOT schema. Its generator is TypeScript in WebKit's tree:
-// only `JavaScriptCore/aot/ir`'s schema and generator are fetched, at the pinned commit, nothing native.
+// WebKit's Source/JavaScriptCore/aot without its tests, at the pinned commit: the TypeScript generators of the AOT
+// schema (ir/) and of the table of built-ins (builtins/), which Bun's codegen imports. Nothing native.
+let engine: Promise<string> | undefined;
+function engineAot(): Promise<string> {
+  return (engine ??= (async () => {
+    const dir = join(repo, `build/vendor-cache/webkit-aot-${WEBKIT_VERSION}/aot`);
+    if (await Bun.file(join(dir, ".complete")).exists()) return dir;
+    const tree = `repos/oven-sh/WebKit/git/trees/${WEBKIT_VERSION}:Source/JavaScriptCore/aot?recursive=1`;
+    const files = ((await $`gh api ${tree}`.json()) as { tree: { type: string; path: string }[] }).tree
+      .filter(e => e.type === "blob" && !e.path.startsWith("tests/"))
+      .map(e => e.path);
+    const raw = `https://raw.githubusercontent.com/oven-sh/WebKit/${WEBKIT_VERSION}/Source/JavaScriptCore/aot`;
+    await Promise.all(
+      files.map(async f =>
+        Bun.write(
+          join(dir, f),
+          await fetch(`${raw}/${f}`).then(r => (r.ok ? r : Promise.reject(new Error(`${f}: ${r.status}`)))),
+        ),
+      ),
+    );
+    await Bun.write(join(dir, ".complete"), "");
+    return dir;
+  })());
+}
+
+// `bun_aot_interface` includes the Rust half of WebKit's AOT schema, which its generator writes.
 async function aotSchema() {
   if (await Bun.file(join(codegen, "aot_schema_interface.rs")).exists()) return;
-  const dir = join(repo, `build/vendor-cache/webkit-aot-${WEBKIT_VERSION}`);
-  const tree = `repos/oven-sh/WebKit/git/trees/${WEBKIT_VERSION}:Source/JavaScriptCore/aot/ir?recursive=1`;
-  const files = ((await $`gh api ${tree}`.json()) as { tree: { type: string; path: string }[] }).tree
-    .filter(e => e.type === "blob" && /^(generator\/|schema\/|AOTSchema\.def$)/.test(e.path))
-    .map(e => e.path);
-  const raw = `https://raw.githubusercontent.com/oven-sh/WebKit/${WEBKIT_VERSION}/Source/JavaScriptCore/aot/ir`;
-  await Promise.all(
-    files.map(async f =>
-      Bun.write(
-        join(dir, f),
-        await fetch(`${raw}/${f}`).then(r => (r.ok ? r : Promise.reject(new Error(`${f}: ${r.status}`)))),
-      ),
-    ),
-  );
-  await $`bun run ${join(dir, "generator/index.ts")} --schema ${join(dir, "AOTSchema.def")} --rust-out ${codegen}`
+  const dir = await engineAot();
+  await $`bun run ${join(dir, "ir/generator/index.ts")} --schema ${join(dir, "ir/AOTSchema.def")} --rust-out ${codegen}`
     .cwd(repo)
     .quiet();
 }
