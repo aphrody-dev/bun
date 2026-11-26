@@ -1,0 +1,5 @@
+# bun-boa links no C++: clang (the C driver, so no libstdc++) driving wild, the Rust linker.
+# Overrides Bun's root config (clang++ + lld), which C++ objects need.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=--ld-path=/usr/local/bin/wild"]
