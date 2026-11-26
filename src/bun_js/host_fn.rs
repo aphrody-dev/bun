@@ -1,7 +1,8 @@
 //! Host functions: Rust that JavaScript calls.
 
 use boa_engine::object::FunctionObjectBuilder;
-use boa_engine::{Context, JsString, JsValue, NativeFunction};
+use boa_engine::property::PropertyDescriptor;
+use boa_engine::{Context, JsString, JsValue, NativeFunction, js_string};
 
 use crate::{CallFrame, JSGlobalObject, JSValue, JsResult};
 
@@ -49,5 +50,26 @@ impl JSFunction {
             .length(length)
             .build();
         JSValue(function.into())
+    }
+
+    /// As [`create`](Self::create), but its `name` property is `bound <name>`, as a bound function's is, while it
+    /// prints (`Function.prototype.toString`) and is traced as `name`: JavaScriptCore's `setIsNamedAsBound`.
+    pub fn create_named_as_bound(
+        global: &JSGlobalObject,
+        name: &str,
+        f: JSHostFn,
+        length: usize,
+    ) -> JSValue {
+        let function = Self::create(global, name, f, length);
+        let object = function.0.as_object().expect("a function is an object");
+        object.insert_property(
+            js_string!("name"),
+            PropertyDescriptor::builder()
+                .value(JsString::from(format!("bound {name}").as_str()))
+                .writable(false)
+                .enumerable(false)
+                .configurable(true),
+        );
+        function
     }
 }

@@ -10,8 +10,14 @@
 //   - a `bun_js::JSHostFn` per function (`pub fn <name>(global, frame)`), and `create_<name>(global)`, its
 //     function object;
 //   - `create_<namespace>(global)`, the namespace object;
-//   - `impl bun_js::JsClass` for each class's payload;
-//   - `exports(global)`: every function, namespace and class constructor by the name JavaScript knows it by.
+//   - `impl bun_js::JsClass` for each class's payload, and a struct with `into_js` for each dictionary that is returned;
+//   - `exports(global)`: every function, namespace and class constructor by the name JavaScript knows it by;
+//   - `native(global, symbol)`: what `$bindgen("<file>.bind.ts", symbol)` answers.
+// At the top level, `native(global, file, symbol)` picks the module of `file`.
+//
+// What a body takes and returns is that of the JavaScriptCore build, but for strings: `b.string.local` and
+// `b.string.utf8` are `&'a [u8]` of UTF-8 as an argument and anything that is `AsRef<[u8]>` as a result, and a member
+// of a dictionary that is returned is `&'a [u8]`.
 
 import path from "node:path";
 import {
@@ -20,10 +26,12 @@ import {
   ClassType,
   Construction,
   DefaultType,
+  DictionaryType,
   DoubleType,
   type FunctionDefinition,
   type Getter,
   IntegerType,
+  LocalStringType,
   type Method,
   type NamespaceDefinition,
   OptionalType,
@@ -54,7 +62,12 @@ const KEYWORDS = new Set(
 const ident = (name: string) => (KEYWORDS.has(name) ? `r#${name}` : name);
 const rustString = (s: string) => JSON.stringify(s);
 
+/** The items of a schema's module that are not named after one of its exports. */
+const MODULE_ITEMS = new Set(["exports", "namespaces", "native"]);
+
 // ───────────────────────────── types ─────────────────────────────
+
+const isPlainInteger = (type: IntegerType) => /^Bun::Bindgen::IDL(Strict|Loose)Integer<[^,>]+>$/.test(type.idlType);
 
 /** The `from_js` function for an argument of `type` that is not optional. */
 function converter(type: Type): string {
@@ -70,16 +83,30 @@ function converter(type: Type): string {
     return refuse(type.idlType);
   }
   if (type instanceof Utf8Type) return type.isLoose ? "loose_utf8" : "strict_utf8";
+  // `.allowStringObject` made a `String` object a string already (`prepared`).
+  if (type instanceof LocalStringType) return "local_string";
   if (type instanceof AnyType) {
-    if (type.cppPrepare("value") !== null) return refuse("b.any.stringObjectAsString");
+    if (type.isOptional) return refuse("b.any.orAbsent");
     return "any";
   }
   return refuse(`${type.constructor.name} (${type.tsType})`);
 }
 
+/** As C++'s `cppPrepare`: whether a `String` object is made a string before anything is converted. */
+const prepared = (type: Type) => type.cppPrepare("") !== null;
+
+type Argument = Signature["args"][number];
+
+/** What an error of the conversion names: C++'s `LiteralConversionContext`, or `ValidatorArgumentContext` for one
+ * that `validatorExpects` names. `index` is a Rust expression, for an element of a `b.rest`. */
+function context(arg: Pick<Argument, "name" | "validatorExpects">, index?: string): string {
+  if (arg.validatorExpects === undefined) return `bindgen::from_js::Context::Argument(${rustString(arg.name)})`;
+  return `bindgen::from_js::Context::Validator { name: ${rustString(arg.name)}, expected: ${rustString(arg.validatorExpects)}, index: ${index === undefined ? "None" : `Some(${index})`} }`;
+}
+
 /** Rust that converts `value` (a `JSValue`) to an argument of `type`, an expression of `bindgen::Result<'a, T>`. */
-function convert(type: Type, value: string, name: string): string {
-  const call = (inner: Type) => `bindgen::from_js::${converter(inner)}(heap, &${value}, ${rustString(name)})`;
+function convert(type: Type, value: string, ctx: string): string {
+  const call = (inner: Type) => `bindgen::from_js::${converter(inner)}(heap, &${value}, ${ctx})`;
   if (type instanceof OptionalType) {
     const absent = { optional: `${value}.is_undefined()`, nullable: `${value}.is_undefined_or_null()` }[
       type.modifier as "optional" | "nullable"
@@ -97,6 +124,34 @@ function convert(type: Type, value: string, name: string): string {
   return call(type);
 }
 
+/** Where `type` is in the module of `file`: a dictionary of another schema is in that one's module. */
+function namedPath(type: DictionaryType, file: SchemaFile): string {
+  if (type.origin!.crate !== file.origin.crate) refuse(`${type.name}: a dictionary of another crate`);
+  return type.origin!.rustModule === file.origin.rustModule
+    ? type.name
+    : `super::${type.origin!.rustModule}::${type.name}`;
+}
+
+/** Whether what a body returns as `type` borrows from the call. */
+function borrowsCall(type: Type): boolean {
+  if (type instanceof LocalStringType || type instanceof Utf8Type || type instanceof AnyType) return true;
+  if (type instanceof OptionalType) return borrowsCall(type.inner);
+  if (type instanceof DictionaryType) return type.members.some(member => borrowsCall(member.type));
+  return false;
+}
+
+/** The Rust type of a member of a dictionary that is returned. */
+function memberRustType(type: Type, file: SchemaFile): string {
+  if (type instanceof LocalStringType || type instanceof Utf8Type) return "&'a [u8]";
+  if (type instanceof BoolType || type instanceof DoubleType) return type.rustName;
+  if (type instanceof IntegerType && isPlainInteger(type)) return type.rustName;
+  if (type instanceof AnyType && type.checkedResult === null) return "bindgen::JsLocal<'a>";
+  if (type instanceof OptionalType && (type.modifier === "optional" || type.modifier === "nullable"))
+    return `Option<${memberRustType(type.inner, file)}>`;
+  if (type instanceof DictionaryType) return `${namedPath(type, file)}${borrowsCall(type) ? "<'a>" : ""}`;
+  return refuse(`a member of a dictionary of ${type.constructor.name} (${type.tsType})`);
+}
+
 /** Rust that converts `value` (what a body returns) to JS, an expression of `bindgen::Result<'a, JsLocal<'a>>`. */
 function toJs(type: Type, value: string): string {
   if (type instanceof OptionalType) {
@@ -110,12 +165,19 @@ function toJs(type: Type, value: string): string {
   }
   if (type instanceof BoolType || type instanceof DoubleType) return `bindgen::to_js::${type.rustName}(heap, ${value})`;
   if (type instanceof IntegerType) {
-    if (!/^Bun::Bindgen::IDL(Strict|Loose)Integer<[^,>]+>$/.test(type.idlType))
-      return refuse(`a result of ${type.idlType}`);
+    if (!isPlainInteger(type)) return refuse(`a result of ${type.idlType}`);
     return `bindgen::to_js::${type.rustName}(heap, ${value})`;
   }
-  if (type instanceof Utf8Type) return `bindgen::to_js::utf8(heap, ${value})`;
-  if (type instanceof AnyType) return `bindgen::to_js::any(heap, ${value})`;
+  if (type instanceof Utf8Type || type instanceof LocalStringType) return `bindgen::to_js::utf8(heap, ${value})`;
+  if (type instanceof AnyType) {
+    // The C++ build holds a result to the words of `.returning` for compiled code, which has nothing to check with
+    // alternatives that are not words: it holds those to nothing.
+    const words = type.checkedResult;
+    if (words !== null)
+      refuse(`b.any.returning(${words.map(word => rustString(word)).join(", ")}) (a result held to its words)`);
+    return `bindgen::to_js::any(heap, ${value})`;
+  }
+  if (type instanceof DictionaryType) return `${value}.into_js(heap)`;
   return refuse(`a result of ${type.constructor.name} (${type.tsType})`);
 }
 
@@ -127,6 +189,27 @@ const capabilityArgument = { none: [], heap: ["&cx.heap"], js: ["cx"] } as const
 const returnConverted = (signature: Signature) => (result: string) =>
   `bindgen::host_fn_return(cx, ${result}, |heap, value| ${toJs(signature.returns, "value")})`;
 
+const orReturn = (expression: string) =>
+  `match ${expression} { Ok(value) => value, Err(error) => return error.into_host_fn_return(cx) }`;
+
+/** As C++'s `cppDeclareArgument`: `argument<i>`, the argument as the frame has it, or the rest of them, with a
+ * `String` object made a string where the type says so. Every argument is declared, in order, before any is converted. */
+function declareArgument({ type }: Argument, i: number): string[] {
+  if (type instanceof RestType) {
+    const values = `frame.arguments().get(${i}..).unwrap_or_default()`;
+    if (!prepared(type.element)) return [`let argument${i} = ${values};`];
+    return [
+      `let mut argument${i} = ${values}.to_vec();`,
+      `for value in &mut argument${i} { *value = ${orReturn("bindgen::from_js::string_of_string_object(heap, value)")}; }`,
+    ];
+  }
+  if (prepared(type))
+    return [
+      `let argument${i} = ${orReturn(`bindgen::from_js::string_of_string_object(heap, &frame.argument(${i}))`)};`,
+    ];
+  return [`let argument${i} = frame.argument(${i});`];
+}
+
 /** The statements that convert a signature's arguments from `frame`, then run `beforeCall` (which borrows a class's
  * payload, once nothing else can run script), then `call` with them, then `finish`. */
 function body(
@@ -135,32 +218,36 @@ function body(
   finish: (result: string) => string = returnConverted(signature),
   beforeCall: string[] = [],
 ): string {
-  const frame = "frame";
-  if (signature.args.some(arg => arg.type instanceof RestType || arg.type instanceof VariadicType))
-    refuse("b.rest and .variadic");
+  if (signature.args.some(arg => arg.type instanceof VariadicType)) refuse(".variadic");
   if (signature.rejects) refuse("rejects");
-  if (signature.namedAsBound || signature.replacesBoundFunction) refuse("namedAsBound and replacesBoundFunction");
+  if (signature.replacesBoundFunction) refuse("replacesBoundFunction");
   for (const arg of signature.args)
-    if (arg.expected !== undefined || arg.validatorExpects !== undefined)
-      refuse(`${arg.name}: expected and validatorExpects (Node's ERR_INVALID_ARG_TYPE text)`);
+    if (arg.expected !== undefined) refuse(`${arg.name}: expected (Node's ERR_INVALID_ARG_TYPE text)`);
   const lines: string[] = ["let heap = &cx.heap;"];
   if (signature.requiredArguments > 0) {
     // As bindgen-emit.ts's `cppThrowIfArgumentsMissing`: the message names every required argument.
     const names = signature.args.slice(0, signature.requiredArguments).map(arg => `"${arg.name}"`);
     const message = `The ${new Intl.ListFormat("en").format(names)} argument${names.length > 1 ? "s" : ""} must be specified`;
     lines.push(
-      `if ${frame}.arguments_count() < ${signature.requiredArguments} { return bindgen::from_js::missing_arguments(heap, ${rustString(message)}).into_host_fn_return(cx); }`,
+      `if frame.arguments_count() < ${signature.requiredArguments} { return bindgen::from_js::missing_arguments(heap, ${rustString(message)}).into_host_fn_return(cx); }`,
     );
   }
   const names = signature.args.map(arg => ident(snakeCase(arg.name)));
-  for (const index of signature.conversionOrder) {
-    const arg = signature.args[index];
-    lines.push(
-      `let ${names[index]} = match ${convert(arg.type, `${frame}.argument(${index})`, arg.name)} { Ok(value) => value, Err(error) => return error.into_host_fn_return(cx) };`,
-    );
+  signature.args.forEach((arg, i) => lines.push(...declareArgument(arg, i)));
+  for (const i of signature.conversionOrder) {
+    const arg = signature.args[i];
+    if (arg.type instanceof RestType) {
+      lines.push(
+        `let mut ${names[i]} = Vec::with_capacity(argument${i}.len());`,
+        `for (rest_index, rest_value) in argument${i}.iter().enumerate() { ${names[i]}.push(${orReturn(convert(arg.type.element, "(*rest_value)", context(arg, "rest_index")))}); }`,
+      );
+      continue;
+    }
+    lines.push(`let ${names[i]} = ${orReturn(convert(arg.type, `argument${i}`, context(arg)))};`);
   }
   lines.push(...beforeCall);
-  const invoked = call([...capabilityArgument[signature.capability], ...names]);
+  const passed = signature.args.map((arg, i) => (arg.type instanceof RestType ? `&${names[i]}` : names[i]));
+  const invoked = call([...capabilityArgument[signature.capability], ...passed]);
   const result = signature.throws
     ? invoked
     : signature.returns instanceof UnitType && !(signature instanceof Construction)
@@ -197,6 +284,8 @@ function rustForFunction(fn: FunctionDefinition, file: SchemaFile): string {
     signature.rustPath ??
     (modulePath ? `${modulePath}::${ident(snakeCase(fn.name))}` : refuse(`${fn.name}: a rustPath`));
   const host = ident(snakeCase(fn.name));
+  // As C++'s `createFunctionNamedAsBound`: `name` is `bound <jsName>`, and it prints and is traced as `<jsName>`.
+  const create = fn.namedAsBound ? "create_named_as_bound" : "create";
   return `
 /// \`${fn.jsName}\`
 pub fn ${host}(global: &JSGlobalObject, frame: &CallFrame<'_>) -> JsResult<JSValue> {
@@ -211,7 +300,7 @@ ${indent(
 
 /// The function object of \`${fn.jsName}\`.
 pub fn create_${snakeCase(fn.name)}(global: &JSGlobalObject) -> JSValue {
-    bun_js::JSFunction::create(global, ${rustString(fn.jsName)}, ${host}, ${fn.length})
+    bun_js::JSFunction::${create}(global, ${rustString(fn.jsName)}, ${host}, ${fn.length})
 }
 `;
 }
@@ -219,7 +308,7 @@ pub fn create_${snakeCase(fn.name)}(global: &JSGlobalObject) -> JSValue {
 function rustForNamespace(namespace: NamespaceDefinition): string {
   if (namespace.call) refuse(`${namespace.name}: a namespace that is callable`);
   const puts = namespace.functions
-    // As C++'s namespace object: each function is named by its key, not its `jsName`.
+    // As C++'s namespace object: each function is named by its key, not its `jsName`, and none is named as bound.
     .map(
       fn =>
         `object.put(global, ${rustString(fn.name)}, bun_js::JSFunction::create(global, ${rustString(fn.name)}, ${ident(snakeCase(fn.name))}, ${fn.length}));`,
@@ -227,10 +316,54 @@ function rustForNamespace(namespace: NamespaceDefinition): string {
     .join("\n");
   return `
 /// The namespace \`${namespace.name}\`.
-pub fn create_${snakeCase(namespace.name)}(global: &JSGlobalObject) -> JsResult<JSValue> {
+pub fn create_${snakeCase(namespace.name)}(global: &JSGlobalObject) -> JSValue {
     let object = bun_js::JSObject::create(global);
 ${indent(puts, 4)}
-    Ok(object.to_js())
+    object.to_js()
+}
+`;
+}
+
+// ───────────────────────────── dictionaries ─────────────────────────────
+
+/** A dictionary that a body returns: a struct, and `into_js`, which makes the object as C++ does, a new ordinary one
+ * with each member in order. */
+function rustForDictionary(type: DictionaryType, file: SchemaFile): string {
+  const what = `dictionary ${type.name}`;
+  const unsupported = (
+    [
+      ["fromJS", type.fromJS],
+      ["allowArray", type.options.allowArray],
+      ["nonObjectAsEmpty", type.nonObjectAsEmpty],
+      ["nullPrototype", type.nullPrototype],
+      ["webIDL", type.webIDL],
+    ] as const
+  ).filter(([, value]) => value);
+  if (unsupported.length) refuse(`${what}: ${unsupported.map(([key]) => key).join(", ")}`);
+  const lifetime = borrowsCall(type) ? "<'a>" : "";
+  const fields = type.members.map(member => `pub ${member.rustName}: ${memberRustType(member.type, file)},`);
+  // As C++: a member that is `.optional` and absent is left out, one that is `.nullable` is `null`.
+  const puts = type.members.map(member => {
+    const put = (memberType: Type) =>
+      `object.value().put(global, ${rustString(member.name)}, ${toJs(memberType, "value")}?.to_js());`;
+    if (member.type instanceof OptionalType && member.type.modifier === "optional")
+      return `if let Some(value) = self.${member.rustName} { ${put(member.type.inner)} }`;
+    return `{ let value = self.${member.rustName}; ${put(member.type)} }`;
+  });
+  return `
+/// \`${type.name}\`, as a body returns it.
+pub struct ${type.name}${lifetime} {
+${indent(fields.join("\n"), 4)}
+}
+
+impl${lifetime ? "<'a>" : ""} ${type.name}${lifetime} {
+    /// A new object with these members, in this order.
+    pub fn into_js${lifetime ? "" : "<'a>"}(self, heap: &bindgen::JsHeap<'a>) -> bindgen::Result<'a, bindgen::JsLocal<'a>> {
+        let global = heap.global_object();
+        let object = heap.create_empty_object();
+${indent(puts.join("\n"), 8)}
+        Ok(object)
+    }
 }
 `;
 }
@@ -276,6 +409,9 @@ function rustForClass(type: ClassType): string {
     receiver === "mut"
       ? ["let mut this = this.borrow_mut(global)?;", "let this = &mut *this;"]
       : ["let this = this.borrow(global)?;", "let this = &*this;"];
+
+  for (const fn of [...type.functions, ...type.staticFunctions])
+    if (fn.namedAsBound) refuse(`${what}.${fn.name}: namedAsBound`);
 
   for (const fn of type.functions) {
     const method = onlySignature(fn, `${type.name}.${fn.name}`) as Method;
@@ -354,10 +490,11 @@ function rustForGetter(
   ].join("\n");
   const getterClosure = `|this, global| ${scoped("global", getBody)}`;
   if (!getter.hasSetter) return `class.getter(${rustString(getter.name)}, ${attributes}, ${getterClosure})?;`;
+  if (prepared(getter.type)) refuse(`${what}: a setter of a type that makes a String object a string first`);
   const set = `<${type.rustPath}>::${getter.setterRustName}(${["this", ...capability(getter.setterCapability), "value"].join(", ")})`;
   const setBody = [
     "let heap = &cx.heap;",
-    `let value = match ${convert(getter.type, "value", getter.name)} { Ok(value) => value, Err(error) => return error.into_host_fn_return(cx) };`,
+    `let value = ${orReturn(convert(getter.type, "value", context({ name: getter.name })))};`,
     ...borrow(getter.setterReceiver),
     `let result = ${getter.throws ? set : `{ ${set}; Ok::<_, core::convert::Infallible>(()) }`};`,
     "bindgen::host_fn_return(cx, result, bindgen::to_js::undefined).map(drop)",
@@ -370,23 +507,35 @@ function rustForGetter(
 function rustForFile(file: SchemaFile): string {
   const items: string[] = [];
   const exports: string[] = [];
+  /** `symbol => value` of `native`: what C++'s `js2native_bindgen_<stem>_<symbol>` answers. */
+  const natives: string[] = [];
   for (const type of file.types) {
+    if (type instanceof DictionaryType) {
+      items.push(rustForDictionary(type, file));
+      continue;
+    }
     if (!(type instanceof ClassType)) refuse(`${type.constructor.name} ${type.name}`);
     items.push(rustForClass(type));
     // As C++'s `$bindgen`: a class with `construct`, an illegal one included, has its constructor exported.
-    if (type.construct)
+    if (type.construct) {
       exports.push(`(${rustString(type.name)}, bun_js::class::constructor::<${type.rustPath}>(global)?),`);
+      natives.push(`${rustString(type.name)} => return Some(bun_js::class::constructor::<${type.rustPath}>(global)),`);
+    }
   }
   // As C++'s `$bindgen(file, name)`: every function by its key, those of a namespace too.
   for (const fn of file.functions) {
     if (fn.isValue) refuse(`${fn.name}: b.value`);
+    if (MODULE_ITEMS.has(snakeCase(fn.name)))
+      throw new Error(`${fn.name}: the generated module has an item of that name`);
     items.push(rustForFunction(fn, file));
     exports.push(`(${rustString(fn.name)}, create_${snakeCase(fn.name)}(global)),`);
+    natives.push(`${rustString(fn.name)} => create_${snakeCase(fn.name)}(global),`);
   }
   const namespaces: string[] = [];
   for (const namespace of file.namespaces) {
     items.push(rustForNamespace(namespace));
-    namespaces.push(`(${rustString(namespace.name)}, create_${snakeCase(namespace.name)}(global)?),`);
+    namespaces.push(`(${rustString(namespace.name)}, create_${snakeCase(namespace.name)}(global)),`);
+    natives.push(`${rustString(namespace.name)} => create_${snakeCase(namespace.name)}(global),`);
   }
   return `
 /// \`${file.origin.stem}.bind.ts\`
@@ -406,6 +555,15 @@ ${indent(exports.join("\n"), 12)}
         Ok(vec![
 ${indent(namespaces.join("\n"), 12)}
         ])
+    }
+
+    /// What \`$bindgen("${file.origin.stem}.bind.ts", symbol)\` answers: the function, namespace or class constructor the
+    /// schema exports as \`symbol\`, made anew each time, as C++ does. \`None\` for a symbol it does not export.
+    pub fn native(global: &JSGlobalObject, symbol: &str) -> Option<JsResult<JSValue>> {
+        Some(Ok(match symbol {
+${indent(natives.join("\n"), 12)}
+            _ => return None,
+        }))
     }
 }
 `;
@@ -427,19 +585,33 @@ function assertOwnersUnique(files: readonly SchemaFile[]) {
 
 export function rustForCrate(files: readonly SchemaFile[]): string {
   assertOwnersUnique(files);
-  return (
-    "// Generated by src/codegen/bindgen-js.ts. Do not edit.\n" +
-    files
-      .map(file => {
-        try {
-          return rustForFile(file);
-        } catch (error) {
-          if (error instanceof Unsupported) throw new Error(`${file.origin.stem}.bind.ts: ${error.message}`);
-          throw error;
-        }
-      })
-      .join("")
+  for (const file of files)
+    if (file.origin.rustModule === "native")
+      throw new Error(`${file.origin.stem}.bind.ts: its module would be named native`);
+  const modules = files
+    .map(file => {
+      try {
+        return rustForFile(file);
+      } catch (error) {
+        if (error instanceof Unsupported) throw new Error(`${file.origin.stem}.bind.ts: ${error.message}`);
+        throw error;
+      }
+    })
+    .join("");
+  const byFile = files.map(
+    file => `${rustString(`${file.origin.stem}.bind.ts`)} => ${file.origin.rustModule}::native(global, symbol),`,
   );
+  return `// Generated by src/codegen/bindgen-js.ts. Do not edit.
+${modules}
+/// What \`$bindgen(file, symbol)\` answers: \`file\` is the schema's file name (\`node_path.bind.ts\`), \`symbol\` what it
+/// exports. See each module's \`native\`.
+pub fn native(global: &bun_js::JSGlobalObject, file: &str, symbol: &str) -> Option<bun_js::JsResult<bun_js::JSValue>> {
+    match file {
+${indent(byFile.join("\n"), 8)}
+        _ => None,
+    }
+}
+`;
 }
 
 if (import.meta.main) {

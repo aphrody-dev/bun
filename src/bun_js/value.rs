@@ -124,6 +124,13 @@ impl JSValue {
         self.0.is_string()
     }
 
+    /// A `String` object: `new String("a")`, or an instance of a class that extends `String`.
+    pub fn is_string_object(&self) -> bool {
+        self.0
+            .as_object()
+            .is_some_and(|object| object.is::<JsString>())
+    }
+
     pub fn is_symbol(&self) -> bool {
         self.0.is_symbol()
     }
@@ -166,6 +173,15 @@ impl JSValue {
     /// `typeof`.
     pub fn js_type_string(&self, _: &JSGlobalObject) -> &'static str {
         self.0.type_of()
+    }
+
+    /// What Node's validators say a value is, as `bun_jsc`'s `type_name`: `typeof`, but `array` for an array.
+    pub fn type_name(&self, global: &JSGlobalObject) -> &'static str {
+        if self.is_array() {
+            "array"
+        } else {
+            self.js_type_string(global)
+        }
     }
 
     // ───────────────────────────── reading values ─────────────────────────────
@@ -239,6 +255,12 @@ impl JSValue {
         global
             .lift(result)
             .map(|string| string.to_std_string_lossy())
+    }
+
+    /// `ToString`, as a string value.
+    pub fn to_js_string(&self, global: &JSGlobalObject) -> JsResult<JSValue> {
+        let result = self.0.to_string(global.cx());
+        global.lift(result).map(|string| JSValue(string.into()))
     }
 
     /// `ToString`, as UTF-16.

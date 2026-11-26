@@ -839,7 +839,7 @@ impl BuiltInFunctionObject {
     /// [spec]: https://tc39.es/ecma262/#sec-function.prototype.tostring
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/toString
     #[allow(clippy::wrong_self_convention)]
-    fn to_string(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    fn to_string(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
         // 1. Let func be the this value.
         let func = this;
 
@@ -859,17 +859,9 @@ impl BuiltInFunctionObject {
             return Err(JsNativeError::typ().with_message("not a function").into());
         };
 
-        if object.is::<NativeFunctionObject>() {
-            let name = {
-                // Is there a case here where if there is no name field on a value
-                // name should default to None? Do all functions have names set?
-                let value = object.get(js_string!("name"), &mut *context)?;
-                if value.is_null_or_undefined() {
-                    js_string!()
-                } else {
-                    value.to_string(context)?
-                }
-            };
+        if let Some(function) = object.downcast_ref::<NativeFunctionObject>() {
+            // The name it was made with, its [[InitialName]], whatever its `name` property says now.
+            let name = function.name.clone();
             return Ok(
                 js_string!(js_str!("function "), &name, js_str!("() { [native code] }")).into(),
             );

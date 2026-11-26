@@ -67,18 +67,28 @@ async function boaModules() {
   return `codegen: src/js for Boa in ${out}`;
 }
 
-// Every `.bind.ts` of a member of this workspace, as Rust against bun_js. The crate is the member's package.
+// Every `.bind.ts` of a member of this workspace, as Rust against bun_js. The crate is the member's package. A member
+// also lists schemas outside its own directory, which the JavaScriptCore build shares, relative to it:
+// `[package.metadata.bun-js] bindings = ["../runtime/node/node_path.bind.ts"]`.
 async function bunJsBindings() {
   const root = join(import.meta.dir, "..");
   const toml = async (path: string) => Bun.TOML.parse(await Bun.file(path).text()) as Record<string, any>;
   const sources: string[] = [];
   for (const member of (await toml(join(root, "Cargo.toml"))).workspace.members as string[]) {
     const dir = join(root, member);
-    const crate = (await toml(join(dir, "Cargo.toml"))).package.name as string;
+    const { package: pkg } = await toml(join(dir, "Cargo.toml"));
+    const crate = pkg.name as string;
     for await (const file of new Glob("**/*.bind.ts").scan({ cwd: dir })) sources.push(`${crate}=${join(dir, file)}`);
+    for (const file of (pkg.metadata?.["bun-js"]?.bindings ?? []) as string[]) {
+      const path = join(dir, file);
+      if (!(await Bun.file(path).exists())) throw new Error(`${member}/Cargo.toml: bindings: ${file} does not exist`);
+      sources.push(`${crate}=${path}`);
+    }
   }
+  // A schema can import src/codegen/builtins/lib.ts, which loads the engine's aot/builtins/generator.
   await $`bun src/codegen/bindgen-js.ts --sources=${sources.sort().join(",")} --codegen-path=${codegen}`
     .cwd(repo)
+    .env({ ...process.env, AOT_ENGINE_DIRECTORY: await engineAot() })
     .quiet();
   return `codegen: bun_js bindings of ${sources.length} schemas`;
 }
@@ -159,7 +169,9 @@ const steps = [
 let failed = 0;
 for (const r of await Promise.allSettled(steps)) {
   if (r.status === "rejected") failed++;
-  console.log(r.status === "fulfilled" ? String(r.value).trim() : `error: ${r.reason}`);
+  // A command run `.quiet()` failed: what it printed is the reason.
+  const printed = r.status === "rejected" && r.reason instanceof $.ShellError ? `\n${r.reason.stderr}` : "";
+  console.log(r.status === "fulfilled" ? String(r.value).trim() : `error: ${r.reason}${printed}`);
 }
 if (failed) {
   console.error(`setup: ${failed} of ${steps.length} steps failed`);

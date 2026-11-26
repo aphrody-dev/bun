@@ -207,6 +207,10 @@ pub fn context(
         let _ = MAIN.set(main);
     }
     let _ = ARGV.set(argv);
+    // What node:path (bun_node_path) completes a relative path with, as Bun's VM sets it at startup.
+    if let Ok(cwd) = std::env::current_dir() {
+        bun_paths::fs::FileSystem::init(cwd.as_os_str().as_encoded_bytes());
+    }
     let mut context = Context::builder()
         .module_loader(loader.clone())
         .build()
