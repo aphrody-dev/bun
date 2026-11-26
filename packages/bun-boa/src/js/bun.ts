@@ -2,17 +2,20 @@
 // It is a call, not a bare function expression: the parser drops expression statements without side effects.
 const OPS = "__bun_native_ops__";
 (function install(native: {
-  readText(path: string): string;
-  readBytes(path: string): Uint8Array;
-  exists(path: string): boolean;
-  size(path: string): number;
-  write(path: string, data: string | Uint8Array): number;
-  stdout(text: string): void;
-  stderr(text: string): void;
+  printStdout(text: string): void;
+  printStderr(text: string): void;
   exit(code: number): never;
   cwd(): string;
   nanoseconds(): number;
   semver: { satisfies(version: unknown, range: unknown): boolean; order(left: unknown, right: unknown): -1 | 0 | 1 };
+  // bun_runtime_js::webcore::blob::exports
+  Blob: typeof globalThis.Blob;
+  File: typeof globalThis.File;
+  file(path: unknown, options?: unknown): Blob;
+  write(destination: unknown, data: unknown, options?: unknown): Promise<number>;
+  stdin: Blob;
+  stdout: Blob;
+  stderr: Blob;
   env: Record<string, string>;
   argv: string[];
   main: string;
@@ -22,66 +25,17 @@ const OPS = "__bun_native_ops__";
   arch: string;
   pid: number;
 }) {
-  const MIME: Record<string, string> = {
-    json: "application/json;charset=utf-8",
-    js: "text/javascript;charset=utf-8",
-    mjs: "text/javascript;charset=utf-8",
-    ts: "text/javascript;charset=utf-8",
-    txt: "text/plain;charset=utf-8",
-    html: "text/html;charset=utf-8",
-    css: "text/css;charset=utf-8",
-  };
-
-  class BunFile {
-    readonly name: string;
-    constructor(path: string) {
-      this.name = path;
-    }
-    get size(): number {
-      return native.size(this.name);
-    }
-    get type(): string {
-      return MIME[this.name.split(".").pop() ?? ""] ?? "application/octet-stream";
-    }
-    async text(): Promise<string> {
-      return native.readText(this.name);
-    }
-    async json(): Promise<any> {
-      return JSON.parse(native.readText(this.name));
-    }
-    async bytes(): Promise<Uint8Array> {
-      return native.readBytes(this.name);
-    }
-    async arrayBuffer(): Promise<ArrayBuffer> {
-      return native.readBytes(this.name).buffer as ArrayBuffer;
-    }
-    async exists(): Promise<boolean> {
-      return native.exists(this.name);
-    }
-    get [Symbol.toStringTag]() {
-      return "BunFile";
-    }
-  }
-
-  const path = (dest: unknown): string =>
-    dest instanceof BunFile ? dest.name : dest instanceof URL ? dest.pathname : String(dest);
-
-  async function write(dest: unknown, data: unknown): Promise<number> {
-    if (data instanceof BunFile) data = await data.bytes();
-    if (data instanceof ArrayBuffer) data = new Uint8Array(data);
-    else if (ArrayBuffer.isView(data) && !(data instanceof Uint8Array))
-      data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    return native.write(path(dest), data instanceof Uint8Array ? data : String(data));
-  }
-
   const Bun = {
     version: native.version,
     revision: native.revision,
     env: native.env,
     argv: native.argv,
     main: native.main,
-    file: (p: unknown) => new BunFile(path(p)),
-    write,
+    file: native.file,
+    write: native.write,
+    stdin: native.stdin,
+    stdout: native.stdout,
+    stderr: native.stderr,
     sleep: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
     nanoseconds: native.nanoseconds,
     cwd: native.cwd,
@@ -121,14 +75,16 @@ const OPS = "__bun_native_ops__";
       },
       { bigint: () => BigInt(Math.floor(native.nanoseconds())) },
     ),
-    stdout: { write: (s: unknown) => (native.stdout(String(s)), true) },
-    stderr: { write: (s: unknown) => (native.stderr(String(s)), true) },
+    stdout: { write: (s: unknown) => (native.printStdout(String(s)), true) },
+    stderr: { write: (s: unknown) => (native.printStderr(String(s)), true) },
   };
 
   Object.defineProperties(globalThis, {
     Bun: { value: Bun, writable: true, configurable: true },
     process: { value: process, writable: true, configurable: true },
     global: { value: globalThis, writable: true, configurable: true },
+    Blob: { value: native.Blob, writable: true, configurable: true },
+    File: { value: native.File, writable: true, configurable: true },
   });
   // Boa's runtime has timers but no immediates: one is a timer that is due at once.
   if (typeof (globalThis as any).setImmediate !== "function")

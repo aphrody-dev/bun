@@ -1,6 +1,6 @@
 [package]
 name = "bun_runtime_js"
-description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff."
+description = "bun_runtime's JS-visible APIs on bun_js: node:path, bun:test's diff, Blob, File, Bun.file, Bun.write."
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -15,12 +15,15 @@ path = "lib.rs"
 bindings = ["../runtime/node/node_path.bind.ts", "../runtime/node/node_validators.bind.ts"]
 
 [dependencies]
+boa_engine = { path = "../boa/core/engine", features = ["annex-b", "intl_bundled", "experimental"] }
+boa_gc = { path = "../boa/core/gc" }
 bstr = { version = "1", default-features = false, features = ["alloc"] }
 bun_core = { path = "../bun_core" }
+bun_http_types = { path = "../http_types" }
 bun_js = { path = "../bun_js" }
 bun_node_path = { path = "../node_path" }
+bun_paths = { path = "../paths" }
+bun_sys = { path = "../sys" }
 bun_text_diff = { path = "../text_diff" }
 const_format = "0.2"
-
-[dev-dependencies]
-bun_paths = { path = "../paths" }
+libc = "0.2"
