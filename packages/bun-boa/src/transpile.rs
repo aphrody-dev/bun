@@ -55,7 +55,8 @@ pub fn transpile(path: &[u8], contents: &[u8]) -> Result<Vec<u8>, String> {
         _ => return Err(messages(&log)),
     };
 
-    let list = core::mem::replace(&mut ast.symbols, bun_alloc::ArenaVec::new_in(*ast.symbols.allocator()));
+    let alloc = *ast.symbols.allocator();
+    let list = core::mem::replace(&mut ast.symbols, bun_alloc::ArenaVec::new_in(alloc));
     let symbols = bun_ast::symbol::Map::init_with_one_list(list.into_iter().collect());
     let mut printer = bun_js_printer::BufferPrinter::init(bun_js_printer::BufferWriter::init());
     let options = bun_js_printer::Options {

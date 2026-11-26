@@ -19,7 +19,7 @@ Commands:
 ";
 
 fn report(err: &JsError, context: &mut Context) {
-    let value = err.to_opaque(context);
+    let value = err.clone().into_opaque(context).unwrap_or_else(|e| JsValue::from(js_string!(e.to_string())));
     let stack = value
         .as_object()
         .and_then(|o| o.get(js_string!("stack"), context).ok())
