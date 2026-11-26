@@ -100,6 +100,7 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
     let version = JsString::from(bun_core::package_json_version);
     let revision = JsString::from(bun_core::env::GIT_SHA);
     let serve = bun_runtime_js::server::serve_function(context)?;
+    let crypto = bun_runtime_js::crypto::natives(context);
     let mut ops = ObjectInitializer::new(context);
     for (name, f, len) in [
         (
@@ -134,6 +135,7 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
         ops.property(JsString::from(name), value.into_engine(), Attribute::all());
     }
     ops.property(js_string!("serve"), serve, Attribute::all())
+        .property(js_string!("crypto"), crypto, Attribute::all())
         .property(js_string!("env"), env, Attribute::all())
         .property(js_string!("argv"), argv, Attribute::all())
         .property(js_string!("main"), main, Attribute::all())
@@ -191,6 +193,9 @@ pub fn context(
     let performance = crate::transpile::transpile(b"bun:performance.ts", include_bytes!("js/performance.ts"))
         .map_err(|err| JsNativeError::syntax().with_message(err))?;
     context.eval(Source::from_bytes(&performance))?;
+    let crypto = crate::transpile::transpile(b"bun:crypto.ts", include_bytes!("js/crypto.ts"))
+        .map_err(|err| JsNativeError::syntax().with_message(err))?;
+    context.eval(Source::from_bytes(&crypto))?;
     let prelude = crate::transpile::transpile(b"bun:prelude.ts", include_bytes!("js/bun.ts"))
         .map_err(|err| JsNativeError::syntax().with_message(err))?;
     context.eval(Source::from_bytes(&prelude))?;
