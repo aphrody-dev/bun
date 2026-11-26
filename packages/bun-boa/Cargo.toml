@@ -25,7 +25,7 @@ boa_gc = "0.22"
 boa_runtime = "0.22"
 bun_ast = { path = "../../src/ast" }
 bun_alloc = { path = "../../src/bun_alloc" }
-bun_bundler = { path = "../../src/bundler", optional = true }
+bun_bundler = { path = "../../src/bundler", optional = true, features = ["test_support"] }
 bun_clap = { path = "../../src/clap" }
 bun_event_loop = { path = "../../src/event_loop", optional = true }
 bun_core = { path = "../../src/bun_core" }

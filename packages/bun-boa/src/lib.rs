@@ -6,8 +6,6 @@
 
 #[cfg(feature = "build")]
 pub mod build;
-#[cfg(feature = "build")]
-mod bundler_shims;
 pub mod cli;
 pub mod fmt;
 pub mod lint;
