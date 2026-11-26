@@ -39,8 +39,10 @@ const OPS = "__bun_native_ops__";
   platform: string;
   arch: string;
   pid: number;
+  isMainThread: boolean;
 }) {
   const Bun = {
+    isMainThread: native.isMainThread,
     version: native.version,
     revision: native.revision,
     env: native.env,

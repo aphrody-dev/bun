@@ -1,6 +1,7 @@
 //! The realm a Bun program runs in: Boa's WinterTC runtime (console, timers, encoding, URL, structuredClone),
 //! native operations in Rust, and `Bun`/`process` built on them by `js/bun.ts`.
 
+use std::cell::RefCell;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,11 +15,25 @@ use boa_engine::{
 
 use crate::loader::BunModuleLoader;
 
-static MAIN: OnceLock<PathBuf> = OnceLock::new();
-static ARGV: OnceLock<Vec<String>> = OnceLock::new();
+thread_local! {
+    /// The entry point of the realm of this thread (the process's, or a worker's): `import.meta.main` is it.
+    static MAIN: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
 
-pub fn main_path() -> Option<&'static Path> {
-    MAIN.get().map(PathBuf::as_path)
+/// Whether `path` is the entry point of this thread's realm.
+pub fn is_main(path: &Path) -> bool {
+    MAIN.with(|main| main.borrow().as_deref() == Some(path))
+}
+
+/// What a realm is made for: the process's program, or a worker's.
+pub struct Realm<'a> {
+    /// The entry point, if it is a file.
+    pub main: Option<PathBuf>,
+    /// `process.argv`.
+    pub argv: Vec<String>,
+    /// `process.env`; the process's environment when `None`.
+    pub env: Option<Vec<(String, String)>>,
+    pub worker: Option<&'a mut bun_runtime_js::web::worker::WorkerStart>,
 }
 
 fn string(args: &[JsValue], i: usize, context: &mut Context) -> JsResult<String> {
@@ -42,8 +57,12 @@ fn stderr(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsVa
     print(args, context, &mut std::io::stderr().lock())
 }
 
+/// `process.exit(code)`: the process, or in a worker the worker's thread.
 fn exit(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let code = args.get_or_undefined(0).to_i32(context)?;
+    if let Some(stop) = bun_runtime_js::web::worker::exit(context, code) {
+        return Err(stop);
+    }
     let _ = std::io::stdout().flush();
     std::process::exit(code)
 }
@@ -76,13 +95,15 @@ fn strings(values: impl IntoIterator<Item = String>, context: &mut Context) -> J
     boa_engine::object::builtins::JsArray::from_iter(values, context).into()
 }
 
-fn native(context: &mut Context) -> JsResult<JsValue> {
+fn native(context: &mut Context, realm: &Realm<'_>) -> JsResult<JsValue> {
     let env = ObjectInitializer::new(context).build();
-    for (key, value) in std::env::vars_os() {
-        let (key, value) = (
-            key.to_string_lossy().into_owned(),
-            value.to_string_lossy().into_owned(),
-        );
+    let vars: Vec<(String, String)> = match &realm.env {
+        Some(env) => env.clone(),
+        None => std::env::vars_os()
+            .map(|(key, value)| (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned()))
+            .collect(),
+    };
+    for (key, value) in vars {
         env.set(
             JsString::from(key.as_str()),
             JsString::from(value.as_str()),
@@ -90,13 +111,16 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
             context,
         )?;
     }
-    let argv = strings(ARGV.get().cloned().unwrap_or_default(), context);
+    let argv = strings(realm.argv.iter().cloned(), context);
     let main = JsString::from(
-        main_path()
+        realm
+            .main
+            .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default()
             .as_str(),
     );
+    let is_main_thread = realm.worker.is_none();
     let version = JsString::from(bun_core::package_json_version);
     let revision = JsString::from(bun_core::env::GIT_SHA);
     let serve = bun_runtime_js::server::serve_function(context)?;
@@ -145,7 +169,8 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
             Attribute::all(),
         )
         .property(js_string!("arch"), JsString::from(arch()), Attribute::all())
-        .property(js_string!("pid"), std::process::id(), Attribute::all());
+        .property(js_string!("pid"), std::process::id(), Attribute::all())
+        .property(js_string!("isMainThread"), is_main_thread, Attribute::all());
     Ok(ops.build().into())
 }
 
@@ -163,14 +188,19 @@ pub fn context(
     main: Option<PathBuf>,
     argv: Vec<String>,
 ) -> JsResult<Context> {
-    if let Some(main) = main {
-        let _ = MAIN.set(main);
-    }
-    let _ = ARGV.set(argv);
+    context_for(loader, Realm { main, argv, env: None, worker: None })
+}
+
+/// A realm with Bun's globals for `realm`: the process's program, or a worker's (whose thread this is).
+pub fn context_for(loader: Rc<BunModuleLoader>, mut realm: Realm<'_>) -> JsResult<Context> {
+    MAIN.with(|main| *main.borrow_mut() = realm.main.clone());
     // What node:path (bun_node_path) completes a relative path with, as Bun's VM sets it at startup.
-    if let Ok(cwd) = std::env::current_dir() {
-        bun_paths::fs::FileSystem::init(cwd.as_os_str().as_encoded_bytes());
-    }
+    static CWD: OnceLock<()> = OnceLock::new();
+    CWD.get_or_init(|| {
+        if let Ok(cwd) = std::env::current_dir() {
+            bun_paths::fs::FileSystem::init(cwd.as_os_str().as_encoded_bytes());
+        }
+    });
     let event_loop = bun_runtime_js::EventLoop::new()
         .map_err(|err| JsNativeError::error().with_message(err.to_string()))?;
     let mut context = Context::builder()
@@ -178,6 +208,9 @@ pub fn context(
         .job_executor(event_loop)
         .build()
         .map_err(|err| JsNativeError::error().with_message(err.to_string()))?;
+    if let Some(start) = realm.worker.as_deref_mut() {
+        bun_runtime_js::web::worker::enter(&mut context, start);
+    }
     loader.install(&mut context);
     boa_runtime::register(
         boa_runtime::extensions::ConsoleExtension(boa_runtime::DefaultLogger),
@@ -186,14 +219,20 @@ pub fn context(
     )?;
     bun_runtime_js::web::performance::start();
     bun_runtime_js::install(&mut context)?;
-    let ops = native(&mut context)?;
+    let ops = native(&mut context, &realm)?;
     context.register_global_property(js_string!("__bun_native_ops__"), ops, Attribute::all())?;
-    let performance = crate::transpile::transpile(b"bun:performance.ts", include_bytes!("js/performance.ts"))
-        .map_err(|err| JsNativeError::syntax().with_message(err))?;
-    context.eval(Source::from_bytes(&performance))?;
-    let prelude = crate::transpile::transpile(b"bun:prelude.ts", include_bytes!("js/bun.ts"))
-        .map_err(|err| JsNativeError::syntax().with_message(err))?;
-    context.eval(Source::from_bytes(&prelude))?;
+    let worker_ops = bun_runtime_js::web::message_port::ops(&mut context)?;
+    context.register_global_property(js_string!("__bun_worker_ops__"), worker_ops, Attribute::all())?;
+    // EventTarget and the events first: performance.ts extends EventTarget, worker.ts the rest.
+    for (name, source) in [
+        (&b"bun:events.ts"[..], &include_bytes!("js/events.ts")[..]),
+        (b"bun:performance.ts", include_bytes!("js/performance.ts")),
+        (b"bun:prelude.ts", include_bytes!("js/bun.ts")),
+        (b"bun:worker.ts", include_bytes!("js/worker.ts")),
+    ] {
+        let js = crate::transpile::transpile(name, source).map_err(|err| JsNativeError::syntax().with_message(err))?;
+        context.eval(Source::from_bytes(&js))?;
+    }
     crate::builtins::install(&mut context)?;
     Ok(context)
 }

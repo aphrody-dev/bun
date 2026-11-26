@@ -156,6 +156,7 @@ fn script_or_file(name: &str, rest: &[String]) -> i32 {
 pub fn main() -> i32 {
     // As Bun's `main`: the threads of the work pool configure their output from it.
     bun_core::output::stdio::init();
+    crate::worker::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => {
