@@ -256,6 +256,29 @@ fn build_bundles_and_runs() {
     assert!(!out.status.success(), "{:?}", text(&out));
 }
 
+/// `bun install`, `bun add` and `bun remove` and their aliases reach Bun's package manager (`bun_install`), which parses
+/// their flags. `bun install -g` is `bun add`, as in `Command::which`.
+#[cfg(feature = "install")]
+#[test]
+fn install_add_remove_reach_the_package_manager() {
+    for (args, usage) in [
+        (&["install", "--help"][..], "Usage: bun install "),
+        (&["i", "--help"], "Usage: bun install "),
+        (&["ci", "--help"], "Usage: bun install "),
+        (&["install", "-g", "--help"], "Usage: bun add "),
+        (&["add", "--help"], "Usage: bun add "),
+        (&["a", "--help"], "Usage: bun add "),
+        (&["remove", "--help"], "Usage: bun remove "),
+        (&["rm", "--help"], "Usage: bun remove "),
+        (&["r", "--help"], "Usage: bun remove "),
+        (&["uninstall", "--help"], "Usage: bun remove "),
+    ] {
+        let out = bun().args(args).env("NO_COLOR", "1").output().unwrap();
+        assert!(text(&out).0.trim_start().starts_with(usage), "{args:?}: {:?}", text(&out));
+        assert!(out.status.success(), "{args:?}: {:?}", text(&out));
+    }
+}
+
 /// File errors read as Bun's (bun_sys): errno name, message, syscall and path.
 #[test]
 fn file_errors_read_as_bun() {

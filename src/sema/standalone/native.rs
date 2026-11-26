@@ -468,9 +468,15 @@ extern "C" fn getPeakRSS(peak: &mut usize) -> c_int {
     *peak = 0;
     -1
 }
+/// c-bindings.cpp's: a regular file that its owner may execute.
+#[cfg(unix)]
 #[unsafe(no_mangle)]
-extern "C" fn is_executable_file(_path: *const c_char) -> bool {
-    false
+extern "C" fn is_executable_file(path: *const c_char) -> bool {
+    // SAFETY: the caller's NUL-terminated path, and room for a stat.
+    unsafe {
+        let mut st: libc::stat = core::mem::zeroed();
+        libc::stat(path, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFREG && st.st_mode & libc::S_IXUSR != 0
+    }
 }
 
 /// Returns the mantissa digits of `text`, starting at the first nonzero digit.

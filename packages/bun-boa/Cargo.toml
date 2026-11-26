@@ -3,7 +3,7 @@
 [workspace]
 resolver = "2"
 # bun_js and the crates on it are members: Bun's root workspace does not build Boa.
-members = ["cdp", "../../src/bun_js", "../../src/runtime_js", "../../src/semver_js", "../../src/sqlite_js"]
+members = ["cdp", "../../src/bun_js", "../../src/runtime_js", "../../src/semver_js", "../../src/sqlite_js", "../../src/usockets_rs"]
 
 [package]
 name = "bun-boa"
@@ -19,6 +19,28 @@ path = "src/main.rs"
 [features]
 # `bun build`: links Bun's bundler, whose graph still reaches C/C++ (uws, BoringSSL, Highway, lol-html).
 build = ["dep:bun_bundler", "dep:bun_event_loop", "dep:bun_options_types"]
+# `bun install`, `bun add`, `bun remove`: Bun's package manager, on Rust uSockets (src/usockets_rs) and the Rust ports
+# in src/install. What it reaches of C/C++ that has no Rust yet stops the process (src/install/native.rs).
+install = [
+  "dep:bun_boringssl_sys",
+  "dep:bun_crash_handler",
+  "dep:bun_event_loop",
+  "dep:bun_http",
+  "dep:bun_install",
+  "dep:bun_install_types",
+  "dep:bun_io",
+  "dep:bun_options_types",
+  "dep:bun_ptr",
+  "dep:bun_spawn",
+  "dep:bun_usockets_rs",
+  "dep:bun_uws_sys",
+  "dep:bun_yarr",
+  "dep:getrandom",
+  "dep:libc",
+  "dep:sha1",
+  "dep:sha2",
+  "dep:url",
+]
 
 [dependencies]
 boa_engine = { path = "../../src/boa/core/engine", features = ["annex-b", "intl_bundled", "experimental"] }
@@ -26,10 +48,16 @@ boa_gc = { path = "../../src/boa/core/gc" }
 boa_runtime = { path = "../../src/boa/core/runtime" }
 bun_ast = { path = "../../src/ast" }
 bun_alloc = { path = "../../src/bun_alloc" }
+bun_boringssl_sys = { path = "../../src/boringssl_sys", optional = true }
 bun_bundler = { path = "../../src/bundler", optional = true, features = ["test_support"] }
 bun_clap = { path = "../../src/clap" }
 bun_event_loop = { path = "../../src/event_loop", optional = true }
+bun_http = { path = "../../src/http", optional = true }
+bun_install = { path = "../../src/install", optional = true }
+bun_install_types = { path = "../../src/install_types", optional = true }
+bun_io = { path = "../../src/io", optional = true }
 bun_core = { path = "../../src/bun_core" }
+bun_crash_handler = { path = "../../src/crash_handler", optional = true }
 bun_js = { path = "../../src/bun_js" }
 bun_js_parser = { path = "../../src/js_parser" }
 bun_js_printer = { path = "../../src/js_printer" }
@@ -38,7 +66,11 @@ bun_parsers = { path = "../../src/parsers" }
 bun_runtime_js = { path = "../../src/runtime_js" }
 bun_options_types = { path = "../../src/options_types", optional = true }
 bun_paths = { path = "../../src/paths" }
+bun_ptr = { path = "../../src/ptr", optional = true }
+bun_spawn = { path = "../../src/spawn", optional = true }
 bun_sys = { path = "../../src/sys" }
+bun_usockets_rs = { path = "../../src/usockets_rs", optional = true }
+bun_uws_sys = { path = "../../src/uws_sys", optional = true }
 bun_sema = { path = "../../src/sema" }
 bun_sourcemap = { path = "../../src/sourcemap" }
 bun_semver_js = { path = "../../src/semver_js" }
@@ -46,16 +78,25 @@ bun_sqlite_js = { path = "../../src/sqlite_js" }
 bun_sema_driver = { path = "../../src/sema/driver" }
 bun_sema_standalone = { path = "../../src/sema/standalone" }
 bun_threading = { path = "../../src/threading" }
+bun_yarr = { path = "../../src/yarr", optional = true }
 bun_zstd = { path = "../../src/zstd" }
+getrandom = { version = "0.4", optional = true }
 icu_normalizer = { version = "~2.3.0", features = ["compiled_data", "utf16_iter"] }
+libc = { version = "0.2", optional = true }
 regress = { version = "0.12", features = ["utf16"] }
 serde_json = "1"
+sha1 = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
+url = { version = "2", optional = true }
 
 [build-dependencies]
 serde_json = "1"
 
 [dev-dependencies]
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
+# The HTTPS registry of tests/install.rs.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.1.0-pre.0"
 
 [profile.dev]
 debug = "line-tables-only"
