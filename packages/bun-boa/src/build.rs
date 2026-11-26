@@ -7,6 +7,7 @@ use bun_bundler::{options, transpiler};
 use bun_options_types::schema::api;
 
 pub fn main(args: &[String]) -> i32 {
+    bun_core::output::stdio::init();
     let (mut entries, mut outdir, mut outfile, mut minify): (_, Option<String>, Option<String>, _) = (Vec::new(), None, None, false);
     let mut it = args.iter();
     while let Some(arg) = it.next() {
