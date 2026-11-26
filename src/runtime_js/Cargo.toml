@@ -17,6 +17,7 @@ bindings = ["../runtime/node/node_path.bind.ts", "../runtime/node/node_validator
 [dependencies]
 boa_engine = { path = "../boa/core/engine", features = ["annex-b", "intl_bundled", "experimental"] }
 boa_gc = { path = "../boa/core/gc" }
+boa_wintertc = { path = "../boa/core/wintertc" }
 bstr = { version = "1", default-features = false, features = ["alloc"] }
 bun_core = { path = "../bun_core" }
 bun_http_types = { path = "../http_types" }
@@ -26,4 +27,5 @@ bun_paths = { path = "../paths" }
 bun_sys = { path = "../sys" }
 bun_text_diff = { path = "../text_diff" }
 const_format = "0.2"
+getrandom = "0.4"
 libc = "0.2"

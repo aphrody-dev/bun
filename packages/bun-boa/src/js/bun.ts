@@ -11,11 +11,15 @@ const OPS = "__bun_native_ops__";
   // bun_runtime_js::webcore::blob::exports
   Blob: typeof globalThis.Blob;
   File: typeof globalThis.File;
+  FormData: typeof globalThis.FormData;
   file(path: unknown, options?: unknown): Blob;
   write(destination: unknown, data: unknown, options?: unknown): Promise<number>;
   stdin: Blob;
   stdout: Blob;
   stderr: Blob;
+  createObjectURL(blob: unknown): string;
+  revokeObjectURL(url: unknown): void;
+  resolveObjectURL(url: unknown): Blob | undefined;
   env: Record<string, string>;
   argv: string[];
   main: string;
@@ -85,7 +89,13 @@ const OPS = "__bun_native_ops__";
     global: { value: globalThis, writable: true, configurable: true },
     Blob: { value: native.Blob, writable: true, configurable: true },
     File: { value: native.File, writable: true, configurable: true },
+    FormData: { value: native.FormData, writable: true, configurable: true },
   });
+  if (typeof URL === "function")
+    Object.defineProperties(URL, {
+      createObjectURL: { value: native.createObjectURL, writable: true, enumerable: true, configurable: true },
+      revokeObjectURL: { value: native.revokeObjectURL, writable: true, enumerable: true, configurable: true },
+    });
   // Boa's runtime has timers but no immediates: one is a timer that is due at once.
   if (typeof (globalThis as any).setImmediate !== "function")
     Object.defineProperties(globalThis, {

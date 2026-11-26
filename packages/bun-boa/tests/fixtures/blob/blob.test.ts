@@ -13,12 +13,19 @@ test("Blob joins its parts", async () => {
   expect(() => new Blob("ok" as any)).toThrow("new Blob() expects an Array");
   expect(Bun.inspect(new Blob(["x"], { type: "text/plain" }))).toBe('Blob (1 bytes) {\n  type: "text/plain"\n}');
   expect(Bun.inspect({ b: new Blob([]) })).toBe("{ b: Blob (0 KB) }");
+  const form = await new Blob(["a=1&b=2"], { type: "application/x-www-form-urlencoded" }).formData();
+  expect([form instanceof FormData, form.get("a"), form.getAll("b")]).toEqual([true, "1", ["2"]]);
+  const clone = structuredClone(new File(["x"], "f.txt", { type: "text/plain" }));
+  expect([clone instanceof File, clone.name, clone.type, await clone.text()]).toEqual([true, "f.txt", "text/plain", "x"]);
 });
 
 test("File is a Blob with a name", () => {
   const f = new File(["x"], "a.txt", { lastModified: 7 });
   expect([f.name, f.lastModified, f instanceof File, f instanceof Blob]).toEqual(["a.txt", 7, true, true]);
   expect(new Blob([]) instanceof File).toBe(false);
+  const url = URL.createObjectURL(f);
+  expect(url.startsWith("blob:")).toBe(true);
+  URL.revokeObjectURL(url);
 });
 
 test("Bun.write and Bun.file", async () => {
