@@ -344,6 +344,7 @@ impl BunModuleLoader {
             .borrow_mut()
             .insert(path.to_path_buf(), module.clone());
         let import_meta = JsObject::with_object_proto(context.intrinsics());
+        fill_import_meta(&import_meta, path, context);
         let args = [
             exports.clone().into(),
             require.into(),
@@ -441,12 +442,17 @@ impl BunModuleLoader {
         let contents =
             bun_sys::File::read_from(bun_sys::Fd::cwd(), path.as_os_str().as_encoded_bytes())
                 .map_err(|err| type_error(err.to_string()))?;
+        self.load_source(path, &contents, context)
+    }
+
+    /// The module of `contents`, as if read from `path`: a worker's `data:` or `blob:` entry point.
+    pub fn load_source(&self, path: &Path, contents: &[u8], context: &mut Context) -> JsResult<Module> {
         let module = if path.extension().is_some_and(|ext| ext == "json") {
-            let text = String::from_utf8_lossy(&contents);
+            let text = String::from_utf8_lossy(contents);
             Module::parse_json(JsString::from(text.as_ref()), context)?
         } else {
             let js =
-                crate::transpile::transpile_module(path.as_os_str().as_encoded_bytes(), &contents)
+                crate::transpile::transpile_module(path.as_os_str().as_encoded_bytes(), contents)
                     .map_err(|err| JsNativeError::syntax().with_message(err))?;
             if js.commonjs {
                 let module = self.commonjs_module(path, &js.code, context)?;
@@ -514,28 +520,25 @@ impl ModuleLoader for BunModuleLoader {
         context: &mut Context,
     ) {
         let Some(path) = module.path() else { return };
-        let dir = path.parent().unwrap_or(path);
-        let name = path.file_name().unwrap_or_default();
-        let set = |key: JsString, value: String, context: &mut Context| {
-            let _ = import_meta.set(key, JsString::from(value.as_str()), false, context);
-        };
-        set(
-            js_string!("url"),
-            format!("file://{}", path.display()),
-            context,
-        );
-        set(js_string!("path"), path.display().to_string(), context);
-        set(js_string!("filename"), path.display().to_string(), context);
-        set(
-            js_string!("file"),
-            name.to_string_lossy().into_owned(),
-            context,
-        );
-        set(js_string!("dir"), dir.display().to_string(), context);
-        set(js_string!("dirname"), dir.display().to_string(), context);
-        let main = crate::runtime::main_path().is_some_and(|main| main == path);
-        let _ = import_meta.set(js_string!("main"), main, false, context);
-        let require = make_require(dir, context);
-        let _ = import_meta.set(js_string!("require"), require, false, context);
+        fill_import_meta(import_meta, path, context);
     }
+}
+
+/// `import.meta` of the module at `path`, an ES module's or a CommonJS module's (its wrapper's `importMeta`).
+fn fill_import_meta(import_meta: &JsObject, path: &Path, context: &mut Context) {
+    let dir = path.parent().unwrap_or(path);
+    let name = path.file_name().unwrap_or_default();
+    let set = |key: JsString, value: String, context: &mut Context| {
+        let _ = import_meta.set(key, JsString::from(value.as_str()), false, context);
+    };
+    set(js_string!("url"), format!("file://{}", path.display()), context);
+    set(js_string!("path"), path.display().to_string(), context);
+    set(js_string!("filename"), path.display().to_string(), context);
+    set(js_string!("file"), name.to_string_lossy().into_owned(), context);
+    set(js_string!("dir"), dir.display().to_string(), context);
+    set(js_string!("dirname"), dir.display().to_string(), context);
+    let main = crate::runtime::is_main(path);
+    let _ = import_meta.set(js_string!("main"), main, false, context);
+    let require = make_require(dir, context);
+    let _ = import_meta.set(js_string!("require"), require, false, context);
 }

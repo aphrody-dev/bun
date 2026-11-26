@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [features]
 # `bun build`: links Bun's bundler, whose graph still reaches C/C++ (uws, BoringSSL, Highway, lol-html).
-build = ["dep:bun_bundler", "dep:bun_event_loop", "dep:bun_options_types"]
+build = ["dep:bun_bundler", "dep:bun_event_loop"]
 # `bun install`, `bun add`, `bun remove`: Bun's package manager, on Rust uSockets (src/usockets_rs) and the Rust ports
 # in src/install. What it reaches of C/C++ that has no Rust yet stops the process (src/install/native.rs).
 install = [
@@ -29,7 +29,6 @@ install = [
   "dep:bun_install",
   "dep:bun_install_types",
   "dep:bun_io",
-  "dep:bun_options_types",
   "dep:bun_ptr",
   "dep:bun_spawn",
   "dep:bun_usockets_rs",
@@ -39,7 +38,6 @@ install = [
   "dep:libc",
   "dep:sha1",
   "dep:sha2",
-  "dep:url",
 ]
 
 [dependencies]
@@ -48,6 +46,7 @@ boa_gc = { path = "../../src/boa/core/gc" }
 boa_runtime = { path = "../../src/boa/core/runtime" }
 bun_ast = { path = "../../src/ast" }
 bun_alloc = { path = "../../src/bun_alloc" }
+bun_base64 = { path = "../../src/base64" }
 bun_boringssl_sys = { path = "../../src/boringssl_sys", optional = true }
 bun_bundler = { path = "../../src/bundler", optional = true, features = ["test_support"] }
 bun_clap = { path = "../../src/clap" }
@@ -64,7 +63,7 @@ bun_js_printer = { path = "../../src/js_printer" }
 bun_lint_driver = { path = "../../src/lint/driver" }
 bun_parsers = { path = "../../src/parsers" }
 bun_runtime_js = { path = "../../src/runtime_js" }
-bun_options_types = { path = "../../src/options_types", optional = true }
+bun_options_types = { path = "../../src/options_types" }
 bun_paths = { path = "../../src/paths" }
 bun_ptr = { path = "../../src/ptr", optional = true }
 bun_spawn = { path = "../../src/spawn", optional = true }
@@ -87,7 +86,8 @@ regress = { version = "0.12", features = ["utf16"] }
 serde_json = "1"
 sha1 = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
-url = { version = "2", optional = true }
+# Install's URL__* (src/install/wtf.rs), and the `file:` URLs of a Worker's entry point.
+url = "2"
 
 [build-dependencies]
 serde_json = "1"
