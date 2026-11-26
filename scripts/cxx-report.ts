@@ -35,7 +35,8 @@ const includeDirs = [
   ]),
 ];
 // The fork's own code: dependencies (vendor/) and generated code (build/) are not part of the budget.
-const own = (path: string) => path.startsWith(root + "/") && !/^(vendor|build|node_modules)\//.test(relative(root, path));
+const own = (path: string) =>
+  path.startsWith(root + "/") && !/^(vendor|build|node_modules)\//.test(relative(root, path));
 
 const include = /^\s*#\s*(?:include|import)\s*[<"]([^>"]+)[>"]/gm;
 const lang = new Map<string, "cxx" | "c">();
@@ -89,4 +90,5 @@ await Bun.write(join(root, "build/cxx-report.json"), JSON.stringify(report, null
 console.log(
   `C++ ${total.cxx} lines, C ${total.c} lines compiled from the fork; C++ deps: ${report.cxx_deps.join(", ")}; C deps: ${report.c_deps.join(", ")}`,
 );
-for (const [dir, e] of Object.entries(report.by_dir).slice(0, 12)) console.log(`  ${dir.padEnd(36)} c++ ${e.cxx}  c ${e.c}`);
+for (const [dir, e] of Object.entries(report.by_dir).slice(0, 12))
+  console.log(`  ${dir.padEnd(36)} c++ ${e.cxx}  c ${e.c}`);
