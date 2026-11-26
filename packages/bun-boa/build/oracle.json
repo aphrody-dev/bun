@@ -1,8 +1,9 @@
 {
   "meta": {
-    "date": "2026-11-26T09:28:16.996Z",
+    "date": "2026-11-26T10:48:34.783Z",
     "upstream": "1.4.6-canary.1+e13b16bc7",
-    "boa": "2093505ee04fde2cc62b82d6bb06191651c1de73",
+    "boa": "9fd01cd849360808e0b0f32b960c14b49fd83950",
+    "rebuilt": true,
     "hosts": [
       "n1",
       "n2",
@@ -10,13 +11,12 @@
     ],
     "down": [],
     "timeout_ms": 20000,
-    "seconds": 258,
+    "seconds": 259,
     "inputs": {
       "npm": 100,
       "fixture": 2129,
       "test": 1367
-    },
-    "rebuilt": false
+    }
   },
   "transpile": {
     "inputs": 3596,
@@ -41,7 +41,7 @@
       "first_byte": 206,
       "len_a": 206,
       "len_b": 225,
-      "count": 2033,
+      "count": 2034,
       "example": "npm/@esbuild/linux-x64",
       "a": "",
       "b": "error: BuildFailed",
@@ -287,20 +287,6 @@
       "db": ""
     },
     {
-      "id": "3e08b7fd89577363",
-      "checkpoint": "bundle",
-      "stream": "stderr",
-      "first_byte": 0,
-      "len_a": 2156,
-      "len_b": 1288,
-      "count": 12,
-      "example": "test/js/bun/bun-object/deep-equals.test.ts",
-      "a": "9 | import { gc as bunGC, sleepSync, spawnSync, unsafe, which } from \"bun\";",
-      "b": "",
-      "da": "9 | import { gc as bunGC, sleepSync, spawnSync, unsafe, which } from \"bun\";",
-      "db": ""
-    },
-    {
       "id": "8c8a2e054faadb95",
       "checkpoint": "run",
       "stream": "stdout",
@@ -312,6 +298,20 @@
       "a": "6 false false true true",
       "b": "",
       "da": "6 false false true true",
+      "db": ""
+    },
+    {
+      "id": "3e08b7fd89577363",
+      "checkpoint": "bundle",
+      "stream": "stderr",
+      "first_byte": 0,
+      "len_a": 2156,
+      "len_b": 1291,
+      "count": 10,
+      "example": "test/js/bun/bun-object/deep-equals.test.ts",
+      "a": "9 | import { gc as bunGC, sleepSync, spawnSync, unsafe, which } from \"bun\";",
+      "b": "",
+      "da": "9 | import { gc as bunGC, sleepSync, spawnSync, unsafe, which } from \"bun\";",
       "db": ""
     },
     {
@@ -334,7 +334,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 286,
-      "len_b": 5329,
+      "len_b": 4917,
       "count": 8,
       "example": "test/js/third_party/express/app.router.test.ts",
       "a": "9 | const { Server } = require('tls');",
@@ -656,7 +656,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 1015,
-      "len_b": 1283,
+      "len_b": 1286,
       "count": 2,
       "example": "npm/find-up",
       "a": "1 | import process from 'node:process';",
@@ -973,6 +973,20 @@
       "db": "undefined"
     },
     {
+      "id": "0481c684466b2197",
+      "checkpoint": "bundle",
+      "stream": "stderr",
+      "first_byte": 0,
+      "len_a": 2491,
+      "len_b": 481,
+      "count": 1,
+      "example": "test/js/bun/resolve/build-error.test.ts",
+      "a": "2 | const duplicateConstDecl = 456;",
+      "b": "",
+      "da": "2 | const duplicateConstDecl = 456;",
+      "db": ""
+    },
+    {
       "id": "04ab1d1bd7d06183",
       "checkpoint": "run",
       "stream": "stdout",
@@ -1216,7 +1230,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 4292,
-      "len_b": 479,
+      "len_b": 480,
       "count": 1,
       "example": "test/bundler/trim-by-use/programs/node-zlib.ts",
       "a": "1 | import { gzipSync, gunzipSync, deflateRawSync, inflateRawSync, createGzip, crc32 } from \"",
@@ -1617,6 +1631,20 @@
       "db": ""
     },
     {
+      "id": "29b7052b77fb0ec5",
+      "checkpoint": "bundle",
+      "stream": "stderr",
+      "first_byte": 0,
+      "len_a": 587,
+      "len_b": 3315,
+      "count": 1,
+      "example": "npm/undici",
+      "a": "9 |   'node:sqlite': () => require('node:sqlite')",
+      "b": "",
+      "da": "9 |   'node:sqlite': () => require('node:sqlite')",
+      "db": ""
+    },
+    {
       "id": "29c72d7abdc0d4e3",
       "checkpoint": "run",
       "stream": "stdout",
@@ -1664,7 +1692,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 576,
-      "len_b": 482,
+      "len_b": 483,
       "count": 1,
       "example": "test/bundler/trim-by-use/programs/road-x509-check-host.ts",
       "a": "1 | import { X509Certificate } from \"node:crypto\";",
@@ -2205,20 +2233,6 @@
       "db": ""
     },
     {
-      "id": "4ec3df71ca349bea",
-      "checkpoint": "run",
-      "stream": "stderr",
-      "first_byte": 0,
-      "len_a": 489,
-      "len_b": 104,
-      "count": 1,
-      "example": "test/bundler/trim-by-use/programs/package-files.ts",
-      "a": "3 | import { tmpdir } from \"node:os\";",
-      "b": "error: TypeError: Cannot find module 'node:fs' from '<root>/test/bundler/trim-by-use/programs' (native)",
-      "da": "3 | import { tmpdir } from \"node:os\";",
-      "db": "error: TypeError: Cannot find module 'node:fs' from '<root>/test/bundler/trim-by"
-    },
-    {
       "id": "4f36f7a59b50dcfa",
       "checkpoint": "run",
       "stream": "stderr",
@@ -2303,6 +2317,20 @@
       "db": ""
     },
     {
+      "id": "5524db66f05f2020",
+      "checkpoint": "run",
+      "stream": "stdout",
+      "first_byte": 0,
+      "len_a": 117,
+      "len_b": 0,
+      "count": 1,
+      "example": "test/bundler/trim-by-use/programs/package-files.ts",
+      "a": "pkg node_modules/pkg/lib/main.js",
+      "b": "",
+      "da": "pkg node_modules/pkg/lib/main.js",
+      "db": ""
+    },
+    {
       "id": "55b6fe96d4364212",
       "checkpoint": "run",
       "stream": "stdout",
@@ -2328,20 +2356,6 @@
       "a": "undefined Amazon Root CA 3 33",
       "b": "",
       "da": "undefined Amazon Root CA 3 33",
-      "db": ""
-    },
-    {
-      "id": "58bf87a6327aedb9",
-      "checkpoint": "bundle",
-      "stream": "stderr",
-      "first_byte": 0,
-      "len_a": 587,
-      "len_b": 5740,
-      "count": 1,
-      "example": "npm/undici",
-      "a": "150 |       DatabaseSync = require('node:sqlite').DatabaseSync",
-      "b": "",
-      "da": "150 |       DatabaseSync = require('node:sqlite').DatabaseSync",
       "db": ""
     },
     {
@@ -2658,7 +2672,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 585,
-      "len_b": 879,
+      "len_b": 881,
       "count": 1,
       "example": "test/bundler/transpiler/react-compiler-fixtures-run/render-fixture.js",
       "a": "5 | import { pathToFileURL } from \"node:url\";",
@@ -2714,7 +2728,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 1199,
-      "len_b": 478,
+      "len_b": 479,
       "count": 1,
       "example": "test/bundler/trim-runtime-icu/names-none-of-them.js",
       "a": "1 | import { domainToASCII, domainToUnicode } from \"node:url\";",
@@ -3232,7 +3246,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 495,
-      "len_b": 478,
+      "len_b": 479,
       "count": 1,
       "example": "test/bundler/esbuild/hello.ts",
       "a": "2 | import { fileURLToPath } from \"url\";",
@@ -3339,20 +3353,6 @@
       "db": ""
     },
     {
-      "id": "8c9c0f34f0294f63",
-      "checkpoint": "bundle",
-      "stream": "stderr",
-      "first_byte": 0,
-      "len_a": 4303,
-      "len_b": 4322,
-      "count": 1,
-      "example": "test/js/bun/spawn/spawn-maxbuf.test.ts",
-      "a": "9 | import { gc as bunGC, sleepSync, spawnSync, unsafe, which } from \"bun\";",
-      "b": "27 | const { exec, execSync, spawn, spawnSync } = require('child_process');",
-      "da": "9 | import { gc as bunGC, sleepSync, spawnSync, unsafe, which } from \"bun\"",
-      "db": "27 | const { exec, execSync, spawn, spawnSync } = require('child_process')"
-    },
-    {
       "id": "8d01072f618c6bf0",
       "checkpoint": "run",
       "stream": "stderr",
@@ -3400,7 +3400,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 530,
-      "len_b": 479,
+      "len_b": 480,
       "count": 1,
       "example": "test/js/node/url/url.test.ts",
       "a": "1 | import { parse, urlToHttpOptions } from \"url\";",
@@ -3484,7 +3484,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 1981,
-      "len_b": 479,
+      "len_b": 480,
       "count": 1,
       "example": "test/bundler/trim-by-use/programs/zstd.ts",
       "a": "1 | import { zstdCompressSync, zstdDecompressSync, createZstdCompress } from \"node:zlib\";",
@@ -3672,6 +3672,20 @@
       "a": "ACCESSOR_TYPES",
       "b": "",
       "da": "ACCESSOR_TYPES",
+      "db": ""
+    },
+    {
+      "id": "a04a4f67c9c839b5",
+      "checkpoint": "bundle",
+      "stream": "stderr",
+      "first_byte": 0,
+      "len_a": 2421,
+      "len_b": 1693,
+      "count": 1,
+      "example": "test/js/node/http/node-http.test.ts",
+      "a": "4 | var tls = require('tls');",
+      "b": "",
+      "da": "4 | var tls = require('tls');",
       "db": ""
     },
     {
@@ -3918,7 +3932,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 547,
-      "len_b": 484,
+      "len_b": 485,
       "count": 1,
       "example": "test/bundler/trim-by-use/programs/node-small-modules.ts",
       "a": "2 | import constants from \"node:constants\";",
@@ -4127,13 +4141,13 @@
       "checkpoint": "run",
       "stream": "stderr",
       "first_byte": 0,
-      "len_a": 335,
+      "len_a": 363,
       "len_b": 96,
       "count": 1,
       "example": "test/bundler/transpiler/fixtures/lots-of-for-loop.js",
-      "a": "4280 | for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++)",
+      "a": "4279 | for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++)",
       "b": "",
-      "da": "4280 | for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i",
+      "da": "4279 | for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i",
       "db": ""
     },
     {
@@ -4141,7 +4155,7 @@
       "checkpoint": "run",
       "stream": "stdout",
       "first_byte": 0,
-      "len_a": 127,
+      "len_a": 583,
       "len_b": 0,
       "count": 1,
       "example": "test/bundler/trim-by-use/programs/bodies.ts",
@@ -4338,7 +4352,7 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 486,
-      "len_b": 2489,
+      "len_b": 2496,
       "count": 1,
       "example": "test/js/third_party/@napi-rs/canvas/napi-rs-canvas.test.ts",
       "a": "error: Loading .node files won't work in the browser. Make sure to set target to \"bun\" or \"node\"",
@@ -4351,13 +4365,13 @@
       "checkpoint": "transpile",
       "stream": "stderr",
       "first_byte": 0,
-      "len_a": 230,
+      "len_a": 336,
       "len_b": 96,
       "count": 1,
       "example": "test/bundler/transpiler/fixtures/lots-of-for-loop.js",
-      "a": "4282 | for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (",
+      "a": "4283 | for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++)",
       "b": "",
-      "da": "4282 | for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i",
+      "da": "4283 | for (let i = 0; i < 1; i++) for (let i = 0; i < 1; i++) for (let i = 0; i",
       "db": ""
     },
     {
@@ -5374,12 +5388,12 @@
       "stream": "stderr",
       "first_byte": 0,
       "len_a": 2132,
-      "len_b": 3300,
+      "len_b": 3308,
       "count": 1,
       "example": "test/js/third_party/grpc-js/test-call-credentials.test.ts",
-      "a": "22 | const http2 = require(\"http2\");",
+      "a": "54 | const http2 = require(\"http2\");",
       "b": "",
-      "da": "22 | const http2 = require(\"http2\");",
+      "da": "54 | const http2 = require(\"http2\");",
       "db": ""
     },
     {
