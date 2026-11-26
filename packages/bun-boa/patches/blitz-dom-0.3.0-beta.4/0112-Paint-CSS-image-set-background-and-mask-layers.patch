@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: zhangzhaohong-dev <zhangzhaohong.dev@gmail.com>
+Date: Sun, 22 Nov 2026 16:22:59 +0000
+Subject: [PATCH] Paint CSS image-set background and mask layers
+
+Port of https://github.com/DioxusLabs/blitz/pull/1723.
+
+Adapted to the older layout: needs_style_image_flush lives in src/stylo.rs, and the flush's early 'no url() layer' check (from the compact DOM storage patch) also looks through the selected image-set() candidate.
+---
+ src/layout/damage.rs |  7 +++++--
+ src/lib.rs           | 14 ++++++++++++++
+ src/stylo.rs         |  4 ++--
+ 3 files changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/src/layout/damage.rs b/src/layout/damage.rs
+index 2e216b6..a2526dd 100644
+--- a/src/layout/damage.rs
++++ b/src/layout/damage.rs
+@@ -805,7 +805,10 @@ impl BaseDocument {
+ 
+         // The initial value is one `none` layer, so a slot per layer would allocate on almost
+         // every element. Painters read slots with `get`, so empty storage means "no image".
+-        if !style_images.iter().any(|image| matches!(image, StyloImage::Url(_))) {
++        if !style_images
++            .iter()
++            .any(|image| matches!(crate::resolve_style_image(image).0, StyloImage::Url(_)))
++        {
+             elem.clear_image_layers(mask);
+             return;
+         }
+@@ -815,7 +818,7 @@ impl BaseDocument {
+         elem_images.resize(len, None);
+ 
+         for idx in 0..len {
+-            let style_image = &style_images[idx];
++            let (style_image, _) = crate::resolve_style_image(&style_images[idx]);
+             let new_image = match style_image {
+                 StyloImage::Url(ComputedUrl::Valid(new_url)) => {
+                     let old_image = elem_images[idx].as_ref();
+diff --git a/src/lib.rs b/src/lib.rs
+index a0547b3..298f91b 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -31,6 +31,20 @@
+ pub const DEFAULT_CSS: &str = include_str!("../assets/default.css");
+ pub const BULLET_FONT: &[u8] = include_bytes!("../assets/moz-bullet-font.otf");
+ 
++/// Return Stylo's chosen CSS image candidate and its pixel density.
++pub fn resolve_style_image(
++    image: &style::values::computed::image::Image,
++) -> (&style::values::computed::image::Image, f32) {
++    use style::values::computed::image::Image;
++    match image {
++        Image::ImageSet(set) => set.items.get(set.selected_index).map_or(
++            (&Image::None, 1.0),
++            |candidate| (&candidate.image, candidate.resolution.dppx()),
++        ),
++        image => (image, 1.0),
++    }
++}
++
+ /// The DOM implementation.
+ ///
+ /// This is the primary entry point for this crate.
+diff --git a/src/stylo.rs b/src/stylo.rs
+index ba2a6f6..d41065b 100644
+--- a/src/stylo.rs
++++ b/src/stylo.rs
+@@ -1948,11 +1948,11 @@ fn needs_style_image_flush(node: &Node, style: &ComputedValues) -> bool {
+             // (a style list of `none` layers and empty storage are in sync).
+             return style_images
+                 .iter()
+-                .any(|image| matches!(image, Image::Url(_)))
++                .any(|image| matches!(crate::resolve_style_image(image).0, Image::Url(_)))
+                 || stored.iter().any(Option::is_some);
+         }
+         std::iter::zip(style_images, stored).any(|(style_image, stored)| {
+-            match (style_image, stored) {
++            match (crate::resolve_style_image(style_image).0, stored) {
+                 (Image::Url(ComputedUrl::Valid(url)), Some(data)) => **url != *data.url,
+                 (Image::Url(ComputedUrl::Valid(_)), None) => true,
+                 (_, Some(_)) => true,

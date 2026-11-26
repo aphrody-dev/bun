@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: zhangzhaohong-dev <zhangzhaohong.dev@gmail.com>
+Date: Tue, 24 Nov 2026 17:32:17 +0000
+Subject: [PATCH] Honor transform contexts for fixed backgrounds
+
+Port of https://github.com/DioxusLabs/blitz/pull/1756.
+
+Adapted to the older establishes_fixed_containing_block here (no ContainerType import) and to accessor-based node ids in is_transformed.
+---
+ src/render/background.rs | 9 ++-------
+ 1 file changed, 2 insertions(+), 7 deletions(-)
+
+diff --git a/src/render/background.rs b/src/render/background.rs
+index 240113d..379346b 100644
+--- a/src/render/background.rs
++++ b/src/render/background.rs
+@@ -377,16 +377,11 @@ impl ElementCx<'_, '_> {
+         (viewport_rect, transform)
+     }
+ 
+-    /// Whether this element or any of its ancestors has a CSS transform
+-    ///
+-    /// TODO: this misses transformed elements whose resolved transform is the
+-    /// identity (e.g. `transform: translate(0)`), and elements with
+-    /// `will-change: transform`, both of which should also degrade `fixed`
+-    /// to `scroll` (see WPT css/css-transforms/transform-fixed-bg-005/008)
++    /// Whether this element or any ancestor establishes a CSS transform space.
+     fn is_transformed(&self) -> bool {
+         let mut current = Some(self.node.id());
+         while let Some(node) = current.and_then(|id| self.context.dom.get_node(id)) {
+-            if node.transform().is_some() {
++            if node.establishes_transform_space() {
+                 return true;
+             }
+             current = node.parent_id();

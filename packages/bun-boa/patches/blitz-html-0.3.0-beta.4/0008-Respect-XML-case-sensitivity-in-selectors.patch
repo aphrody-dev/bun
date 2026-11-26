@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: zhangzhaohong-dev <zhangzhaohong.dev@gmail.com>
+Date: Tue, 24 Nov 2026 16:24:24 +0000
+Subject: [PATCH] Respect XML case sensitivity in selectors
+
+Port of https://github.com/DioxusLabs/blitz/pull/1753.
+
+The flag sits on the chunked NodeTree of the packed node storage and the stylo hunks go to src/stylo.rs; the HTML branch of the patched parse_into_mutator_with_scripting (which the scripting-flag patch added) resets it.
+---
+ src/html_sink.rs | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/html_sink.rs b/src/html_sink.rs
+index 3ee29d7..170ed0a 100644
+--- a/src/html_sink.rs
++++ b/src/html_sink.rs
+@@ -393,6 +393,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
+         if is_xhtml_document(html) {
+             Self::parse_xml_into_mutator(mutr, html);
+         } else {
++            mutr.set_xml_document(false);
+             // Parse as HTML
+             let mut sink = DocumentHtmlParser::new(mutr);
+             sink.is_xml = false;
+@@ -421,6 +422,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
+     /// information (a `Content-Type` header or an `.xht`/`.xhtml` file extension) should use
+     /// this method instead.
+     pub fn parse_xml_into_mutator<'a, 'd>(mutr: &'a mut DocumentMutator<'d>, xml: &str) {
++        mutr.set_xml_document(true);
+         let mut sink = DocumentHtmlParser::new(mutr);
+         sink.is_xml = true;
+         xml5ever::driver::parse_document(sink, Default::default())

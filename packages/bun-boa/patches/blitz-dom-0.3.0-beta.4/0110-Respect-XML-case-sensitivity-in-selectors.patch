@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: zhangzhaohong-dev <zhangzhaohong.dev@gmail.com>
+Date: Tue, 24 Nov 2026 16:24:24 +0000
+Subject: [PATCH] Respect XML case sensitivity in selectors
+
+Port of https://github.com/DioxusLabs/blitz/pull/1753.
+
+The flag sits on the chunked NodeTree of the packed node storage and the stylo hunks go to src/stylo.rs; the HTML branch of the patched parse_into_mutator_with_scripting (which the scripting-flag patch added) resets it.
+---
+ src/mutator.rs | 5 +++++
+ src/stylo.rs   | 4 ++--
+ src/tree.rs    | 2 ++
+ 3 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/src/mutator.rs b/src/mutator.rs
+index da24125..3687346 100644
+--- a/src/mutator.rs
++++ b/src/mutator.rs
+@@ -130,6 +130,11 @@ impl Drop for DocumentMutator<'_> {
+ }
+ 
+ impl DocumentMutator<'_> {
++    /// Set the document syntax before parsing a complete document.
++    pub fn set_xml_document(&mut self, is_xml: bool) {
++        self.doc.nodes.is_xml_document = is_xml;
++    }
++
+     pub fn new<'doc>(doc: &'doc mut BaseDocument) -> DocumentMutator<'doc> {
+         DocumentMutator {
+             doc,
+diff --git a/src/stylo.rs b/src/stylo.rs
+index 02ef524..e019c34 100644
+--- a/src/stylo.rs
++++ b/src/stylo.rs
+@@ -478,7 +478,7 @@ impl<'a> TDocument for BlitzNode<'a> {
+     }
+ 
+     fn is_html_document(&self) -> bool {
+-        true
++        !self.tree().is_xml_document
+     }
+ 
+     fn quirks_mode(&self) -> QuirksMode {
+@@ -681,7 +681,7 @@ impl selectors::Element for BlitzNode<'_> {
+     }
+ 
+     fn is_html_element_in_html_document(&self) -> bool {
+-        true // self.has_namespace(ns!(html))
++        !self.tree().is_xml_document && self.has_namespace(&ns!(html))
+     }
+ 
+     fn has_local_name(&self, local_name: &LocalName) -> bool {
+diff --git a/src/tree.rs b/src/tree.rs
+index 27bfc00..954f293 100644
+--- a/src/tree.rs
++++ b/src/tree.rs
+@@ -19,6 +19,7 @@ const FREE: u32 = 0x8000_0000;
+ /// dropped and its slot reused, ids referring to the dropped node no longer resolve
+ /// ([`NodeTree::get`] returns `None`, and indexing panics) instead of aliasing the new occupant.
+ pub struct NodeTree {
++    pub(crate) is_xml_document: bool,
+     /// Node storage in fixed chunks, so growing never copies nodes or reserves past the next
+     /// chunk. A slot is initialized exactly where its version lacks `FREE`. Slot 0 is a
+     /// permanently free sentinel, so the first node lives in slot 1 as it did under slotmap;
+@@ -145,6 +146,7 @@ impl NodeTree {
+         inline_rebuild: crate::node::InlineRebuild,
+     ) -> Self {
+         Self {
++            is_xml_document: false,
+             chunks: Vec::new(),
+             versions: Vec::new(),
+             // Slot 0 is the free sentinel: never handed out, its version always reads `FREE`.

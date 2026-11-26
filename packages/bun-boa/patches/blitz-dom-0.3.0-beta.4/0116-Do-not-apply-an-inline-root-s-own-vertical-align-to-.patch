@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bahad=C4=B1r?= <dogrubahadir@gmail.com>
+Date: Sat, 21 Nov 2026 07:02:41 +0000
+Subject: [PATCH] Do not apply an inline root's own vertical-align to its text
+
+Port of https://github.com/DioxusLabs/blitz/pull/1701.
+
+Applied to build_inline_layout_into in layout/construct.rs, where this version keeps the inline layout builder.
+
+Left out, outside the crate: tests/blitz-tests/tests/all.rs, tests/blitz-tests/tests/table_cell_line_height.rs.
+---
+ src/layout/construct.rs | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/layout/construct.rs b/src/layout/construct.rs
+index 5b92f02..34ed8ac 100644
+--- a/src/layout/construct.rs
++++ b/src/layout/construct.rs
+@@ -1843,13 +1843,16 @@ pub(crate) fn build_inline_layout_into(
+             .and_then(|parent_id| nodes[parent_id].primary_styles())
+     });
+ 
+-    let parley_style = root_node_style
++    let mut parley_style = root_node_style
+         .as_ref()
+         .map(|s| stylo_to_parley::style(inline_context_root_node_id, s))
+         .unwrap_or_else(|| parley::TextStyle {
+             white_space_collapse: WhiteSpaceCollapse::Collapse,
+             ..Default::default()
+         });
++    // `vertical-align` places a box within its parent's line; the root's own
++    // value (a table cell's `middle`, say) does not apply to its contents.
++    parley_style.vertical_align = parley::VerticalAlign::default();
+ 
+     // Create a parley tree builder
+     let mut builder = layout_ctx.tree_builder(font_ctx, scale, true, &parley_style);
