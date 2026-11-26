@@ -23,6 +23,7 @@ mod error_code;
 mod exception;
 mod global;
 mod host_fn;
+mod internal_field;
 pub mod module;
 mod object;
 mod strong;

@@ -103,8 +103,8 @@ impl JSGlobalObject {
 
     // ───────────────────────────── exceptions ─────────────────────────────
 
-    /// Makes a failed Boa operation the pending exception.
-    pub(crate) fn throw_engine_error(&self, error: boa_engine::JsError) -> JsError {
+    /// Makes a failed Boa operation the pending exception: for an embedder that calls Boa (`engine`) directly.
+    pub fn throw_engine_error(&self, error: boa_engine::JsError) -> JsError {
         self.state().exception = Some(error);
         JsError::Thrown
     }
