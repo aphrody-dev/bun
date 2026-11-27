@@ -10,6 +10,12 @@ use core::ptr::NonNull;
 
 use crate::{ErrorCode, JSGlobalObject, JSValue, JsError, JsResult};
 
+mod bytes;
+mod wrapper;
+
+pub use bytes::{BlobBytes, BlobReader, BufferSource, JsBytes, JsStr, StringOrJsBytes};
+pub use wrapper::{IntoInstance, JsPayload, JsWrapper};
+
 /// `'a` is the call: nothing a body is handed outlives it.
 type Invariant<'a> = PhantomData<fn(&'a ()) -> &'a ()>;
 
@@ -304,9 +310,31 @@ pub mod to_js {
         heap.create_utf8_string(value.as_ref())
     }
 
-    /// A new instance of a class whose payload is `value`, as JavaScriptCore's `into_js` of a `JsPayload`.
-    pub fn class<'a, T: crate::JsClass>(heap: &JsHeap<'a>, value: T) -> Result<'a, JsLocal<'a>> {
-        Ok(JsLocal::from_raw(crate::class::to_js(heap.global_object(), value)?))
+    /// A new instance of a class whose payload is `value`, as JavaScriptCore's `into_js` of a `JsPayload`, or the
+    /// instance a `JsWrapper` is.
+    pub fn class<'a, T: crate::JsClass>(
+        heap: &JsHeap<'a>,
+        value: impl super::IntoInstance<'a, T>,
+    ) -> Result<'a, JsLocal<'a>> {
+        Ok(JsLocal::from_raw(value.into_instance(heap)?))
+    }
+
+    /// `b.u64.asBigInt`.
+    pub fn u64_as_bigint<'a>(_: &JsHeap<'a>, value: u64) -> Result<'a, JsLocal<'a>> {
+        Ok(JsLocal::from_raw(JSValue(boa_engine::JsBigInt::from(value).into())))
+    }
+
+    /// `b.array(T)`: a new array of each element, converted by `convert`.
+    pub fn array<'a, T>(
+        heap: &JsHeap<'a>,
+        values: impl IntoIterator<Item = T>,
+        convert: impl Fn(&JsHeap<'a>, T) -> Result<'a, JsLocal<'a>>,
+    ) -> Result<'a, JsLocal<'a>> {
+        let values = values
+            .into_iter()
+            .map(|value| convert(heap, value))
+            .collect::<Result<'a, Vec<_>>>()?;
+        heap.create_array_of(&values)
     }
 }
 
@@ -329,13 +357,107 @@ pub mod from_js {
             expected: &'n str,
             index: Option<usize>,
         },
+        /// `NodeArgumentContext`, for an argument with a list of `expected`: Node's
+        /// `ERR_INVALID_ARG_TYPE(name, expected, actual)`, `The "a" argument must be of type string. Received …`.
+        Node { name: &'n str, expected: &'n [&'n str] },
+        /// `ArgumentMessageContext`, for an argument whose `expected` is a string: the whole message.
+        Message { name: &'n str, message: &'n str },
     }
 
     impl Context<'_> {
         pub fn name(&self) -> &str {
             match self {
-                Context::Argument(name) | Context::Validator { name, .. } => name,
+                Context::Argument(name)
+                | Context::Validator { name, .. }
+                | Context::Node { name, .. }
+                | Context::Message { name, .. } => name,
             }
+        }
+    }
+
+    /// Node's `ERR_INVALID_ARG_TYPE(name, expected, actual)` message (ErrorCode.cpp's): the expected types grouped
+    /// into type names, class names and the rest.
+    pub fn node_invalid_arg_type_message(
+        global: &JSGlobalObject,
+        name: &str,
+        expected: &[&str],
+        value: &JSValue,
+    ) -> JsResult<String> {
+        fn list(items: &[String]) -> String {
+            match items {
+                [] => String::new(),
+                [one] => one.clone(),
+                [a, b] => format!("{a} or {b}"),
+                [a, b, c] => format!("{a}, {b}, or {c}"),
+                [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+            }
+        }
+        const PRIMITIVES: &[&str] =
+            &["string", "function", "number", "object", "Function", "Object", "boolean", "bigint", "symbol"];
+        let is_class = |name: &str| {
+            let mut chars = name.chars();
+            chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_alphanumeric())
+        };
+        let (mut types, mut instances, mut other) = (Vec::new(), Vec::new(), Vec::new());
+        for &kind in expected {
+            if PRIMITIVES.contains(&kind) {
+                types.push(kind.to_ascii_lowercase());
+            } else if is_class(kind) {
+                instances.push(kind.to_owned());
+            } else {
+                other.push(kind.to_owned());
+            }
+        }
+        if !instances.is_empty() {
+            if let Some(at) = types.iter().position(|kind| kind == "object") {
+                types.remove(at);
+                instances.push("Object".to_owned());
+            }
+        }
+        let mut message = String::from("The ");
+        if name.ends_with(" argument") {
+            message.push_str(name);
+        } else {
+            let noun = if name.contains('.') { "property" } else { "argument" };
+            message.push_str(&format!("\"{name}\" {noun}"));
+        }
+        message.push_str(" must be ");
+        if !types.is_empty() {
+            message.push_str(if types.len() > 1 { "one of type " } else { "of type " });
+            message.push_str(&list(&types));
+            if !instances.is_empty() || !other.is_empty() {
+                message.push_str(" or ");
+            }
+        }
+        if !instances.is_empty() {
+            message.push_str("an instance of ");
+            message.push_str(&list(&instances));
+            if !other.is_empty() {
+                message.push_str(" or ");
+            }
+        }
+        match other.as_slice() {
+            [] => {}
+            [one] => {
+                if one.to_ascii_lowercase() != *one {
+                    message.push_str("an ");
+                }
+                message.push_str(one);
+            }
+            many => {
+                message.push_str("one of ");
+                message.push_str(&list(many));
+            }
+        }
+        message.push_str(". Received ");
+        message.push_str(&determine_specific_type(global, value)?);
+        Ok(message)
+    }
+
+    fn node_invalid_arg_type<'a>(heap: &JsHeap<'a>, name: &str, expected: &[&str], value: &JSValue) -> Error<'a> {
+        match node_invalid_arg_type_message(heap.global_object(), name, expected, value) {
+            Ok(message) => heap.error_with_code(ErrorCode::INVALID_ARG_TYPE, format_args!("{message}")),
+            Err(error) => Error::pending(error),
         }
     }
 
@@ -375,7 +497,181 @@ pub mod from_js {
                 expected,
                 index: Some(index),
             } => invalid_arg_type(heap, format_args!("{name}[{index}]"), expected, value),
+            Context::Node { name, expected } => node_invalid_arg_type(heap, name, expected, value),
+            Context::Message { message, .. } => {
+                heap.error_with_code(ErrorCode::INVALID_ARG_TYPE, format_args!("{message}"))
+            }
         }
+    }
+
+    /// What `b.bytes` takes without `ToString`, and what it refuses: C++'s `BytesOptions`.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct BytesFrom {
+        pub string: bool,
+        pub buffer: bool,
+        pub blob: bool,
+        pub to_string_otherwise: bool,
+        pub refuse_undefined: bool,
+        pub refuse_null: bool,
+        pub refuse_string_object: bool,
+    }
+
+    /// What a `b.bytes` argument was.
+    enum Taken {
+        /// A string, or what `ToString` made one.
+        String(JSValue),
+        Buffer(JSValue),
+        Blob(Vec<u8>),
+    }
+
+    /// C++'s `BytesConverter::convertInto`. `expected` is what the error says it takes: `a string, ArrayBuffer,
+    /// ArrayBufferView or Blob`.
+    fn take_bytes<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        ctx: Context<'_>,
+        from: BytesFrom,
+        expected: &str,
+    ) -> Result<'a, Taken> {
+        let global = heap.global_object();
+        if from.string && value.is_string() {
+            return Ok(Taken::String(value.clone()));
+        }
+        if from.buffer && (value.is_array_buffer_view() || value.is_array_buffer()) {
+            return Ok(Taken::Buffer(value.clone()));
+        }
+        if from.blob {
+            match lift(global.blob_bytes(value))? {
+                BlobBytes::InMemory(bytes) => return Ok(Taken::Blob(bytes)),
+                BlobBytes::NotInMemory => {
+                    return Err(heap.error_with_code(
+                        ErrorCode::INVALID_ARG_TYPE,
+                        format_args!("File blob cannot be used here"),
+                    ));
+                }
+                BlobBytes::NotBlob => {}
+            }
+        }
+        let refused = if from.to_string_otherwise {
+            (from.refuse_undefined && value.is_undefined()) || (from.refuse_null && value.is_null())
+        } else {
+            !from.string || from.refuse_string_object || !value.is_string_object()
+        };
+        if refused {
+            return Err(type_must_be(heap, ctx, expected, value));
+        }
+        Ok(Taken::String(lift(value.to_js_string(global))?))
+    }
+
+    fn utf8_of(value: &JSValue) -> Vec<u8> {
+        JsStr::new(value.clone()).to_utf8()
+    }
+
+    /// `b.bytes`, `held: "borrowed"`: the bytes, which live as long as the call.
+    pub fn bytes<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        ctx: Context<'_>,
+        from: BytesFrom,
+        expected: &str,
+    ) -> Result<'a, &'a [u8]> {
+        Ok(heap.keep(copied_bytes(heap, value, ctx, from, expected)?))
+    }
+
+    /// `b.bytes`, `held: "copied"`: the body's own copy.
+    pub fn copied_bytes<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        ctx: Context<'_>,
+        from: BytesFrom,
+        expected: &str,
+    ) -> Result<'a, Vec<u8>> {
+        Ok(match take_bytes(heap, value, ctx, from, expected)? {
+            Taken::String(string) => utf8_of(&string),
+            Taken::Buffer(buffer) => super::bytes::read_bytes(heap.global_object(), &buffer),
+            Taken::Blob(bytes) => bytes,
+        })
+    }
+
+    /// `b.bytes`, `held: "handle"`: a string as its UTF-8, a buffer as itself.
+    pub fn bytes_handle<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        ctx: Context<'_>,
+        from: BytesFrom,
+        expected: &str,
+    ) -> Result<'a, JsBytes<'a>> {
+        Ok(match take_bytes(heap, value, ctx, from, expected)? {
+            Taken::String(string) => JsBytes::kept(heap.keep(utf8_of(&string))),
+            Taken::Buffer(buffer) => JsBytes::of_buffer(buffer),
+            Taken::Blob(bytes) => JsBytes::kept(heap.keep(bytes)),
+        })
+    }
+
+    /// `b.bytes`, `string: "asIs", held: "handle"`.
+    pub fn string_or_bytes<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        ctx: Context<'_>,
+        from: BytesFrom,
+        expected: &str,
+    ) -> Result<'a, StringOrJsBytes<'a>> {
+        Ok(match take_bytes(heap, value, ctx, from, expected)? {
+            Taken::String(string) => StringOrJsBytes::String(JsStr::new(string)),
+            Taken::Buffer(buffer) => StringOrJsBytes::Bytes(JsBytes::of_buffer(buffer)),
+            Taken::Blob(bytes) => StringOrJsBytes::Bytes(JsBytes::kept(heap.keep(bytes))),
+        })
+    }
+
+    /// `b.bufferSource`: a typed array, `DataView` or `ArrayBuffer`; a shared one only with `allow_shared`.
+    pub fn buffer_source<'a>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        ctx: Context<'_>,
+        allow_shared: bool,
+    ) -> Result<'a, JsLocal<'a, BufferSource>> {
+        if !value.is_array_buffer_view() && !value.is_array_buffer() {
+            return Err(type_must_be(heap, ctx, "an ArrayBuffer or ArrayBufferView", value));
+        }
+        if !allow_shared && value.is_shared_buffer_source(heap.global_object()) {
+            return Err(type_must_be(heap, ctx, "an ArrayBuffer or ArrayBufferView that is not shared", value));
+        }
+        Ok(JsLocal::from_raw(value.clone()))
+    }
+
+    /// `b.string`: a string (or a `String` object, which `ToString` makes one).
+    pub fn string<'a>(heap: &JsHeap<'a>, value: &JSValue, ctx: Context<'_>) -> Result<'a, JsStr<'a>> {
+        if value.is_string() {
+            return Ok(JsStr::new(value.clone()));
+        }
+        if !value.is_string_object() {
+            return Err(type_must_be(heap, ctx, "a string", value));
+        }
+        Ok(JsStr::new(lift(value.to_js_string(heap.global_object()))?))
+    }
+
+    /// `b.string.loose`: `ToString`.
+    pub fn loose_string<'a>(heap: &JsHeap<'a>, value: &JSValue, _: Context<'_>) -> Result<'a, JsStr<'a>> {
+        Ok(JsStr::new(lift(value.to_js_string(heap.global_object()))?))
+    }
+
+    /// `b.callable`: a function, as itself.
+    pub fn callable<'a>(heap: &JsHeap<'a>, value: &JSValue, ctx: Context<'_>) -> Result<'a, JsLocal<'a>> {
+        if !value.is_callable() {
+            return Err(type_must_be(heap, ctx, "a function", value));
+        }
+        Ok(JsLocal::new(heap, value.clone()))
+    }
+
+    /// `b.f64.allowDate`: a number, or a `Date`'s time.
+    pub fn strict_f64_or_date<'a>(heap: &JsHeap<'a>, value: &JSValue, ctx: Context<'_>) -> Result<'a, f64> {
+        let global = heap.global_object();
+        let date = value.0.as_object().and_then(|object| boa_engine::object::builtins::JsDate::from_object(object).ok());
+        if let Some(date) = date {
+            let time = date.get_time(global.cx());
+            return Ok(lift(global.lift(time))?.as_number().unwrap_or(f64::NAN));
+        }
+        strict_f64(heap, value, ctx)
     }
 
     fn range<'a>(heap: &JsHeap<'a>, ctx: Context<'_>, predicate: fmt::Arguments<'_>) -> Error<'a> {

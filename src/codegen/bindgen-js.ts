@@ -25,7 +25,12 @@
 import path from "node:path";
 import {
   AnyType,
+  ArrayType,
+  BigIntResultType,
   BoolType,
+  BufferSourceType,
+  BytesType,
+  callableType,
   ClassType,
   Construction,
   DefaultType,
@@ -39,10 +44,12 @@ import {
   type NamespaceDefinition,
   NamedType,
   OptionalType,
+  type OverloadDispatch,
   OwnedUtf8Type,
   RestType,
-  type Signature,
+  Signature,
   snakeCase,
+  StringType,
   type Type,
   UnionType,
   UnitType,
@@ -101,6 +108,47 @@ function converter(type: Type): string {
   return refuse(`${type.constructor.name} (${type.tsType})`);
 }
 
+/** The `from_js` call that converts `value` (a `JSValue`) to an argument of `type` that is not optional. */
+function converterCall(type: Type, value: string, ctx: string): string {
+  const call = (name: string, ...extra: string[]) =>
+    `bindgen::from_js::${name}(${["heap", `&${value}`, ctx, ...extra].join(", ")})`;
+  if (type instanceof BytesType) return bytesCall(type, call);
+  if (type instanceof BufferSourceType) return call("buffer_source", String(type.refuses === null));
+  if (type.constructor === StringType) {
+    if (type.idlType === "WebCore::IDLUSVString") refuse("b.string.usv");
+    if (type.valueKinds === "any") return call("loose_string");
+    return call(type.valueKinds.includes("stringObject") ? "string_or_string_object" : "strict_string");
+  }
+  if (type === callableType) return call("callable");
+  if (type instanceof DoubleType && type.idlType === "Bun::Bindgen::IDLStrictDoubleOrDate")
+    return call("strict_f64_or_date");
+  return call(converter(type));
+}
+
+/** `b.bytes`: the call for what the body is handed, and what the error says it takes, as C++'s `cppConvertInto`. */
+function bytesCall(type: BytesType, call: (name: string, ...extra: string[]) => string): string {
+  const { from, otherwise, refuse: refused, string, shared, held } = type.options;
+  if (shared === "atomic" || held === "pinned") refuse(`b.bytes with shared: "${shared}", held: "${held}"`);
+  const spelling = { string: ["a string"], buffer: ["ArrayBuffer", "ArrayBufferView"], blob: ["Blob"] };
+  const expected = (["string", "buffer", "blob"] as const).filter(kind => from.includes(kind)).flatMap(kind => spelling[kind]);
+  if (!from.includes("string")) expected[0] = `${/^A/.test(expected[0]) ? "an" : "a"} ${expected[0]}`;
+  const last = expected.pop()!;
+  const list = expected.length > 0 ? `${expected.join(", ")} or ${last}` : last;
+  const options = {
+    string: from.includes("string"),
+    buffer: from.includes("buffer"),
+    blob: from.includes("blob"),
+    to_string_otherwise: otherwise === "toString",
+    refuse_undefined: refused.includes("undefined"),
+    refuse_null: refused.includes("null"),
+    refuse_string_object: refused.includes("stringObject"),
+  };
+  const fields = Object.entries(options).map(([name, value]) => `${name}: ${value}`);
+  const name =
+    string === "asIs" ? "string_or_bytes" : { borrowed: "bytes", handle: "bytes_handle", copied: "copied_bytes" }[held];
+  return call(name!, `bindgen::from_js::BytesFrom { ${fields.join(", ")} }`, rustString(list));
+}
+
 /** As C++'s `cppPrepare`: whether a `String` object is made a string before anything is converted. */
 const prepared = (type: Type) => type.cppPrepare("") !== null;
 
@@ -108,7 +156,11 @@ type Argument = Signature["args"][number];
 
 /** What an error of the conversion names: C++'s `LiteralConversionContext`, or `ValidatorArgumentContext` for one
  * that `validatorExpects` names. `index` is a Rust expression, for an element of a `b.rest`. */
-function context(arg: Pick<Argument, "name" | "validatorExpects">, index?: string): string {
+function context(arg: Pick<Argument, "name" | "validatorExpects"> & { expected?: Argument["expected"] }, index?: string): string {
+  if (typeof arg.expected === "string")
+    return `bindgen::from_js::Context::Message { name: ${rustString(arg.name)}, message: ${rustString(arg.expected)} }`;
+  if (arg.expected !== undefined)
+    return `bindgen::from_js::Context::Node { name: ${rustString(arg.name)}, expected: &[${arg.expected.map(rustString).join(", ")}] }`;
   if (arg.validatorExpects === undefined) return `bindgen::from_js::Context::Argument(${rustString(arg.name)})`;
   return `bindgen::from_js::Context::Validator { name: ${rustString(arg.name)}, expected: ${rustString(arg.validatorExpects)}, index: ${index === undefined ? "None" : `Some(${index})`} }`;
 }
@@ -121,8 +173,14 @@ function convert(type: Type, value: string, ctx: string): string {
   const call = (inner: Type) =>
     inner instanceof DictionaryType || inner instanceof UnionType
       ? `${namedPath(inner, currentFile)}::from_js(heap, &${value}, ${ctx})`
-      : `bindgen::from_js::${converter(inner)}(heap, &${value}, ${ctx})`;
+      : converterCall(inner, value, ctx);
   if (type instanceof OptionalType) {
+    if (type.modifier === "otherAsNull") {
+      const kinds = type.inner.valueKinds;
+      if (kinds === "any") return refuse(".otherAsNull of a type that takes every kind");
+      const tests = kinds.map(kind => `${value}.${kindTest(kind, `.otherAsNull of ${type.inner.tsType}`)}()`);
+      return `if !(${tests.join(" || ")}) { Ok(None) } else { ${call(type.inner)}.map(Some) }`;
+    }
     const absent = { optional: `${value}.is_undefined()`, nullable: `${value}.is_undefined_or_null()` }[
       type.modifier as "optional" | "nullable"
     ];
@@ -147,20 +205,28 @@ function namedPath(type: DictionaryType | UnionType, file: SchemaFile): string {
     : `super::${type.origin!.rustModule}::${type.name}`;
 }
 
-/** Whether what a body returns as `type` borrows from the call. */
-function borrowsCall(type: Type): boolean {
-  if (type instanceof LocalStringType || type instanceof Utf8Type || type instanceof AnyType) return true;
-  if (type instanceof OptionalType || type instanceof DefaultType) return borrowsCall(type.inner);
+/** Whether what a body returns as `type` borrows from the call. A union that is returned owns its strings
+ * (`ownsStrings`). */
+function borrowsCall(type: Type, ownsStrings = false): boolean {
+  if (type instanceof Utf8Type || type.constructor === StringType) return !ownsStrings;
+  if (type instanceof LocalStringType || type instanceof AnyType) return true;
+  if (type instanceof BufferSourceType || type instanceof BytesType || type === callableType) return true;
+  if (type instanceof OptionalType || type instanceof DefaultType) return borrowsCall(type.inner, ownsStrings);
   if (type instanceof DictionaryType) return type.members.some(member => borrowsCall(member.type));
-  if (type instanceof UnionType) return type.alternatives.some(alternative => borrowsCall(alternative.type));
+  if (type instanceof UnionType)
+    return type.alternatives.some(alternative => borrowsCall(alternative.type, ownsStrings));
   return false;
 }
 
 /** The Rust type of a member of a dictionary or an alternative of a union. A member with a default that is taken
  * has it filled in. */
-function memberRustType(type: Type, file: SchemaFile): string {
+function memberRustType(type: Type, file: SchemaFile, returned = false): string {
+  if (returned && (type instanceof Utf8Type || type.constructor === StringType)) return "Vec<u8>";
   if (type instanceof LocalStringType || type instanceof Utf8Type) return "&'a [u8]";
   if (type instanceof OwnedUtf8Type) return "Vec<u8>";
+  if (type.constructor === StringType) return "bindgen::JsStr<'a>";
+  if (type instanceof BufferSourceType) return "bindgen::JsLocal<'a, bindgen::BufferSource>";
+  if (type === callableType) return "bindgen::JsLocal<'a>";
   if (type instanceof BoolType || type instanceof DoubleType) return type.rustName;
   if (type instanceof IntegerType && (isPlainInteger(type) || isBigIntInteger(type))) return type.rustName;
   if (type instanceof AnyType && type.checkedResult === null) return "bindgen::JsLocal<'a>";
@@ -198,6 +264,13 @@ function toJs(type: Type, value: string): string {
     return `bindgen::to_js::${type.rustName}(heap, ${value})`;
   }
   if (type instanceof Utf8Type || type instanceof LocalStringType) return `bindgen::to_js::utf8(heap, ${value})`;
+  // A body returns a string as its UTF-8.
+  if (type.constructor === StringType) return `bindgen::to_js::utf8(heap, ${value})`;
+  if (type instanceof BigIntResultType) return `bindgen::to_js::u64_as_bigint(heap, ${value})`;
+  if (type instanceof BufferSourceType) return `bindgen::to_js::any(heap, ${value})`;
+  if (type instanceof ArrayType)
+    return `bindgen::to_js::array(heap, ${value}, |heap, value| ${toJs(type.element, "value")})`;
+  if (type instanceof UnionType) return `${value}.into_js(heap)`;
   // The C++ build holds a result to the words of `.returning` for compiled code. Boa compiles none: no one reads them.
   if (type instanceof AnyType) return `bindgen::to_js::any(heap, ${value})`;
   if (type instanceof DictionaryType) return `${value}.into_js(heap)`;
@@ -246,8 +319,6 @@ function body(
   beforeCall: string[] = [],
 ): string {
   if (signature.rejects) refuse("rejects");
-  for (const arg of signature.args)
-    if (arg.expected !== undefined) refuse(`${arg.name}: expected (Node's ERR_INVALID_ARG_TYPE text)`);
   const lines: string[] = ["let heap = &cx.heap;"];
   if (signature.requiredArguments > 0) {
     // As bindgen-emit.ts's `cppThrowIfArgumentsMissing`: the message names every required argument.
@@ -269,6 +340,14 @@ function body(
       lines.push(
         `let mut ${names[i]} = Vec::with_capacity(argument${i}.len());`,
         `for (rest_index, rest_value) in argument${i}.iter().enumerate() { ${names[i]}.push(${orReturn(convert(arg.type.element, "(*rest_value)", context(arg, "rest_index")))}); }`,
+      );
+      continue;
+    }
+    // `.ifPassed`: absent only where the call has no such argument; an `undefined` that is passed is converted.
+    if (arg.type instanceof OptionalType && arg.type.modifier === "ifPassed") {
+      const converted = convert(arg.type.inner, `argument${i}`, context(arg));
+      lines.push(
+        `let ${names[i]} = if frame.arguments_count() <= ${i} { None } else { Some(${orReturn(converted)}) };`,
       );
       continue;
     }
@@ -305,14 +384,51 @@ function onlySignature(fn: FunctionDefinition, what: string): Signature {
   return signature;
 }
 
+/** What tells a value of `kind` apart: a `JSValue` method. */
+function kindTest(kind: string | { cpp: string }, what: string): string {
+  if (typeof kind === "object") {
+    if (kind.cpp === "JSC::DateInstance") return "is_date";
+    return refuse(`${what}: telling apart a value of kind ${kind.cpp}`);
+  }
+  return KIND_TESTS[kind] ?? refuse(`${what}: telling apart a value of kind ${kind}`);
+}
+
+/** Rust that runs the `leaf` of the signature `dispatch` picks by the arguments' kinds ("Overloads" in
+ * docs/project/bindgen.mdx). Choosing converts nothing and runs no script. */
+function rustDispatch(dispatch: OverloadDispatch, leaf: (signature: Signature) => string): string {
+  if (dispatch instanceof Signature) return `{\n${indent(leaf(dispatch), 4)}\n}`;
+  if ("passed" in dispatch)
+    return `if frame.arguments_count() <= ${dispatch.argument} ${rustDispatch(dispatch.notPassed, leaf)} else ${rustDispatch(dispatch.passed, leaf)}`;
+  const choice = `choice${dispatch.argument}`;
+  const branches: string[] = [];
+  let other: OverloadDispatch | undefined;
+  for (const [kind, next] of dispatch.byKind) {
+    if (kind === "other") {
+      other = next;
+      continue;
+    }
+    branches.push(`if ${choice}.${kindTest(kind, "an overload")}() ${rustDispatch(next, leaf)}`);
+  }
+  if (other === undefined) return refuse("overloads that no value of another kind reaches");
+  return `{\nlet ${choice} = frame.argument(${dispatch.argument});\n${[...branches, rustDispatch(other, leaf)].join(" else ")}\n}`;
+}
+
+/** Each signature's own body, or one, behind the choice of an overload. */
+function overloaded(fn: FunctionDefinition, leaf: (signature: Signature) => string): string {
+  return fn.signatures.length === 1 ? leaf(fn.signatures[0]) : rustDispatch(fn.dispatch, leaf);
+}
+
 function rustForFunction(fn: FunctionDefinition, file: SchemaFile): string {
-  const signature = onlySignature(fn, fn.name);
+  if (fn.passThis || fn.passCallee) refuse(`${fn.name}: passThis and passCallee`);
   const modulePath = file.moduleDefinition?.rustPath;
-  // A body that the JavaScriptCore build has in C++ (`cppSymbol`) is a port in Rust here, at the module's rustPath.
-  if (signature.cppSymbol && !signature.rustPath && !modulePath) refuse(`${fn.name}: cppSymbol without a rustPath`);
-  const target =
-    signature.rustPath ??
-    (modulePath ? `${modulePath}::${ident(snakeCase(fn.name))}` : refuse(`${fn.name}: a rustPath`));
+  const targetOf = (signature: Signature) => {
+    // A body that the JavaScriptCore build has in C++ (`cppSymbol`) is a port in Rust here, at the module's rustPath.
+    if (signature.cppSymbol && !signature.rustPath && !modulePath) refuse(`${fn.name}: cppSymbol without a rustPath`);
+    return (
+      signature.rustPath ??
+      (modulePath ? `${modulePath}::${ident(snakeCase(fn.name))}` : refuse(`${fn.name}: a rustPath`))
+    );
+  };
   const host = ident(snakeCase(fn.name));
   // As C++'s `createFunctionNamedAsBound`: `name` is `bound <jsName>`, and it prints and is traced as `<jsName>`.
   const create = fn.namedAsBound ? "create_named_as_bound" : "create";
@@ -322,7 +438,7 @@ pub fn ${host}(global: &JSGlobalObject, frame: &CallFrame<'_>) -> JsResult<JSVal
 ${indent(
   scoped(
     "global",
-    body(signature, args => `${target}(${args.join(", ")})`),
+    overloaded(fn, signature => body(signature, args => `${targetOf(signature)}(${args.join(", ")})`)),
   ),
   4,
 )}
@@ -358,7 +474,6 @@ ${indent(
 }
 
 function rustForNamespace(namespace: NamespaceDefinition): string {
-  if (namespace.call) refuse(`${namespace.name}: a namespace that is callable`);
   const puts = namespace.functions
     // As C++'s namespace object: each function is named by its key, not its `jsName`, and none is named as bound.
     .map(
@@ -366,12 +481,16 @@ function rustForNamespace(namespace: NamespaceDefinition): string {
         `object.put(global, ${rustString(fn.name)}, bun_js::JSFunction::create(global, ${rustString(fn.name)}, ${ident(snakeCase(fn.name))}, ${fn.length}));`,
     )
     .join("\n");
+  // A namespace with `call` is that function, named after the namespace, with the others as its properties.
+  const object = namespace.call
+    ? `bun_js::JSFunction::create(global, ${rustString(namespace.name)}, ${ident(snakeCase(namespace.call.name))}, ${namespace.call.length})`
+    : "bun_js::JSObject::create(global).to_js()";
   return `
 /// The namespace \`${namespace.name}\`.
 pub fn create_${snakeCase(namespace.name)}(global: &JSGlobalObject) -> JSValue {
-    let object = bun_js::JSObject::create(global);
+    let object = ${object};
 ${indent(puts, 4)}
-    object.to_js()
+    object
 }
 `;
 }
@@ -491,6 +610,8 @@ const KIND_TESTS: Record<string, string> = {
   symbol: "is_symbol",
   stringObject: "is_string_object",
   array: "is_array",
+  arrayBuffer: "is_array_buffer",
+  arrayBufferView: "is_array_buffer_view",
   callable: "is_callable",
 };
 
@@ -522,8 +643,7 @@ function rustForAcceptedUnion(type: UnionType, file: SchemaFile): string {
       other = list[0];
       continue;
     }
-    const test = typeof kind === "string" ? KIND_TESTS[kind] : undefined;
-    if (!test) refuse(`${what}: telling apart a value of kind ${typeof kind === "string" ? kind : kind.cpp}`);
+    const test = kindTest(kind, what);
     tests.push(`if value.${test}() { return ${branch(list[0])}; }`);
   }
   if (other === undefined && !noneTakes) refuse(`${what}: a value no alternative takes`);
@@ -544,6 +664,35 @@ impl<'a> ${type.name}${lifetime} {
     pub fn from_js(heap: &bindgen::JsHeap<'a>, value: &JSValue, _ctx: bindgen::from_js::Context<'_>) -> bindgen::Result<'a, Self> {
 ${indent(tests.join("\n"), 8)}
         ${last}
+    }
+}
+`;
+}
+
+/** A union that a body returns: an enum, and `into_js`, which makes the value of the alternative it holds. It owns
+ * its strings, as UTF-8. */
+function rustForReturnedUnion(type: UnionType, file: SchemaFile): string {
+  const lifetime = borrowsCall(type, true) ? "<'a>" : "";
+  const variants = type.alternatives.map(a =>
+    a.type instanceof UnitType ? `${a.variant},` : `${a.variant}(${memberRustType(a.type, file, true)}),`,
+  );
+  const arms = type.alternatives.map(a =>
+    a.type instanceof UnitType
+      ? `Self::${a.variant} => ${toJs(a.type, "()")},`
+      : `Self::${a.variant}(value) => ${toJs(a.type, "value")},`,
+  );
+  return `
+/// \`${type.name}\`, as a body returns it.
+pub enum ${type.name}${lifetime} {
+${indent(variants.join("\n"), 4)}
+}
+
+impl${lifetime ? "<'a>" : ""} ${type.name}${lifetime} {
+    /// The value of the alternative it holds.
+    pub fn into_js${lifetime ? "" : "<'a>"}(self, heap: &bindgen::JsHeap<'a>) -> bindgen::Result<'a, bindgen::JsLocal<'a>> {
+        match self {
+${indent(arms.join("\n"), 12)}
+        }
     }
 }
 `;
@@ -736,10 +885,8 @@ function rustForFile(file: SchemaFile): string {
     if (type instanceof DictionaryType || type instanceof UnionType) {
       const taken = direction.accepted.has(type);
       if (taken && direction.returned.has(type)) refuse(`${type.name}: a type that is both taken and returned`);
-      if (type instanceof UnionType) {
-        if (!taken) refuse(`${type.name}: a union that is returned`);
-        items.push(rustForAcceptedUnion(type, file));
-      } else items.push(taken ? rustForAcceptedDictionary(type, file) : rustForDictionary(type, file));
+      if (type instanceof UnionType) items.push(taken ? rustForAcceptedUnion(type, file) : rustForReturnedUnion(type, file));
+      else items.push(taken ? rustForAcceptedDictionary(type, file) : rustForDictionary(type, file));
       continue;
     }
     if (!(type instanceof ClassType)) refuse(`${type.constructor.name} ${type.name}`);
