@@ -73,6 +73,9 @@ if (!CMAKE_BUILD_ROOT) {
 const SRC_DIR = path.join(import.meta.dir, "../js/builtins");
 const CODEGEN_DIR = path.join(CMAKE_BUILD_ROOT, "./codegen");
 const TMP_DIR = path.join(CMAKE_BUILD_ROOT, "./tmp_functions");
+/** The functions as Boa runs them go to `functions.json` here: `BUN_BOA_JS_DIR` asks for them (bundle-modules.ts). */
+const BOA_JS_DIR = process.env.BUN_BOA_JS_DIR;
+const boaFunctions: { file: string; name: string; source: string; getter: boolean; constructor: boolean }[] = [];
 
 interface ParsedBuiltin {
   name: string;
@@ -361,17 +364,24 @@ $$capture_start$$(${fn.async ? "async " : ""}${
     let usesDebug = output.includes("$debug_log");
     let usesAssert = output.includes("$assert");
     const captured = output.match(/\$\$capture_start\$\$([\s\S]+)\.\$\$capture_end\$\$/)![1];
-    const finalReplacement =
-      captured
-        .replace(
-          /function\s*\(.*?\)\s*{/,
-          '$&"use strict";' +
-            (usesDebug ? createLogClientJS("BUILTINS", fn.name) : "") +
-            (usesAssert ? createAssertClientJS(fn.name) : ""),
-        )
-        .replace(/^\((async )?function\(/, "($1function (")
-        .replace(/__intrinsic__/g, "@")
-        .replace(/__no_intrinsic__/g, "") + "\n";
+    const unprefixed = captured
+      .replace(
+        /function\s*\(.*?\)\s*{/,
+        '$&"use strict";' +
+          (usesDebug ? createLogClientJS("BUILTINS", fn.name) : "") +
+          (usesAssert ? createAssertClientJS(fn.name) : ""),
+      )
+      .replace(/^\((async )?function\(/, "($1function (");
+    const finalReplacement = unprefixed.replace(/__intrinsic__/g, "@").replace(/__no_intrinsic__/g, "") + "\n";
+    // Boa has no private names: its runtime (packages/bun-boa) takes each `__intrinsic__<name>` as a parameter.
+    if (BOA_JS_DIR)
+      boaFunctions.push({
+        file: basename,
+        name: fn.name,
+        source: unprefixed.replace(/__no_intrinsic__/g, "") + "\n",
+        getter: Boolean(fn.directives.getter),
+        constructor: fn.directives.ConstructAbility === "CanConstruct",
+      });
 
     const errors = [...finalReplacement.matchAll(/@bundleError\((.*)\)/g)];
     if (errors.length) {
@@ -927,6 +937,13 @@ JSBuiltinInternalFunctions::JSBuiltinInternalFunctions(JSC::VM& vm) : m_vm(vm)
   dts += getJS2NativeDTS();
 
   writeIfNotChanged(path.join(typesDir, "WebCoreJSBuiltins.d.ts"), dts);
+
+  if (BOA_JS_DIR) {
+    mkdirSync(BOA_JS_DIR, { recursive: true });
+    const byName = (a: { file: string; name: string }, b: { file: string; name: string }) =>
+      a.file === b.file ? (a.name < b.name ? -1 : 1) : a.file < b.file ? -1 : 1;
+    writeIfNotChanged(path.join(BOA_JS_DIR, "functions.json"), JSON.stringify(boaFunctions.sort(byName)));
+  }
 
   const totalJSSize = files.reduce(
     (acc, { functions }) => acc + functions.reduce((acc, fn) => acc + fn.source.length, 0),

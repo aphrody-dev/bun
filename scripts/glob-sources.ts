@@ -86,6 +86,8 @@ const patterns = {
   /** bindgen input */
   bindgen: {
     paths: ["src/**/*.bind.ts"],
+    // bun_js's tests: what src/codegen/bindgen-js.ts emits for Boa, which this build has none of.
+    exclude: ["src/bun_js/**"],
   },
   /** bindgen generator code */
   bindgenCodegen: {
@@ -106,6 +108,8 @@ const patterns = {
       "Cargo.lock",
       "rust-toolchain.toml",
     ],
+    // subtrees with their own workspaces, not members of the root one
+    exclude: ["src/boa/**", "src/blitz/**"],
   },
   /** all `*.cpp` compiled into bun (bindings, webcore, v8 shim, usockets) */
   cxx: {

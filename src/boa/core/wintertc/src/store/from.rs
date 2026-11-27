@@ -1,0 +1,345 @@
+//! All methods for serializing a [`JsValue`] into a [`JsValueStore`].
+
+use crate::store::{
+    JsValueStore, MAX_CLONE_DEPTH, StringStore, ValueStoreInner, depth_limit_exceeded,
+    unsupported_type,
+};
+use boa_engine::builtins::array_buffer::AlignedVec;
+use boa_engine::builtins::error::{Error, ErrorKind};
+use boa_engine::object::builtins::{
+    JsArray, JsArrayBuffer, JsDataView, JsDate, JsMap, JsRegExp, JsSet, JsSharedArrayBuffer,
+    JsTypedArray,
+};
+use boa_engine::property::PropertyKey;
+use boa_engine::{Context, JsError, JsObject, JsResult, JsString, JsValue, JsVariant, js_error, js_string};
+use rustc_hash::FxHashMap;
+
+/// A Map of seen objects when walking through the value. We use the address
+/// of the inner object as it is unique per JavaScript value.
+///
+/// It also tracks the current recursion depth so that both conversions can
+/// reject overly deep object graphs before exhausting the native stack.
+#[derive(Default)]
+pub(super) struct SeenMap {
+    values: FxHashMap<usize, JsValueStore>,
+    depth: usize,
+}
+
+impl SeenMap {
+    fn get(&self, object: &JsObject) -> Option<JsValueStore> {
+        let addr = std::ptr::from_ref(object.as_ref()).addr();
+        self.values.get(&addr).cloned()
+    }
+
+    pub(super) fn insert(&mut self, original: &JsObject, object: JsValueStore) {
+        let addr = std::ptr::from_ref(original.as_ref()).addr();
+        self.values.insert(addr, object);
+    }
+}
+
+/// The core logic of the [`JsValueStore::try_from_js`] function.
+fn try_from_js_object(
+    value: &JsObject,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<JsValueStore> {
+    // Have we seen this object? If so, return its clone.
+    if let Some(o2) = seen.get(value) {
+        return Ok(o2.clone());
+    }
+
+    try_from_js_object_clone(value, seen, context)
+}
+
+fn try_from_array_clone(
+    array: &JsArray,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<JsValueStore> {
+    // Create an empty clone, we will replace its inner values after we gather them.
+    // To stop the recursion, we need to add the right value to the seen map prior,
+    // though.
+    let mut dolly = JsValueStore::empty();
+    seen.insert(&JsObject::from(array.clone()), dolly.clone());
+
+    let length = array.length(context)?;
+    let length = usize::try_from(length).map_err(JsError::from_rust)?;
+    let mut inner = Vec::with_capacity(length);
+    for i in 0..length {
+        let v = array
+            .borrow()
+            .properties()
+            .get(&i.into())
+            .and_then(|x| x.value().cloned());
+        if let Some(v) = v {
+            let v = try_from_js_value(&v, seen, context)?;
+            inner.push(Some(v));
+        } else {
+            inner.push(None);
+        }
+    }
+
+    // SAFETY: This is safe as this function is the sole owner of the store.
+    unsafe {
+        dolly.replace(ValueStoreInner::Array(inner));
+    }
+    Ok(dolly)
+}
+
+fn try_from_array_buffer_clone(
+    original: &JsObject,
+    buffer: &JsArrayBuffer,
+    seen: &mut SeenMap,
+) -> JsResult<JsValueStore> {
+    let data = buffer.data().ok_or_else(unsupported_type)?;
+    let data = AlignedVec::from_slice(0, &data);
+    let new_value = JsValueStore::new(ValueStoreInner::ArrayBuffer(data));
+    seen.insert(original, new_value.clone());
+
+    Ok(new_value)
+}
+
+fn try_from_shared_array_buffer(
+    original: &JsObject,
+    buffer: &JsSharedArrayBuffer,
+    seen: &mut SeenMap,
+) -> JsValueStore {
+    let new_value = JsValueStore::new(ValueStoreInner::SharedArrayBuffer(buffer.inner()));
+    seen.insert(original, new_value.clone());
+    new_value
+}
+
+fn clone_typed_array(
+    original: &JsObject,
+    buffer: &JsTypedArray,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<JsValueStore> {
+    let kind = buffer.kind().ok_or_else(unsupported_type)?;
+    let buffer = buffer.buffer(context)?;
+    let buffer = try_from_js_value(&buffer, seen, context)?;
+    let dolly = JsValueStore::new(ValueStoreInner::TypedArray { kind, buffer });
+    seen.insert(original, dolly.clone());
+    Ok(dolly)
+}
+
+fn clone_date(
+    original: &JsObject,
+    date: &JsDate,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<JsValueStore> {
+    let ms_since_epoch = date
+        .get_time(context)?
+        .as_number()
+        .ok_or_else(unsupported_type)?;
+
+    let stored = JsValueStore::new(ValueStoreInner::Date(ms_since_epoch));
+    seen.insert(original, stored.clone());
+    Ok(stored)
+}
+
+fn clone_regexp(
+    original: &JsObject,
+    regexp: &JsRegExp,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<JsValueStore> {
+    let source = regexp.source(context)?;
+    let flags = regexp.flags(context)?;
+
+    let stored = JsValueStore::new(ValueStoreInner::RegExp { source, flags });
+    seen.insert(original, stored.clone());
+    Ok(stored)
+}
+
+fn try_from_map(
+    original: &JsObject,
+    map: &JsMap,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<JsValueStore> {
+    let mut new_map = Vec::new();
+    let mut store = JsValueStore::new(ValueStoreInner::Empty);
+    seen.insert(original, store.clone());
+
+    map.for_each_native(|k, v| {
+        let key = try_from_js_value(&k, seen, context)?;
+        let value = try_from_js_value(&v, seen, context)?;
+        new_map.push((key, value));
+
+        Ok(())
+    })?;
+
+    // SAFETY: This is safe as this function is the sole owner of the store.
+    unsafe {
+        store.replace(ValueStoreInner::Map(new_map));
+    }
+
+    Ok(store)
+}
+
+fn try_from_set(
+    original: &JsObject,
+    set: &JsSet,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<JsValueStore> {
+    let mut new_set = Vec::new();
+    let mut store = JsValueStore::new(ValueStoreInner::Empty);
+    seen.insert(original, store.clone());
+
+    set.for_each_native(|v| {
+        let value = try_from_js_value(&v, seen, context)?;
+        new_set.push(value);
+
+        Ok(())
+    })?;
+
+    // SAFETY: This is safe as this function is the sole owner of the store.
+    unsafe {
+        store.replace(ValueStoreInner::Set(new_set));
+    }
+
+    Ok(store)
+}
+
+/// HTML's StructuredSerializeInternal for an `Error`: its name, if one of the native errors' (else `Error`), and the
+/// value of its own `message` data property; and the stack, which WebKit keeps too.
+fn clone_error(object: &JsObject, seen: &mut SeenMap, context: &mut Context) -> JsResult<JsValueStore> {
+    let name = object.get(js_string!("name"), context)?;
+    let name = if name.is_undefined() { JsString::from("Error") } else { name.to_string(context)? };
+    let kind = match name.to_std_string_escaped().as_str() {
+        "EvalError" => ErrorKind::Eval,
+        "RangeError" => ErrorKind::Range,
+        "ReferenceError" => ErrorKind::Reference,
+        "SyntaxError" => ErrorKind::Syntax,
+        "TypeError" => ErrorKind::Type,
+        "URIError" => ErrorKind::Uri,
+        _ => ErrorKind::Error,
+    };
+    let message = match object.get_own_property(js_string!("message"), context)? {
+        Some(descriptor) if descriptor.is_data_descriptor() => {
+            let value = descriptor.value().cloned().unwrap_or_default();
+            Some(StringStore::from(value.to_string(context)?))
+        }
+        _ => None,
+    };
+    let stack = object.get(js_string!("stack"), context)?;
+    let stack = stack.as_string().map(StringStore::from);
+    let store = JsValueStore::new(ValueStoreInner::Error { kind, message, stack });
+    seen.insert(object, store.clone());
+    Ok(store)
+}
+
+fn try_from_js_object_clone(
+    object: &JsObject,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<JsValueStore> {
+    // If this is a special type of object, apply some special rules to it.
+    // Described in
+    // https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm#supported_types
+
+    if let Ok(array) = JsArray::from_object(object.clone()) {
+        return try_from_array_clone(&array, seen, context);
+    } else if let Ok(map) = JsMap::from_object(object.clone()) {
+        return try_from_map(object, &map, seen, context);
+    } else if let Ok(set) = JsSet::from_object(object.clone()) {
+        return try_from_set(object, &set, seen, context);
+    } else if let Ok(ref buffer) = JsArrayBuffer::from_object(object.clone()) {
+        return try_from_array_buffer_clone(object, buffer, seen);
+    } else if let Ok(ref buffer) = JsSharedArrayBuffer::from_object(object.clone()) {
+        return Ok(try_from_shared_array_buffer(object, buffer, seen));
+    } else if let Ok(ref typed_array) = JsTypedArray::from_object(object.clone()) {
+        return clone_typed_array(object, typed_array, seen, context);
+    } else if let Ok(ref date) = JsDate::from_object(object.clone()) {
+        return clone_date(object, date, seen, context);
+    } else if object.is::<Error>() {
+        return clone_error(object, seen, context);
+    } else if let Ok(ref regexp) = JsRegExp::from_object(object.clone()) {
+        return clone_regexp(object, regexp, seen, context);
+    } else if let Ok(_dataview) = JsDataView::from_object(object.clone()) {
+        return Err(js_error!(TypeError: "Data views are not supported yet."));
+    } else if let Some(serialized) = super::host::serialize(object, context)? {
+        let store = JsValueStore::new(ValueStoreInner::Host(serialized));
+        seen.insert(object, store.clone());
+        return Ok(store);
+    } else if object.is_callable() {
+        // Functions are invalid.
+        return Err(unsupported_type());
+    }
+
+    // Create a new object and add own properties to it. This does not preserve
+    // the prototype (nor do we want to).
+    let mut dolly = JsValueStore::empty();
+    seen.insert(object, dolly.clone());
+
+    // HTML's StructuredSerializeInternal: the enumerable own properties whose keys are strings, as
+    // EnumerableOwnProperties(value, key) lists them.
+    let keys = object.own_property_keys(context)?;
+    let mut fields: Vec<(StringStore, JsValueStore)> = Vec::with_capacity(keys.len());
+    for k in keys {
+        if matches!(k, PropertyKey::Symbol(_)) {
+            continue;
+        }
+        let enumerable = object
+            .get_own_property(k.clone(), context)?
+            .is_some_and(|descriptor| descriptor.enumerable() == Some(true));
+        if !enumerable {
+            continue;
+        }
+        let value = object.get(k.clone(), context)?;
+        let key = match k {
+            PropertyKey::String(s) => s.into(),
+            PropertyKey::Symbol(_) => continue,
+            PropertyKey::Index(i) => JsString::from(format!("{}", i.get())).into(),
+        };
+
+        let v = try_from_js_value(&value, seen, context)?;
+        fields.push((key, v));
+    }
+
+    // SAFETY: This is safe as this function is the sole owner of the store.
+    unsafe {
+        dolly.replace(ValueStoreInner::Object(fields));
+    }
+    Ok(dolly)
+}
+
+pub(super) fn try_from_js_value(
+    value: &JsValue,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<JsValueStore> {
+    if seen.depth >= MAX_CLONE_DEPTH {
+        return Err(depth_limit_exceeded());
+    }
+
+    seen.depth += 1;
+    let result = try_from_js_value_inner(value, seen, context);
+    seen.depth -= 1;
+    result
+}
+
+fn try_from_js_value_inner(
+    value: &JsValue,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<JsValueStore> {
+    match value.variant() {
+        JsVariant::Null => Ok(JsValueStore::new(ValueStoreInner::Null)),
+        JsVariant::Undefined => Ok(JsValueStore::new(ValueStoreInner::Undefined)),
+        JsVariant::Boolean(b) => Ok(JsValueStore::new(ValueStoreInner::Boolean(b))),
+        JsVariant::String(s) => Ok(JsValueStore::new(ValueStoreInner::String(s.into()))),
+        JsVariant::Float64(f) => Ok(JsValueStore::new(ValueStoreInner::Float(f))),
+        JsVariant::Integer32(i) => Ok(JsValueStore::new(ValueStoreInner::Float(f64::from(i)))),
+        JsVariant::BigInt(b) => Ok(JsValueStore::new(ValueStoreInner::BigInt(
+            b.as_inner().clone(),
+        ))),
+        JsVariant::Object(ref o) => try_from_js_object(o, seen, context),
+
+        // Symbols cannot be transferred/cloned.
+        JsVariant::Symbol(_) => Err(unsupported_type()),
+    }
+}

@@ -10,6 +10,17 @@ import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
 
+// hyperfine 2's --export-json (schema_version 2): per command a `summary` of each metric.
+type Stat = { mean: number; stddev: number; median: number; min: number; max: number };
+function startup(json: { results: { summary: { time_wall_clock: Stat; memory_peak_resident: Stat } }[] }) {
+  const { time_wall_clock: wall, memory_peak_resident: rss } = json.results[0].summary;
+  const ms = (s: number) => Math.round(s * 1e6) / 1e3;
+  return {
+    startup_ms: { mean: ms(wall.mean), stddev: ms(wall.stddev), median: ms(wall.median), min: ms(wall.min), max: ms(wall.max) },
+    startup_rss_bytes: rss.median,
+  };
+}
+
 if (Bun.argv[2] === "--on-host") {
   // cwd: packages/bun-boa on the build host, with remote.ts's environment.
   const target = Bun.env.CARGO_TARGET_DIR!;
@@ -56,12 +67,11 @@ if (Bun.argv[2] === "--on-host") {
     const bin = join(target, dir, "bun");
     const json = join(target, `hyperfine-${name}.json`);
     await $`hyperfine -N --warmup 5 --runs 50 --style none --export-json ${json} ${`${bin} -e 0`}`.quiet();
-    const [run] = (await Bun.file(json).json()).results;
     profiles[name] = {
       clean_s: clean,
       incremental_s: { leaf, bun_core: core },
       size_bytes: Bun.file(bin).size,
-      startup_ms: { mean: run.mean * 1e3, stddev: run.stddev * 1e3, min: run.min * 1e3, max: run.max * 1e3 },
+      ...startup(await Bun.file(json).json()),
     };
   }
 

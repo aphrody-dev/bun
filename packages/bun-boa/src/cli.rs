@@ -53,14 +53,23 @@ fn exit_code(context: &mut Context) -> i32 {
         .map_or(0, |code| code as i32)
 }
 
+/// Evaluates the entry point, then runs the event loop until nothing keeps it alive, as Bun does.
 fn evaluate(module: Module, context: &mut Context) -> i32 {
     let promise = module.load_link_evaluate(context);
-    if let Err(err) = context.run_jobs() {
+    let event_loop = bun_runtime_js::EventLoop::of(context);
+    let settled = || !matches!(promise.state(), PromiseState::Pending);
+    if let Err(err) = event_loop.run_until(context, settled) {
         report(&err, context);
         return 1;
     }
     match promise.state() {
-        PromiseState::Fulfilled(_) => exit_code(context),
+        PromiseState::Fulfilled(_) => {
+            if let Err(err) = event_loop.run(context) {
+                report(&err, context);
+                return 1;
+            }
+            exit_code(context)
+        }
         PromiseState::Rejected(reason) => {
             report(&JsError::from_opaque(reason), context);
             1
@@ -145,6 +154,9 @@ fn script_or_file(name: &str, rest: &[String]) -> i32 {
 }
 
 pub fn main() -> i32 {
+    // As Bun's `main`: the threads of the work pool configure their output from it.
+    bun_core::output::stdio::init();
+    crate::worker::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => {
@@ -171,6 +183,10 @@ pub fn main() -> i32 {
         Some("test") => crate::test::main(&args[1..]),
         #[cfg(feature = "build")]
         Some("build") => crate::build::main(&args[1..]),
+        #[cfg(feature = "install")]
+        Some(command) if let Some(subcommand) = crate::install::subcommand(command, &args[1..]) => {
+            crate::install::main(subcommand)
+        }
         Some("run") => match args.get(1) {
             Some(name) => script_or_file(name, &args[2..]),
             None => crate::scripts::list(),

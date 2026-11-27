@@ -1,7 +1,8 @@
 // Differential oracle: every input through upstream Bun (JavaScriptCore) and bun-boa, compared per checkpoint
 // (transpile, bundle, run: stdout, stderr, exit). Differences are grouped into fingerprints; the match rate per
-// checkpoint and the fingerprints go to build/oracle.json, one line per input and checkpoint to
-// build/oracle-inputs.jsonl. Fingerprints absent from the previous build/oracle.json are printed as new.
+// checkpoint and the fingerprints go to build/oracle.json at the root of the repository (and to this package's
+// tracked build/oracle.json), one line per input and checkpoint to build/oracle-inputs.jsonl. Fingerprints absent
+// from the tracked copy are printed as new.
 //
 // Corpus: test/js/**/*.test.ts, the sources under test/bundler, and the most downloaded npm packages.
 // n1 builds bun-boa and holds the upstream binary; both binaries, the corpus and this script go to every host
@@ -169,8 +170,14 @@ function compare(id: string, checkpoint: Checkpoint, a: Output, b: Output): Reco
     while (suffix < la.length && suffix < lb.length && la[la.length - 1 - suffix] === lb[lb.length - 1 - suffix])
       suffix++;
     return {
-      da: la.subarray(0, la.length - suffix).subarray(0, 80).toString(),
-      db: lb.subarray(0, lb.length - suffix).subarray(0, 80).toString(),
+      da: la
+        .subarray(0, la.length - suffix)
+        .subarray(0, 80)
+        .toString(),
+      db: lb
+        .subarray(0, lb.length - suffix)
+        .subarray(0, 80)
+        .toString(),
       id,
       checkpoint,
       match: false,
@@ -196,8 +203,10 @@ async function worker(dir: string, partition: string, limit: number) {
       while (next < tasks.length) {
         const { input, checkpoint } = tasks[next++];
         const args = argv(input, checkpoint);
-        const a = await exec(jsc, args, input.cwd, dir);
-        const b = await exec(boa, args, input.cwd, dir);
+        const [a, b] = [await exec(jsc, args, input.cwd, dir), await exec(boa, args, input.cwd, dir)];
+        // The bundler reports errors from its parallel parse in no fixed order, upstream included.
+        if (checkpoint === "bundle")
+          for (const o of [a, b]) o.stderr = o.stderr.trimEnd().split("\n\n").sort().join("\n\n");
         process.stdout.write(JSON.stringify(compare(input.id, checkpoint, a, b)) + "\n");
       }
     }),
@@ -239,16 +248,25 @@ async function coordinate() {
   });
   const boaBinary = `/srv/xbuild/target/bun-boa-${remoteRepo}/debug/bun`;
   const tree = `/srv/xbuild/src/${remoteRepo}`;
+  // The revision a binary was built from stays next to it, so --no-build reports that one and not HEAD.
+  if (!values["no-build"]) {
+    const dirty = (await $`git -C ${repo} status --porcelain`.text()).trim() ? "-dirty" : "";
+    const built = (await $`git -C ${repo} rev-parse HEAD`.text()).trim() + dirty;
+    await ssh(builder, `echo ${built} > ${boaBinary}.rev`);
+  }
 
   // Binaries on n1: the upstream one is the host's own Bun, so every host compares against the same build.
   await ssh(
     builder,
-    `set -e; mkdir -p ${DIR}/bin ${DIR}/corpus/npm; cp -f ${boaBinary} ${DIR}/bin/bun-boa; ` +
-      `cp -fL "$(command -v bun)" ${DIR}/bin/bun-jsc`,
+    `set -e; mkdir -p ${DIR}/bin ${DIR}/corpus/npm; ` +
+      // A rename, not a copy over, so a binary still running from an earlier run does not block it.
+      `cp -f ${boaBinary} ${DIR}/bin/.bun-boa && mv -f ${DIR}/bin/.bun-boa ${DIR}/bin/bun-boa; ` +
+      `cp -f ${boaBinary}.rev ${DIR}/bin/bun-boa.rev 2>/dev/null || echo unknown > ${DIR}/bin/bun-boa.rev; ` +
+      `cp -fL "$(command -v bun)" ${DIR}/bin/.bun-jsc && mv -f ${DIR}/bin/.bun-jsc ${DIR}/bin/bun-jsc`,
   );
   const revisions = {
     upstream: (await ssh(builder, `${DIR}/bin/bun-jsc --revision`).text()).trim(),
-    boa: (await $`git -C ${repo} rev-parse HEAD`.text()).trim(),
+    boa: (await ssh(builder, `cat ${DIR}/bin/bun-boa.rev`).text()).trim(),
   };
 
   // The most downloaded npm packages, from ecosyste.ms (npm's own search has no download ranking).
@@ -326,11 +344,14 @@ async function coordinate() {
   );
   const records = parts.flat().sort((a, b) => a.id.localeCompare(b.id) || a.checkpoint.localeCompare(b.checkpoint));
 
-  const out = join(pkg, "build/oracle.json");
+  // The run goes to the repository's build/; the copy in this package is tracked, and is the baseline that
+  // tells new fingerprints from known ones.
+  const out = join(repo, "build/oracle.json");
+  const baseline = join(pkg, "build/oracle.json");
   const previous = new Set(
     (
       (
-        await Bun.file(out)
+        await Bun.file(baseline)
           .json()
           .catch(() => ({}))
       ).fingerprints ?? []
@@ -375,14 +396,12 @@ async function coordinate() {
     id.startsWith("npm/") ? "npm" : id.startsWith("test/bundler/") ? "fixture" : "test";
   const kinds: { [k in Kind]?: number } = {};
   for (const id of new Set(records.map(r => r.id))) kinds[kind(id)] = (kinds[kind(id)] ?? 0) + 1;
-  await Bun.write(
-    out,
+  const report =
     JSON.stringify(
       {
         meta: {
           date: new Date().toISOString(),
           ...revisions,
-          // --no-build compares the binary of an earlier build, which may predate `boa`.
           rebuilt: !values["no-build"],
           hosts,
           down,
@@ -395,9 +414,12 @@ async function coordinate() {
       },
       null,
       2,
-    ) + "\n",
-  );
-  await Bun.write(join(pkg, "build/oracle-inputs.jsonl"), records.map(r => JSON.stringify(r)).join("\n") + "\n");
+    ) + "\n";
+  await Promise.all([
+    Bun.write(out, report),
+    Bun.write(baseline, report),
+    Bun.write(join(repo, "build/oracle-inputs.jsonl"), records.map(r => JSON.stringify(r)).join("\n") + "\n"),
+  ]);
 
   for (const [checkpoint, r] of Object.entries(rates))
     console.log(`${checkpoint.padEnd(9)} ${r.matched}/${r.inputs} ${(r.rate * 100).toFixed(2)}%`);
