@@ -39,6 +39,7 @@ const OPS = "__bun_native_ops__";
   platform: string;
   arch: string;
   pid: number;
+  cryptoBun: Record<string, unknown>;
 }) {
   const Bun = {
     version: native.version,
@@ -74,6 +75,8 @@ const OPS = "__bun_native_ops__";
     serve: native.serve,
     fetch: globalThis.fetch,
     gc: (_force?: boolean) => native.gc(),
+    // CryptoHasher, SHA1…, sha, hash, randomUUIDv7, randomUUIDv5 (js/crypto.ts).
+    ...native.cryptoBun,
   };
 
   const process: any = {
