@@ -1,6 +1,7 @@
 //! Node.js compatibility: `src/runtime/node` on `bun_js`.
 
 pub mod async_hooks;
+pub mod buffer;
 pub(crate) mod node_fs;
 pub mod node_fs_binding;
 pub mod node_fs_constant;

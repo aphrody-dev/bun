@@ -112,6 +112,18 @@ impl JsSharedArrayBuffer {
         src.to_vec()
     }
 
+    /// Stores `bytes` from `offset`, each one that differs from `before` (what the caller read there), as an atomic
+    /// store; what lies past the end of the buffer is not written.
+    pub fn store_changed(&self, offset: usize, before: &[u8], bytes: &[u8]) {
+        let obj = self.borrow();
+        let dest = obj.data().bytes(Ordering::SeqCst);
+        for ((cell, old), new) in dest.iter().skip(offset).zip(before).zip(bytes) {
+            if old != new {
+                cell.store(*new, Ordering::SeqCst);
+            }
+        }
+    }
+
     /// Gets the raw buffer of this `JsSharedArrayBuffer`.
     #[inline]
     #[must_use]
