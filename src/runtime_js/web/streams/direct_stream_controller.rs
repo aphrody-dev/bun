@@ -28,7 +28,9 @@ pub struct DirectStreamController {
     in_pull: bool,
     /// A delivery at the end of the turn is pending, for a write outside `pull`.
     flush_scheduled: bool,
+    /// A whole-body consumer reads it: `pull` runs once, and the end is `close()`, `end()` or its promise.
     one_shot: bool,
+    pulled: bool,
 }
 
 impl JsClass for DirectStreamController {
@@ -88,6 +90,7 @@ pub fn create(
             in_pull: false,
             flush_scheduled: false,
             one_shot: false,
+            pulled: false,
         },
     )
 }
@@ -193,12 +196,14 @@ fn error(global: &JSGlobalObject, direct: &JSValue, reason: JSValue) -> JsResult
 
 /// The default controller's pull algorithm: one call of the source's `pull`.
 pub fn pull(global: &JSGlobalObject, direct: &JSValue) -> JsResult<JSValue> {
-    let (pull, source, closed) = {
+    let (pull, source, closed, once_more) = {
         let d = direct_of(direct);
-        let d = d.borrow(global)?;
-        (d.pull.clone(), d.source.clone(), d.closed)
+        let mut d = d.borrow_mut(global)?;
+        let once_more = d.one_shot && d.pulled;
+        d.pulled = true;
+        (d.pull.clone(), d.source.clone(), d.closed, once_more)
     };
-    if closed {
+    if closed || once_more {
         return Ok(internals::resolved(global, JSValue::UNDEFINED));
     }
     if !pull.is_callable() {

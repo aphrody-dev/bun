@@ -175,6 +175,7 @@ fn direct_streams() {
         ("return await new ReadableStream({ type: 'direct' }).text().catch(e => e.message)", "underlyingSource.pull is not a function"),
         ("let pulls = 0, cancels = 0; const s = new ReadableStream({ type: 'direct', pull(c) { pulls++; c.write('hello '); c.write('world'); c.end() }, cancel() { cancels++ } }); let out = ''; for await (const v of s) out += String.fromCharCode(...v); return [out, pulls, cancels].join()", "hello world,1,0"),
         ("const [a, b] = new ReadableStream({ type: 'direct', async pull(c) { c.write('t'); await 0; c.close() } }).tee(); return [await a.text(), await b.text()].join()", "t,t"),
+        ("let ctrl, pulls = 0; const p = new Response(new ReadableStream({ type: 'direct', pull(c) { pulls++; ctrl = c; c.write('hello') } })).text(); for (let i = 0; i < 5; i++) await 0; ctrl.write('world'); ctrl.close(); return (await p) + pulls", "helloworld1"),
     ]);
 }
 
