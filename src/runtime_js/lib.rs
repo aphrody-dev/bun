@@ -48,11 +48,13 @@ pub fn cpp(global: &bun_js::JSGlobalObject, file: &str, symbol: &str) -> Option<
     }
 }
 
-/// The properties of `Bun` this crate implements besides Blob's, by name: `Bun.Glob`, `Bun.deepEquals`.
+/// The properties of `Bun` this crate implements besides Blob's, by name: `Bun.Glob`, `Bun.deepEquals`,
+/// `Bun.sleepSync`, `Bun.which`, `Bun.unsafe`.
 pub fn bun_object(global: &JSGlobalObject) -> bun_js::JsResult<Vec<(&'static str, JSValue)>> {
     let mut properties = generated_bindgen::glob::exports(global)?;
     properties.extend(api::bun_object::functions(global));
     properties.extend(web::streams::readable_stream::bun_functions(global));
+    properties.extend(generated_bindgen::unsafe_object::namespaces(global)?);
     Ok(properties)
 }
 
@@ -87,6 +89,7 @@ pub(crate) fn define_global(context: &mut Context, name: &str, value: JsValue) -
 /// an [`EventLoop`].
 pub fn install(context: &mut Context) -> JsResult<()> {
     timer::install(context)?;
+    web::abort::install(context)?;
     web::streams::install(context)?;
     webcore::install(context)
 }

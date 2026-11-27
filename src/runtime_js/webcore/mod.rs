@@ -4,6 +4,8 @@
 pub mod blob;
 #[path = "ObjectURLRegistry.rs"]
 pub mod object_url_registry;
+#[path = "FileSink.rs"]
+pub mod file_sink;
 #[path = "FormData.rs"]
 pub mod form_data;
 #[path = "Body.rs"]

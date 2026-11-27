@@ -351,3 +351,75 @@ fn last_modified_follows_writes() {
         let _ = std::fs::remove_dir_all(&dir);
     });
 }
+
+/// `Bun.file(...).writer()`: what JavaScriptCore Bun answers for the same calls.
+#[test]
+fn file_sink_writes_flushes_and_ends() {
+    let dir = temp_dir("sink");
+    with_runtime(|global| {
+        global.to_js_value().put(global, "dir", JSValue::from_utf8(dir.as_bytes()));
+        let cases = [
+            (
+                "const w = Bun.file(dir + '/a').writer(); return [w.constructor.name, w.write('héllo'), w.write(new Uint8Array([33, 34])), w.write(new Uint8Array([35]).buffer), w.write(''), await Bun.file(dir + '/a').size, w.flush(), await Bun.file(dir + '/a').size, w.flush(), w.end(), w.write('x'), w.end(), await Bun.file(dir + '/a').text()].join()",
+                "FileSink,6,2,1,0,0,9,9,0,0,true,0,héllo!\"#",
+            ),
+            (
+                "const w = Bun.file(dir + '/a').writer(); try { w.write(1) } catch (e) { return e.code + ' ' + e.message }",
+                "ERR_INVALID_ARG_TYPE write() expects a string, ArrayBufferView, or ArrayBuffer",
+            ),
+            // No truncation: the writer writes from the start of the file.
+            (
+                "const w = Bun.file(dir + '/a').writer(); w.write('zz'); w.close(); return Bun.file(dir + '/a').text()",
+                "zz\u{FFFD}llo!\"#",
+            ),
+            // A write of a page or more reaches the file at once.
+            (
+                "const w = Bun.file(dir + '/big').writer(); const n = w.write('x'.repeat(1 << 20)); return [n, await Bun.file(dir + '/big').size, w.end()].join()",
+                "1048576,1048576,0",
+            ),
+            ("try { Bun.file(dir + '/a').writer(1) } catch (e) { return e.message }", "options must be an object or undefined"),
+            (
+                "try { new Blob(['x']).writer() } catch (e) { return e.message }",
+                "Cannot write to a Blob backed by bytes, which are always read-only",
+            ),
+            (
+                "try { Bun.file(dir).writer() } catch (e) { return e.code + ' ' + e.syscall }",
+                "EISDIR open",
+            ),
+        ];
+        let failures: Vec<String> = cases
+            .iter()
+            .filter_map(|&(source, expected)| {
+                let actual = run(global, source);
+                (actual != expected).then(|| format!("{source}\n    expected: {expected}\n    actual:   {actual}"))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What a writer keeps is flushed in the next tick of the event loop.
+#[test]
+fn file_sink_flushes_in_the_next_tick() {
+    let dir = temp_dir("sink-tick");
+    let mut context = boa_engine::Context::builder()
+        .job_executor(bun_runtime_js::EventLoop::new().expect("an event loop"))
+        .build()
+        .expect("a realm");
+    let global = JSGlobalObject::from_context(&mut context);
+    let bun = JSObject::create(global);
+    for (name, value) in bun_runtime_js::webcore::blob::exports(global).unwrap() {
+        bun.put(global, name, value);
+    }
+    global.to_js_value().put(global, "Bun", bun.to_js());
+    global.to_js_value().put(global, "dir", JSValue::from_utf8(dir.as_bytes()));
+    global
+        .evaluate_script("globalThis.w = Bun.file(dir + '/t').writer(); w.write('abc');")
+        .unwrap();
+    // SAFETY: nothing else reaches the realm while its loop runs.
+    let context = unsafe { global.context() };
+    bun_runtime_js::EventLoop::of(context).run(context).unwrap();
+    assert_eq!(std::fs::read_to_string(format!("{dir}/t")).unwrap(), "abc");
+    let _ = std::fs::remove_dir_all(&dir);
+}

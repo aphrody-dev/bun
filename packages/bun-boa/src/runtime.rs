@@ -131,9 +131,15 @@ fn native(context: &mut Context) -> JsResult<JsValue> {
     bound.extend(
         bun_runtime_js::bun_object(global).map_err(|error| global.into_engine_error(error))?,
     );
+    // `process`'s members that BunProcess.cpp defines (`umask`, `memoryUsage`, `report.getReport`, …).
+    let process = bun_js::JSObject::create(global);
+    for (name, value) in bun_runtime_js::node::process::functions(global) {
+        process.put(global, name, value);
+    }
     for (name, value) in bound.into_iter().chain(clock) {
         ops.property(JsString::from(name), value.into_engine(), Attribute::all());
     }
+    ops.property(js_string!("process"), process.to_js().into_engine(), Attribute::all());
     ops.property(js_string!("serve"), serve, Attribute::all())
         .property(js_string!("crypto"), crypto, Attribute::all())
         .property(js_string!("env"), env, Attribute::all())

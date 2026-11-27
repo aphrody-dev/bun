@@ -625,7 +625,8 @@ fn sqlite_runs_on_turso() {
 }
 
 /// Bun's builtin modules (src/js), `require` and `__dirname` in an ES module, CommonJS modules, tsconfig.json
-/// `paths`, and the helpers the transpiler imports from `bun:wrap` (`using`).
+/// `paths`, the helpers the transpiler imports from `bun:wrap` (`using`), `./x.js` that is `x.ts`, and what of `process`,
+/// `Bun` and `AbortSignal` js/bun.ts and runtime_js add.
 #[test]
 fn builtin_modules_require_and_commonjs() {
     let out = bun().args(["run", "main.ts"]).current_dir(fixtures().join("modules")).output().unwrap();
@@ -634,6 +635,9 @@ fn builtin_modules_require_and_commonjs() {
 mapped 1 2 counter.cjs
 true 3 modules /
 using true
+rewritten ts
+process number 2 bigint true user,system number true object
+bun function /bin/sh number function AbortError
 ";
     assert_eq!(stdout, expected, "stderr: {stderr}");
     assert!(out.status.success(), "stderr: {stderr}");

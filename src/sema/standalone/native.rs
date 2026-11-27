@@ -458,11 +458,56 @@ extern "C" fn bun_cpu_features() -> u8 {
 extern "C" fn bun_restore_stdio() {}
 #[unsafe(no_mangle)]
 extern "C" fn on_before_reload_process_posix(_close_inherited_fds: bool) {}
+/// BunProcess.cpp's (libuv's on Linux): the resident pages of `/proc/self/stat`, its 24th field.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[unsafe(no_mangle)]
+extern "C" fn getRSS(rss: &mut usize) -> c_int {
+    *rss = 0;
+    let Ok(stat) = bun_sys::File::read_from(bun_core::Fd::cwd(), b"/proc/self/stat") else {
+        return libc::EIO;
+    };
+    // The command name is in parentheses and may hold spaces: the fields are counted after it.
+    let Some(close) = bun_core::strings::last_index_of_char(&stat, b')') else {
+        return libc::EINVAL;
+    };
+    let pages = bun_core::strings::tokenize(&stat[close + 1..], b" ")
+        .nth(21)
+        .and_then(|field| std::str::from_utf8(field).ok()?.parse::<usize>().ok());
+    let Some(pages) = pages else {
+        return libc::EINVAL;
+    };
+    // SAFETY: no preconditions.
+    *rss = pages * unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    0
+}
+/// Where there is no `/proc`: the high-water mark stands for it.
+#[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
+#[unsafe(no_mangle)]
+extern "C" fn getRSS(rss: &mut usize) -> c_int {
+    getPeakRSS(rss)
+}
+/// BunProcess.cpp's: `ru_maxrss`, which Linux and FreeBSD count in kilobytes and Darwin in bytes.
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+extern "C" fn getPeakRSS(peak: &mut usize) -> c_int {
+    *peak = 0;
+    // SAFETY: an all-zero rusage is valid, and getrusage only writes it.
+    let mut usage: libc::rusage = unsafe { core::mem::zeroed() };
+    // SAFETY: as above.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return bun_sys::last_errno();
+    }
+    let unit = if cfg!(target_os = "macos") { 1 } else { 1024 };
+    *peak = usage.ru_maxrss as usize * unit;
+    0
+}
+#[cfg(windows)]
 #[unsafe(no_mangle)]
 extern "C" fn getRSS(rss: &mut usize) -> c_int {
     *rss = 0;
     -1
 }
+#[cfg(windows)]
 #[unsafe(no_mangle)]
 extern "C" fn getPeakRSS(peak: &mut usize) -> c_int {
     *peak = 0;

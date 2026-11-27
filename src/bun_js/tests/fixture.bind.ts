@@ -75,6 +75,14 @@ export const describeShape = b.fn({
   throws: true,
 });
 
+/** A number or a BigInt, and nothing else: what neither takes is a type error. */
+export const Wide = b.union({ number: b.f64, bigint: b.u64.allowBigInt });
+
+export const describeWide = b.fn({
+  args: { wide: Wide },
+  returns: b.string.utf8,
+});
+
 export const math = b.namespace({
   half: { args: { value: b.f64 }, returns: b.f64 },
   isTruthy: { args: { value: b.bool.loose }, returns: b.bool },

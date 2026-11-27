@@ -10,7 +10,7 @@ use bun_core::{ZBox, ZStr, strings};
 use bun_js::{JSArray, JSGlobalObject, JSObject, JSValue, JsResult};
 use bun_sys::{E, Fd, Maybe, Mode, O, PosixStat};
 
-use crate::node::stats;
+use crate::node::stat;
 use crate::node::types::{
     self, ArgumentsSlice, Encoding, PathLike, PathOrFd, fd_required, invalid_arg_type,
     invalid_arg_value, invalid_arguments, mode_from_js, out_of_range, path_like_from_js, path_like_required,
@@ -107,7 +107,7 @@ fn statx_supported() -> bool {
     bun_sys::SUPPORTS_STATX_ON_LINUX.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-fn stat_path(path: &ZStr, follow: bool) -> Maybe<PosixStat> {
+pub(crate) fn stat_path(path: &ZStr, follow: bool) -> Maybe<PosixStat> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     if statx_supported() {
         return if follow {
@@ -168,7 +168,7 @@ impl<const FOLLOW: bool> Operation for StatOp<FOLLOW> {
     }
     fn to_js(&self, global: &JSGlobalObject, out: Self::Out, (): ()) -> JsResult<JSValue> {
         match out {
-            Some(stat) => stats::to_js(global, &stat, self.0.big_int),
+            Some(stat) => stat::to_js(global, &stat, self.0.big_int),
             None => Ok(JSValue::UNDEFINED),
         }
     }
@@ -198,7 +198,7 @@ impl Operation for Fstat {
         bun_sys::fstat(self.fd).map(|stat| posix_stat(&stat))
     }
     fn to_js(&self, global: &JSGlobalObject, out: PosixStat, (): ()) -> JsResult<JSValue> {
-        stats::to_js(global, &out, self.big_int)
+        stat::to_js(global, &out, self.big_int)
     }
 }
 
@@ -1211,7 +1211,7 @@ impl Operation for Readdir {
                         value
                     }
                 };
-                stats::dirent(global, name, stats::dirent_type(entry.kind), parent)?
+                stat::dirent(global, name, stat::dirent_type(entry.kind), parent)?
             } else {
                 name
             };

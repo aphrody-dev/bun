@@ -30,6 +30,11 @@ pub(crate) fn now() -> f64 {
     origin().instant.elapsed().as_nanos() as f64 / 1_000_000.0
 }
 
+/// The nanoseconds of the origin timer, as `Bun__readHRTime` reads them.
+pub(crate) fn elapsed_ns() -> u64 {
+    origin().instant.elapsed().as_nanos() as u64
+}
+
 pub(crate) fn time_origin() -> f64 {
     origin().unix_ms
 }

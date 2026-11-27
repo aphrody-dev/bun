@@ -14,6 +14,8 @@ path = "lib.rs"
 [package.metadata.bun-js]
 bindings = [
   "../runtime/api/Glob.bind.ts",
+  "../runtime/api/UnsafeObject.bind.ts",
+  "../runtime/node/Stat.bind.ts",
   "../runtime/node/node_fs_binding.bind.ts",
   "../runtime/node/node_path.bind.ts",
   "../runtime/node/node_validators.bind.ts",
@@ -38,6 +40,8 @@ bun_text_diff = { path = "../text_diff" }
 bun_threading = { path = "../threading" }
 bun_usockets_rs = { path = "../usockets_rs" }
 bun_uws_sys = { path = "../uws_sys" }
+bun_watcher = { path = "../watcher" }
+bun_which = { path = "../which" }
 const_format = "0.2"
 getrandom = "0.4"
 # crypto/: RustCrypto, instead of BoringSSL.
@@ -61,3 +65,5 @@ libc = "0.2"
 [dev-dependencies]
 # The C and C++ symbols that bun_core and bun_sys link against (WTF), in Rust, as the bun binary has them.
 bun_sema_standalone = { path = "../sema/standalone" }
+# AbortController and AbortSignal, which the realms of bun-boa have from it.
+boa_runtime = { path = "../boa/core/runtime" }

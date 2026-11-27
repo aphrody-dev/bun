@@ -101,15 +101,34 @@ fn file(path: &Path) -> Option<PathBuf> {
     path.is_file().then(|| path.to_path_buf())
 }
 
+/// What `./x.js` may name besides itself, as `rewritten_file_extensions` of src/resolver/resolver.rs: TypeScript's
+/// `./x.ts` for `./x.js` (esbuild's `rewrittenFileExtensions`, and Bun's `.mts`).
+fn rewritten_file_extensions(path: &Path) -> &'static [&'static str] {
+    let inside_node_modules = || path.components().any(|part| part.as_os_str() == "node_modules");
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("js" | "jsx") => &["ts", "tsx", "mts"],
+        Some("mjs" | "cjs")
+            if bun_core::feature_flags::DISABLE_AUTO_JS_TO_TS_IN_NODE_MODULES && inside_node_modules() =>
+        {
+            &[]
+        }
+        Some("mjs") => &["mts"],
+        Some("cjs") => &["cts"],
+        _ => &[],
+    }
+}
+
 fn with_extension(path: &Path) -> Option<PathBuf> {
-    file(path).or_else(|| {
-        EXTENSIONS.iter().find_map(|ext| {
-            let mut candidate = path.as_os_str().to_owned();
-            candidate.push(".");
-            candidate.push(ext);
-            file(Path::new(&candidate))
+    file(path)
+        .or_else(|| rewritten_file_extensions(path).iter().find_map(|ext| file(&path.with_extension(ext))))
+        .or_else(|| {
+            EXTENSIONS.iter().find_map(|ext| {
+                let mut candidate = path.as_os_str().to_owned();
+                candidate.push(".");
+                candidate.push(ext);
+                file(Path::new(&candidate))
+            })
         })
-    })
 }
 
 fn package_entry(dir: &Path) -> Option<PathBuf> {

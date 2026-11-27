@@ -1,8 +1,8 @@
 //! `Blob`, `File`, `Bun.file()` and `Bun.stdin`/`stdout`/`stderr`: src/runtime/webcore/Blob.rs on `bun_js`.
 //!
 //! A read or a write runs when it is asked for and its promise is settled by the time it is returned: Boa has no
-//! thread pool and no I/O loop yet. What needs an API that Boa does not have yet (`stream()` and `writer()` need
-//! streams, `image()` needs `Bun.Image`, `s3://` needs S3) throws and says so.
+//! thread pool and no I/O loop yet. `writer()` is a `FileSink` (FileSink.rs). What needs an API that Boa does not
+//! have yet (`image()` needs `Bun.Image`, `s3://` needs S3) throws and says so.
 
 use std::rc::Rc;
 
@@ -1002,8 +1002,9 @@ impl JsClass for Blob {
         })?;
         class.method("unlink", 0, attributes, unlink)?;
         class.method("write", 2, attributes, blob_write)?;
-        class.method("writer", 1, attributes, |_, global, _| {
-            Err(not_implemented(global, "Blob.writer()"))
+        class.method("writer", 1, attributes, |this, global, frame| {
+            let blob = this.borrow(global)?.clone();
+            super::file_sink::writer(global, &blob, &frame.argument(0))
         })?;
         Ok(())
     }
