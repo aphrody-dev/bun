@@ -74,11 +74,15 @@ const MODULE_ITEMS = new Set(["exports", "namespaces", "native"]);
 // ───────────────────────────── types ─────────────────────────────
 
 const isPlainInteger = (type: IntegerType) => /^Bun::Bindgen::IDL(Strict|Loose)Integer<[^,>]+>$/.test(type.idlType);
+/** `b.<integer>.allowBigInt`: a number as the integer is, or a BigInt in its range. */
+const isBigIntInteger = (type: IntegerType) =>
+  /^Bun::Bindgen::IDLStrictInteger<[^,>]+, Bun::Bindgen::AllowBigInt::Yes>$/.test(type.idlType);
 
 /** The `from_js` function for an argument of `type` that is not optional. */
 function converter(type: Type): string {
   if (type instanceof BoolType) return type.valueKinds === "any" ? "loose_bool" : "strict_bool";
   if (type instanceof IntegerType) {
+    if (isBigIntInteger(type)) return `strict_integer_or_bigint::<${type.rustName}>`;
     const integer = type.idlType.match(/^Bun::Bindgen::IDL(Strict|Loose)Integer<([^,>]+)>$/);
     if (!integer) return refuse(`${type.idlType} (an integer with a range, .wrap or .allowBigInt)`);
     return `${integer[1] === "Strict" ? "strict" : "loose"}_integer::<${type.rustName}>`;
@@ -158,7 +162,7 @@ function memberRustType(type: Type, file: SchemaFile): string {
   if (type instanceof LocalStringType || type instanceof Utf8Type) return "&'a [u8]";
   if (type instanceof OwnedUtf8Type) return "Vec<u8>";
   if (type instanceof BoolType || type instanceof DoubleType) return type.rustName;
-  if (type instanceof IntegerType && isPlainInteger(type)) return type.rustName;
+  if (type instanceof IntegerType && (isPlainInteger(type) || isBigIntInteger(type))) return type.rustName;
   if (type instanceof AnyType && type.checkedResult === null) return "bindgen::JsLocal<'a>";
   if (type instanceof OptionalType && (type.modifier === "optional" || type.modifier === "nullable"))
     return `Option<${memberRustType(type.inner, file)}>`;
@@ -506,7 +510,13 @@ function rustForAcceptedUnion(type: UnionType, file: SchemaFile): string {
   };
   const tests: string[] = [];
   let other: number | undefined;
+  // What no alternative takes is refused, as a value of the wrong type.
+  let noneTakes = false;
   for (const [kind, list] of type.alternativesByKind) {
+    if (kind === "other" && list.length === 0) {
+      noneTakes = true;
+      continue;
+    }
     if (list.length !== 1) refuse(`${what}: a value of kind ${String(kind)} that one alternative may pass to the next`);
     if (kind === "other") {
       other = list[0];
@@ -516,7 +526,13 @@ function rustForAcceptedUnion(type: UnionType, file: SchemaFile): string {
     if (!test) refuse(`${what}: telling apart a value of kind ${typeof kind === "string" ? kind : kind.cpp}`);
     tests.push(`if value.${test}() { return ${branch(list[0])}; }`);
   }
-  if (other === undefined) refuse(`${what}: a value no alternative takes`);
+  if (other === undefined && !noneTakes) refuse(`${what}: a value no alternative takes`);
+  const last =
+    other === undefined
+      ? `Err(bindgen::from_js::invalid_arg_type(heap, _ctx.name(), ${rustString(
+          [...type.alternativesByKind.keys()].filter(kind => typeof kind === "string" && kind !== "other").join(" or "),
+        )}, value))`
+      : branch(other);
   return `
 /// \`${type.name}\`, as a body takes it.
 pub enum ${type.name}${lifetime} {
@@ -527,7 +543,7 @@ impl<'a> ${type.name}${lifetime} {
     /// \`value\` as the alternative that takes it.
     pub fn from_js(heap: &bindgen::JsHeap<'a>, value: &JSValue, _ctx: bindgen::from_js::Context<'_>) -> bindgen::Result<'a, Self> {
 ${indent(tests.join("\n"), 8)}
-        ${branch(other!)}
+        ${last}
     }
 }
 `;

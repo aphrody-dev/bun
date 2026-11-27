@@ -332,7 +332,7 @@ pub mod from_js {
     }
 
     impl Context<'_> {
-        fn name(&self) -> &str {
+        pub fn name(&self) -> &str {
             match self {
                 Context::Argument(name) | Context::Validator { name, .. } => name,
             }
@@ -436,6 +436,30 @@ pub mod from_js {
             .get_number()
             .ok_or_else(|| type_must_be(heap, ctx, "a number", value))?;
         integer_of_number(heap, number, ctx)
+    }
+
+    /// `.allowBigInt`: a BigInt in the range of `T`, or what [`strict_integer`] takes.
+    pub fn strict_integer_or_bigint<'a, T: Integer + TryFrom<i128>>(
+        heap: &JsHeap<'a>,
+        value: &JSValue,
+        ctx: Context<'_>,
+    ) -> Result<'a, T> {
+        let Some(bigint) = value.as_engine().as_bigint() else {
+            return strict_integer(heap, value, ctx);
+        };
+        let integer = i128::try_from(bigint.as_inner()).ok();
+        integer.and_then(|integer| T::try_from(integer).ok()).ok_or_else(|| {
+            range(
+                heap,
+                ctx,
+                format_args!(
+                    "must be in the range [{}, {}] (received {}n)",
+                    T::MIN,
+                    T::MAX,
+                    bigint.to_string_radix(10)
+                ),
+            )
+        })
     }
 
     /// `ToNumber`, then as [`strict_integer`]: 1.5, NaN and Infinity are out of range, not truncated.

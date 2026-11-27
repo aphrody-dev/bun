@@ -73,6 +73,14 @@ mod fixture {
         })
     }
 
+    pub fn describe_wide(wide: crate::generated::fixture::Wide) -> String {
+        use crate::generated::fixture::Wide;
+        match wide {
+            Wide::Number(number) => format!("number {number}"),
+            Wide::Bigint(bigint) => format!("bigint {bigint}"),
+        }
+    }
+
     pub fn same<'a>(_: &JsHeap<'a>, value: JsLocal<'a>) -> JsLocal<'a> {
         value
     }
@@ -446,6 +454,23 @@ fn dictionaries_and_unions_that_are_taken() {
         assert_eq!(
             thrown(global, "describeShape({ sides: 1, label: 2 })"),
             "TypeError: Shape.label must be a string (ERR_INVALID_ARG_TYPE)"
+        );
+        assert_eq!(eval(global, "describeWide(1.5)"), "number 1.5");
+        assert_eq!(
+            eval(global, "describeWide(2n ** 64n - 1n)"),
+            "bigint 18446744073709551615"
+        );
+        assert_eq!(
+            thrown(global, "describeWide(2n ** 64n)"),
+            "RangeError: bigint must be in the range [0, 18446744073709551615] (received 18446744073709551616n) (ERR_OUT_OF_RANGE)"
+        );
+        assert_eq!(
+            thrown(global, "describeWide(-1n)"),
+            "RangeError: bigint must be in the range [0, 18446744073709551615] (received -1n) (ERR_OUT_OF_RANGE)"
+        );
+        assert_eq!(
+            thrown(global, "describeWide('1')"),
+            "TypeError: The \"wide\" property must be of type number or bigint, got string (ERR_INVALID_ARG_TYPE)"
         );
         assert!(!global.has_exception());
     });
