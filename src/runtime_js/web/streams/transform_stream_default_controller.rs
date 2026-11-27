@@ -7,6 +7,7 @@ use bun_js::{JSGlobalObject, JSValue, JsClass, JsResult};
 use super::internals::{self, Deferred, Reaction, promise_call};
 use super::readable_stream;
 use super::readable_stream_default_controller as readable_controller;
+use super::native_transform::{self, NativeTransform};
 use super::transform_stream;
 
 /// Where a controller's transform, flush and cancel algorithms come from.
@@ -17,6 +18,34 @@ pub enum TransformAlgorithms {
     None,
     /// A transformer object's `transform`, `flush` and `cancel`; without `transform`, the identity.
     Js { transformer: JSValue, transform: JSValue, flush: JSValue, cancel: JSValue },
+    /// Bun's own transformer, in Rust (`TextEncoderStream`, `CompressionStream`, ...).
+    Native(NativeTransform),
+}
+
+/// Runs a step of a native transformer, then enqueues what it made.
+fn native_step(
+    global: &JSGlobalObject,
+    controller: &JSValue,
+    step: impl FnOnce(&mut NativeTransform) -> JsResult<Vec<Vec<u8>>>,
+) -> JsResult<JSValue> {
+    let taken = std::mem::replace(&mut controller_of(controller).borrow_mut(global)?.algorithms, TransformAlgorithms::None);
+    let TransformAlgorithms::Native(mut state) = taken else {
+        controller_of(controller).borrow_mut(global)?.algorithms = taken;
+        return Ok(internals::resolved(global, JSValue::UNDEFINED));
+    };
+    let made = step(&mut state);
+    let text = native_transform::yields_text(&state);
+    controller_of(controller).borrow_mut(global)?.algorithms = TransformAlgorithms::Native(state);
+    internals::promise_of(global, || {
+        for chunk in made? {
+            let chunk = match text {
+                true => JSValue::from_utf8(&chunk),
+                false => crate::engine::uint8_array(global, &chunk)?,
+            };
+            enqueue(global, controller, chunk)?;
+        }
+        Ok(JSValue::UNDEFINED)
+    })
 }
 
 #[derive(Trace, Finalize)]
@@ -64,20 +93,28 @@ pub fn clear_algorithms(global: &JSGlobalObject, controller: &JSValue) -> JsResu
 pub fn cancel_algorithm(global: &JSGlobalObject, controller: &JSValue, reason: JSValue) -> JsResult<JSValue> {
     match controller_of(controller).borrow(global)?.algorithms.clone() {
         TransformAlgorithms::Js { transformer, cancel, .. } => promise_call(global, &cancel, &transformer, &[reason]),
-        TransformAlgorithms::None => Ok(internals::resolved(global, JSValue::UNDEFINED)),
+        TransformAlgorithms::None | TransformAlgorithms::Native(_) => Ok(internals::resolved(global, JSValue::UNDEFINED)),
     }
 }
 
 pub fn flush_algorithm(global: &JSGlobalObject, controller: &JSValue) -> JsResult<JSValue> {
+    let is_native = matches!(controller_of(controller).borrow(global)?.algorithms, TransformAlgorithms::Native(_));
+    if is_native {
+        return native_step(global, controller, |state| native_transform::flush(global, state));
+    }
     match controller_of(controller).borrow(global)?.algorithms.clone() {
         TransformAlgorithms::Js { transformer, flush, .. } => {
             promise_call(global, &flush, &transformer, &[controller.clone()])
         }
-        TransformAlgorithms::None => Ok(internals::resolved(global, JSValue::UNDEFINED)),
+        TransformAlgorithms::None | TransformAlgorithms::Native(_) => Ok(internals::resolved(global, JSValue::UNDEFINED)),
     }
 }
 
 fn transform_algorithm(global: &JSGlobalObject, controller: &JSValue, chunk: JSValue) -> JsResult<JSValue> {
+    let is_native = matches!(controller_of(controller).borrow(global)?.algorithms, TransformAlgorithms::Native(_));
+    if is_native {
+        return native_step(global, controller, |state| native_transform::transform(global, state, &chunk));
+    }
     match controller_of(controller).borrow(global)?.algorithms.clone() {
         TransformAlgorithms::Js { transformer, transform, .. } if transform.is_callable() => {
             promise_call(global, &transform, &transformer, &[chunk, controller.clone()])

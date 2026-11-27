@@ -1,6 +1,6 @@
 //! The body of a `Request` or `Response` (Fetch §5.1 "Body mixin"): bytes that are all there, or bytes still
-//! arriving from the network or from a `ReadableStream` given as the body. `body` is a stream of the bytes, which
-//! arrive as one chunk once they are all there.
+//! arriving from the network, or a `ReadableStream` given as the body, which is read when the body is. `body` is
+//! that stream, or else a stream of the bytes, which arrive as one chunk once they are all there.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -12,7 +12,7 @@ use bun_js::{JSGlobalObject, JSValue};
 use boa_gc::{Finalize, Trace};
 
 use crate::cx;
-use crate::web::streams::internals::{Reaction, upon};
+use crate::web::streams::internals::{Reaction, react, upon};
 use crate::web::streams::readable_stream::{self, Consume, ReadableStream};
 use crate::web::streams::readable_stream_default_controller::{self as readable_controller, SourceAlgorithms};
 use crate::webcore::blob::{Blob, throw_system_error};
@@ -49,6 +49,8 @@ pub enum Body {
     Null,
     Bytes(Rc<[u8]>),
     Incoming(Rc<Incoming>),
+    /// A `ReadableStream` given as the body, read when the body is.
+    Stream(JSValue),
 }
 
 impl Body {
@@ -64,7 +66,7 @@ impl Body {
             Body::Incoming(incoming) if incoming.done.get() && incoming.error.borrow().is_none() => {
                 Some(Rc::from(incoming.bytes.borrow().as_slice()))
             }
-            Body::Incoming(_) => None,
+            Body::Incoming(_) | Body::Stream(_) => None,
         }
     }
 }
@@ -132,6 +134,9 @@ pub fn convert(read: Read, bytes: &[u8], content_type: &str, context: &mut Conte
 
 /// A promise of reading `body` once it is all there.
 pub fn read(body: &Body, read: Read, content_type: String, context: &mut Context) -> JsResult<JsValue> {
+    if let Body::Stream(stream) = body {
+        return read_stream(JSGlobalObject::from_context(context), stream, read, content_type);
+    }
     if let Some(bytes) = body.bytes() {
         return Ok(match convert(read, &bytes, &content_type, context) {
             Ok(value) => JsPromise::resolve(value, context)?.into(),
@@ -160,35 +165,30 @@ pub fn read(body: &Body, read: Read, content_type: String, context: &mut Context
     Ok(promise.into())
 }
 
-/// A body of the chunks of `stream`, which is read to its end now: the body is all there once it ends.
-fn from_stream(global: &JSGlobalObject, stream: &JSValue) -> bun_js::JsResult<Body> {
+/// A read of a stream body: the stream is read to its end, and the bytes converted.
+fn read_stream(global: &JSGlobalObject, stream: &JSValue, read: Read, content_type: String) -> JsResult<JsValue> {
     #[derive(Clone, Trace, Finalize)]
     #[boa_gc(unsafe_no_drop)]
-    struct Feed {
+    struct Convert {
         #[unsafe_ignore_trace]
-        incoming: Rc<Incoming>,
+        read: Read,
+        content_type: String,
     }
-    let incoming = Rc::new(Incoming::default());
-    let bytes = readable_stream::consume(global, stream, Consume::Bytes)?;
-    let ended: Reaction<Feed> = |global, feed, bytes| {
+    let bytes = crate::lift(global, readable_stream::consume(global, stream, Consume::Bytes))?;
+    let converted: Reaction<Convert> = |global, convert_to, bytes| {
         let bytes = crate::engine::buffer_source_bytes(global, &bytes).unwrap_or_default();
-        *feed.incoming.bytes.borrow_mut() = bytes;
-        global.lift(feed.incoming.finish(cx(global), None))?;
-        Ok(JSValue::UNDEFINED)
+        let value = global.lift(convert(convert_to.read, &bytes, &convert_to.content_type, cx(global)))?;
+        Ok(JSValue::from_engine(value))
     };
-    let failed: Reaction<Feed> = |global, feed, reason| {
-        global.lift(feed.incoming.finish(cx(global), Some(reason.into_engine())))?;
-        Ok(JSValue::UNDEFINED)
-    };
-    let feed = Feed {
-        incoming: incoming.clone(),
-    };
-    upon(global, &bytes, feed, Some(ended), Some(failed));
-    Ok(Body::Incoming(incoming))
+    let convert_to = Convert { read, content_type };
+    Ok(react(global, &bytes, convert_to, Some(converted), None).into_engine())
 }
 
 /// The `ReadableStream` of a body: its bytes as one chunk, once they are all there.
 pub fn to_stream(global: &JSGlobalObject, body: &Body) -> bun_js::JsResult<JSValue> {
+    if let Body::Stream(stream) = body {
+        return Ok(stream.clone());
+    }
     if let Some(bytes) = body.bytes() {
         let chunks = match bytes.is_empty() {
             true => Vec::new(),
@@ -240,7 +240,7 @@ pub fn extract(global: &JSGlobalObject, value: &JSValue) -> bun_js::JsResult<(Bo
         return Ok((Body::Bytes(Rc::from(bytes)), content_type));
     }
     if value.as_class_ref::<ReadableStream>().is_some() {
-        return Ok((from_stream(global, value)?, None));
+        return Ok((Body::Stream(value.clone()), None));
     }
     if global_class_instance(global, value, "FormData")?.is_some() {
         return Err(global.throw(format_args!("A FormData body is not implemented on Boa yet")));

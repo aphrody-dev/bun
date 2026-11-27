@@ -292,6 +292,24 @@ pub fn source_cancel(global: &JSGlobalObject, stream: &JSValue, reason: JSValue)
     Ok(finish_deferred(global, &controller)?.promise)
 }
 
+/// A TransformStream whose transformer is Rust, with the default strategies.
+pub fn create_native(global: &JSGlobalObject, state: super::native_transform::NativeTransform) -> JsResult<JSValue> {
+    let stream = bun_js::class::to_js(
+        global,
+        TransformStream {
+            readable: JSValue::UNDEFINED,
+            writable: JSValue::UNDEFINED,
+            backpressure: None,
+            backpressure_change: None,
+            controller: JSValue::UNDEFINED,
+        },
+    )?;
+    let start = internals::resolved(global, JSValue::UNDEFINED);
+    initialize_transform_stream(global, &stream, &start, 1.0, JSValue::UNDEFINED, 0.0, JSValue::UNDEFINED)?;
+    controller::set_up(global, &stream, TransformAlgorithms::Native(state))?;
+    Ok(stream)
+}
+
 /// The TransformStream constructor's steps, on the new stream.
 fn construct_steps(global: &JSGlobalObject, stream: &JSValue, frame: &CallFrame<'_>) -> JsResult<()> {
     let [transformer, writable_strategy, readable_strategy] = frame.arguments_as_array::<3>();

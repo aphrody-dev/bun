@@ -20,7 +20,9 @@ use crate::sys_js::SystemError;
 #[path = "blob/Store.rs"]
 pub mod store;
 #[path = "blob/write_file.rs"]
-mod write_file;
+pub(crate) mod write_file;
+#[path = "FileSink.rs"]
+pub mod file_sink;
 
 use store::Data;
 pub use store::{INIT_TIMESTAMP, MAX_SIZE, PathOrFileDescriptor, SizeType, Store};
@@ -672,6 +674,37 @@ fn read_then(
     global: &JSGlobalObject,
     convert: fn(&JSGlobalObject, Vec<u8>) -> JsResult<JSValue>,
 ) -> JsResult<JSValue> {
+    // A file is read on the work pool, where the realm runs on bun_runtime_js's event loop.
+    let blob = this.borrow(global)?.clone();
+    if let Some(file) = blob.file()
+        && let Some(event_loop) = crate::cx(global).downcast_job_executor::<crate::EventLoop>()
+    {
+        let pathlike = file.pathlike.clone();
+        let (offset, size, kept) = (blob.offset, blob.size, blob.store.clone());
+        let promise = bun_js::JSPromise::create(global);
+        let value = promise.promise();
+        event_loop.run_on_work_pool(
+            move || store::read(&pathlike, offset, size),
+            move |context, result| {
+                let global = JSGlobalObject::from_context(context);
+                let settled = match result {
+                    Ok(read) => {
+                        if let Some(file) = kept.as_deref().and_then(Store::as_file) {
+                            file.last_modified.set(read.last_modified);
+                        }
+                        convert(global, read.bytes).map_err(|error| global.take_exception(error))
+                    }
+                    Err(error) => Err(error.to_error_instance(global)),
+                };
+                let result = match settled {
+                    Ok(value) => promise.resolve(global, value),
+                    Err(error) => promise.reject(global, error),
+                };
+                crate::lift(global, result)
+            },
+        );
+        return Ok(value);
+    }
     engine::wrap(global, || {
         let bytes = this.borrow(global)?.read_bytes();
         match bytes {
@@ -983,7 +1016,14 @@ impl JsClass for Blob {
         class.method("slice", 2, attributes, slice)?;
         class.method("stat", 0, attributes, stat)?;
         class.method("stream", 1, attributes, |this, global, _| {
-            // The bytes are read now and are the stream's one chunk.
+            // A descriptor (Bun.stdin) is read as a reader asks; anything else now, as the stream's one chunk.
+            let fd = this.borrow(global)?.file().and_then(|file| match &file.pathlike {
+                PathOrFileDescriptor::Fd(fd) => Some(*fd),
+                PathOrFileDescriptor::Path(_) => None,
+            });
+            if let Some(fd) = fd {
+                return file_sink::stream_of_fd(global, fd);
+            }
             let bytes = this
                 .borrow(global)?
                 .read_bytes()

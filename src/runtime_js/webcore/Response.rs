@@ -134,9 +134,13 @@ pub fn take_body<T: HasBody>(this: &ClassRef<T>, global: &JSGlobalObject) -> bun
     if body_used(this, global)? {
         return Err(global.throw_type_error(format_args!("Body already used")));
     }
-    // A read through the Response leaves the body's stream locked, as a reader that is never released would.
-    let stream = this.borrow(global)?.stream().clone();
-    if !stream.is_undefined() {
+    // A read through the Response leaves the body's stream locked, as a reader that is never released would. A
+    // stream given as the body is locked by the read itself.
+    let (stream, is_stream_body) = {
+        let payload = this.borrow(global)?;
+        (payload.stream().clone(), matches!(payload.body(), Body::Stream(_)))
+    };
+    if !stream.is_undefined() && !is_stream_body {
         crate::web::streams::readable_stream_default_reader::acquire(global, &stream)?;
         crate::web::streams::readable_stream::stream_of(&stream).borrow_mut(global)?.disturbed = true;
     }
@@ -151,7 +155,11 @@ pub fn take_body<T: HasBody>(this: &ClassRef<T>, global: &JSGlobalObject) -> bun
 fn body_used<T: HasBody>(this: &ClassRef<T>, global: &JSGlobalObject) -> bun_js::JsResult<bool> {
     let (used, stream) = {
         let payload = this.borrow(global)?;
-        (payload.used(), payload.stream().clone())
+        let stream = match payload.body() {
+            Body::Stream(stream) => stream.clone(),
+            _ => payload.stream().clone(),
+        };
+        (payload.used(), stream)
     };
     if used || stream.is_undefined() {
         return Ok(used);

@@ -161,33 +161,48 @@ impl File {
         self.last_modified.set(to_js_time(mtime.sec, mtime.nsec));
     }
 
-    fn error_path(&self) -> &[u8] {
-        self.pathlike.path().unwrap_or_default()
-    }
-
     /// Opens the file to read it: a path each time, a descriptor as it is.
     pub(crate) fn open_for_read(&self) -> Result<Opened, SystemError> {
-        match &self.pathlike {
-            PathOrFileDescriptor::Fd(fd) => Ok(Opened::Borrowed(*fd)),
-            PathOrFileDescriptor::Path(path) => {
-                bun_sys::File::open(&Path::from(path.as_slice()), O::RDONLY | O::CLOEXEC, 0)
-                    .map(Opened::Owned)
-                    .map_err(|err| SystemError::from(err.with_path(path)))
-            }
-        }
+        open_for_read(&self.pathlike)
     }
 
     /// `ReadFile`: up to `max_length` bytes from `offset`. A directory is an `EISDIR` error, as in Bun.
     pub fn read(&self, offset: SizeType, max_length: SizeType) -> Result<Vec<u8>, SystemError> {
-        let opened = self.open_for_read()?;
+        let read = read(&self.pathlike, offset, max_length)?;
+        self.last_modified.set(read.last_modified);
+        Ok(read.bytes)
+    }
+}
+
+/// What a read of a file gave: its bytes, and the file's `lastModified`.
+pub(crate) struct Read {
+    pub bytes: Vec<u8>,
+    pub last_modified: u64,
+}
+
+fn open_for_read(pathlike: &PathOrFileDescriptor) -> Result<Opened, SystemError> {
+    match pathlike {
+        PathOrFileDescriptor::Fd(fd) => Ok(Opened::Borrowed(*fd)),
+        PathOrFileDescriptor::Path(path) => bun_sys::File::open(&Path::from(path.as_slice()), O::RDONLY | O::CLOEXEC, 0)
+            .map(Opened::Owned)
+            .map_err(|err| SystemError::from(err.with_path(path))),
+    }
+}
+
+/// `ReadFile` of a path or a descriptor, on any thread: up to `max_length` bytes from `offset`.
+pub(crate) fn read(pathlike: &PathOrFileDescriptor, offset: SizeType, max_length: SizeType) -> Result<Read, SystemError> {
+    let error_path = pathlike.path().unwrap_or_default();
+    {
+        let opened = open_for_read(pathlike)?;
         let fd = opened.fd();
         let stat = bun_sys::fstat(fd)
-            .map_err(|err| SystemError::from(err).with_path(self.error_path()))?;
-        self.record_mtime(&stat);
+            .map_err(|err| SystemError::from(err).with_path(error_path))?;
+        let mtime = bun_sys::PosixStat::init(&stat).mtime();
+        let last_modified = to_js_time(mtime.sec, mtime.nsec);
         if S::ISDIR(stat.st_mode as Mode) {
             return Err(SystemError {
                 code: Some("EISDIR"),
-                path: self.pathlike.path().map(<[u8]>::to_vec),
+                path: pathlike.path().map(<[u8]>::to_vec),
                 message: "Directories cannot be read like files".to_owned(),
                 syscall: Some("read"),
                 ..SystemError::default()
@@ -214,10 +229,13 @@ impl File {
                 Ok(0) => break,
                 Ok(read) => buffer.extend_from_slice(&chunk[..read]),
                 Err(err) if err.get_errno() == bun_sys::E::EAGAIN => wait_for(fd, libc::POLLIN),
-                Err(err) => return Err(SystemError::from(err).with_path(self.error_path())),
+                Err(err) => return Err(SystemError::from(err).with_path(error_path)),
             }
         }
-        Ok(buffer)
+        Ok(Read {
+            bytes: buffer,
+            last_modified,
+        })
     }
 }
 
