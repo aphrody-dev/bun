@@ -2,3 +2,4 @@
 
 pub mod bun_object;
 pub mod glob;
+pub(crate) mod unsafe_object;

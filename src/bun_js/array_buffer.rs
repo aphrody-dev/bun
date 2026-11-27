@@ -66,6 +66,15 @@ impl JSValue {
         Ok(None)
     }
 
+    /// Whether this is a `Uint16Array` or an `Int16Array`: the typed arrays whose bytes are UTF-16 code units.
+    pub fn is_16_bit_integer_array(&self) -> bool {
+        use boa_engine::builtins::typed_array::TypedArrayKind;
+        self.0
+            .as_object()
+            .and_then(|object| JsTypedArray::from_object(object).ok()?.kind())
+            .is_some_and(|kind| matches!(kind, TypedArrayKind::Uint16 | TypedArrayKind::Int16))
+    }
+
     /// Whether this is a `Uint8Array` (a `Buffer` is one), a `DataView` or an `ArrayBuffer`: the buffers that
     /// node:fs takes a path in.
     pub fn is_uint8_array_data_view_or_array_buffer(&self) -> bool {

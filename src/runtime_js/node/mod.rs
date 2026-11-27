@@ -6,6 +6,7 @@ pub mod node_fs_binding;
 pub mod node_fs_constant;
 pub(crate) mod node_validators;
 pub mod path;
+pub mod process;
 pub(crate) mod stats;
 pub mod string_decoder;
 pub(crate) mod types;

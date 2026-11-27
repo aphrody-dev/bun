@@ -25,6 +25,21 @@ const OPS = "__bun_native_ops__";
   // bun_runtime_js::bun_object
   Glob: new (pattern: string) => unknown;
   deepEquals(a: unknown, b: unknown, strict?: boolean, skipPrototype?: boolean): boolean;
+  sleepSync(milliseconds: number): void;
+  which(command: string, options?: { PATH?: string; cwd?: string }): string | null;
+  unsafe: Record<string, (...args: any[]) => unknown>;
+  // bun_runtime_js::node::process
+  process: {
+    umask(mask?: unknown): number;
+    hrtime(time?: unknown): [number, number];
+    hrtimeBigint(): bigint;
+    memoryUsage(): Record<string, number>;
+    memoryUsageRss(): number;
+    cpuUsage(previous?: unknown): { user: number; system: number };
+    resourceUsage(): Record<string, number>;
+    getReport(): object;
+    execPath: string;
+  };
   readableStreamToText(stream: unknown): Promise<string>;
   readableStreamToBytes(stream: unknown): Promise<Uint8Array>;
   readableStreamToArrayBuffer(stream: unknown): Promise<ArrayBuffer>;
@@ -58,6 +73,9 @@ const OPS = "__bun_native_ops__";
     semver: native.semver,
     Glob: native.Glob,
     deepEquals: native.deepEquals,
+    sleepSync: native.sleepSync,
+    which: native.which,
+    unsafe: native.unsafe,
     readableStreamToText: native.readableStreamToText,
     readableStreamToBytes: native.readableStreamToBytes,
     readableStreamToArrayBuffer: native.readableStreamToArrayBuffer,
@@ -96,14 +114,26 @@ const OPS = "__bun_native_ops__";
     nextTick(fn: (...args: unknown[]) => void, ...args: unknown[]) {
       queueMicrotask(() => fn(...args));
     },
-    hrtime: Object.assign(
-      (prev?: [number, number]) => {
-        const ns = native.nanoseconds();
-        const now: [number, number] = [Math.floor(ns / 1e9), ns % 1e9];
-        return prev ? [now[0] - prev[0], now[1] - prev[1]] : now;
-      },
-      { bigint: () => BigInt(Math.floor(native.nanoseconds())) },
-    ),
+    execPath: native.process.execPath,
+    umask: native.process.umask,
+    hrtime: Object.assign(native.process.hrtime, { bigint: native.process.hrtimeBigint }),
+    memoryUsage: Object.assign(native.process.memoryUsage, { rss: native.process.memoryUsageRss }),
+    cpuUsage: native.process.cpuUsage,
+    resourceUsage: native.process.resourceUsage,
+    // BunProcess.cpp's `constructProcessReportObject`.
+    report: {
+      compact: false,
+      directory: "",
+      filename: "",
+      getReport: native.process.getReport,
+      reportOnFatalError: false,
+      reportOnSignal: false,
+      reportOnUncaughtException: false,
+      // C++ puts `excludeEnv` twice: the second, the signal's name, is what it ends up with.
+      excludeEnv: "SIGUSR2",
+      // As C++'s `Process_functionWriteReport`, which writes nothing yet.
+      writeReport: (fileName?: unknown) => fileName,
+    },
     stdout: { write: (s: unknown) => (native.printStdout(String(s)), true) },
     stderr: { write: (s: unknown) => (native.printStderr(String(s)), true) },
   };
