@@ -1363,6 +1363,10 @@ export class BytesType extends Type {
     assert(shared === "borrowed" || held !== "pinned", 'held: "pinned" pins a shared buffer; it does not copy one');
     assert(held !== "pinned" || !from.includes("blob"), 'held: "pinned" does not take a Blob');
   }
+  /** The options, with their defaults filled in. */
+  get options(): Readonly<Required<BytesOptions>> {
+    return this.#options;
+  }
   /** C++ converts a string to UTF-8 in the frame. Otherwise Rust gets the string. */
   get #isView(): boolean {
     const { held, string } = this.#options;

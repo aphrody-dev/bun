@@ -30,6 +30,8 @@ pub(crate) struct State {
     pub(crate) modules: NativeModules,
     /// What [`JSGlobalObject::cached`] made, by the type that names it.
     cached: HashMap<TypeId, JsValue>,
+    /// What reads a `Blob`'s bytes for `b.bytes({ from: ["blob"] })`.
+    pub(crate) blob_reader: Option<crate::bindgen::BlobReader>,
 }
 
 /// What an uncatchable error is seen as from Rust: Boa has unwound every frame of JavaScript, as JavaScriptCore does
