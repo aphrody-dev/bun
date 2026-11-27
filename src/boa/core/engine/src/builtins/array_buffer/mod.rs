@@ -197,12 +197,110 @@ impl BufferObject {
     }
 }
 
+/// Memory outside of the engine that a host lends an `ArrayBuffer`, as JavaScriptCore's
+/// `ArrayBuffer::createFromBytes`: it is not copied, the buffer is fixed-length, and `finalize` runs when the buffer
+/// lets it go (collected, detached or transferred).
+pub struct ExternalBytes {
+    ptr: *mut u8,
+    len: usize,
+    finalize: Option<Box<dyn FnOnce()>>,
+}
+
+impl ExternalBytes {
+    /// # Safety
+    ///
+    /// `ptr` is valid for reads and writes of `len` bytes until `finalize` runs, and nothing else writes them while
+    /// the engine reads them.
+    pub unsafe fn new(ptr: *mut u8, len: usize, finalize: Option<Box<dyn FnOnce()>>) -> Self {
+        Self { ptr, len, finalize }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: the contract of `new`.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        // SAFETY: the contract of `new`.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl Drop for ExternalBytes {
+    fn drop(&mut self) {
+        if let Some(finalize) = self.finalize.take() {
+            finalize();
+        }
+    }
+}
+
+impl std::fmt::Debug for ExternalBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalBytes")
+            .field("ptr", &self.ptr)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The `[[ArrayBufferData]]` of an `ArrayBuffer`: its own bytes, or a host's.
+#[derive(Debug)]
+pub(crate) enum DataBlock {
+    Owned(AlignedVec<u8>),
+    External(ExternalBytes),
+}
+
+impl DataBlock {
+    /// The bytes as a block of the engine's own: an external block is copied, and let go.
+    fn into_owned(self) -> AlignedVec<u8> {
+        match self {
+            Self::Owned(vec) => vec,
+            Self::External(external) => AlignedVec::from_slice(64, external.as_slice()),
+        }
+    }
+}
+
+impl Clone for DataBlock {
+    fn clone(&self) -> Self {
+        Self::Owned(match self {
+            Self::Owned(vec) => vec.clone(),
+            Self::External(external) => AlignedVec::from_slice(64, external.as_slice()),
+        })
+    }
+}
+
+impl Deref for DataBlock {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(vec) => vec,
+            Self::External(external) => external.as_slice(),
+        }
+    }
+}
+
+impl DerefMut for DataBlock {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        match self {
+            Self::Owned(vec) => vec,
+            Self::External(external) => external.as_mut_slice(),
+        }
+    }
+}
+
 /// The internal representation of an `ArrayBuffer` object.
 #[derive(Debug, Clone, Trace, Finalize, JsData)]
 pub struct ArrayBuffer {
     /// The `[[ArrayBufferData]]` internal slot.
     #[unsafe_ignore_trace]
-    data: Option<AlignedVec<u8>>,
+    data: Option<DataBlock>,
 
     /// The `[[ArrayBufferMaxByteLength]]` internal slot.
     max_byte_len: Option<u64>,
@@ -214,14 +312,22 @@ pub struct ArrayBuffer {
 impl ArrayBuffer {
     pub(crate) fn from_data(data: AlignedVec<u8>, detach_key: JsValue) -> Self {
         Self {
-            data: Some(data),
+            data: Some(DataBlock::Owned(data)),
             max_byte_len: None,
             detach_key,
         }
     }
 
+    pub(crate) fn from_external(bytes: ExternalBytes) -> Self {
+        Self {
+            data: Some(DataBlock::External(bytes)),
+            max_byte_len: None,
+            detach_key: JsValue::undefined(),
+        }
+    }
+
     pub(crate) fn len(&self) -> usize {
-        self.data.as_ref().map_or(0, AlignedVec::len)
+        self.data.as_ref().map_or(0, |data| data.len())
     }
 
     pub(crate) fn bytes(&self) -> Option<&[u8]> {
@@ -232,8 +338,12 @@ impl ArrayBuffer {
         self.data.as_deref_mut()
     }
 
+    /// The engine's own block; `None` where the buffer is detached or its bytes are a host's.
     pub(crate) fn vec_mut(&mut self) -> Option<&mut AlignedVec<u8>> {
-        self.data.as_mut()
+        match self.data.as_mut()? {
+            DataBlock::Owned(vec) => Some(vec),
+            DataBlock::External(_) => None,
+        }
     }
 
     /// Sets the maximum byte length of the buffer, returning the previous value if present.
@@ -306,7 +416,7 @@ impl ArrayBuffer {
                 .into());
         }
 
-        Ok(self.data.take())
+        Ok(self.data.take().map(DataBlock::into_owned))
     }
 
     /// `IsDetachedBuffer ( arrayBuffer )`
@@ -788,7 +898,7 @@ impl ArrayBuffer {
         };
 
         // 5. If IsDetachedBuffer(arrayBuffer) is true, throw a TypeError exception.
-        let Some(mut bytes) = buf.borrow_mut().data_mut().data.take() else {
+        let Some(block) = buf.borrow_mut().data_mut().data.take() else {
             return Err(JsNativeError::typ()
                 .with_message("cannot transfer a detached buffer")
                 .into());
@@ -807,11 +917,20 @@ impl ArrayBuffer {
 
         // 8. If arrayBuffer.[[ArrayBufferDetachKey]] is not undefined, throw a TypeError exception.
         if !buf.borrow().data().detach_key.is_undefined() {
-            buf.borrow_mut().data_mut().data = Some(bytes);
+            buf.borrow_mut().data_mut().data = Some(block);
             return Err(JsNativeError::typ()
                 .with_message("cannot transfer a buffer with a detach key")
                 .into());
         }
+        if let Some(new_max_len) = new_max_len
+            && new_len > new_max_len
+        {
+            buf.borrow_mut().data_mut().data = Some(block);
+            return Err(JsNativeError::range()
+                .with_message("`length` cannot be bigger than `maxByteLength`")
+                .into());
+        }
+        let mut bytes = block.into_owned();
 
         // Effectively, the next steps only create a new object for the same vec, so we can skip all
         // those steps and just make a single check + trigger the realloc.
@@ -825,13 +944,7 @@ impl ArrayBuffer {
         //     observable. Implementations may implement this method as a zero-copy move or a realloc.
         // 15. Perform ! DetachArrayBuffer(arrayBuffer).
         // 16. Return newBuffer.
-        if let Some(new_max_len) = new_max_len {
-            if new_len > new_max_len {
-                buf.borrow_mut().data_mut().data = Some(bytes);
-                return Err(JsNativeError::range()
-                    .with_message("`length` cannot be bigger than `maxByteLength`")
-                    .into());
-            }
+        if new_max_len.is_some() {
             // Should only truncate without reallocating.
             bytes.resize(new_len as usize, 0);
         } else {
@@ -851,7 +964,7 @@ impl ArrayBuffer {
             context.root_shape(),
             prototype,
             ArrayBuffer {
-                data: Some(bytes),
+                data: Some(DataBlock::Owned(bytes)),
                 max_byte_len: new_max_len,
                 detach_key: JsValue::undefined(),
             },
@@ -904,7 +1017,7 @@ impl ArrayBuffer {
             Self {
                 // 6. Set obj.[[ArrayBufferData]] to block.
                 // 7. Set obj.[[ArrayBufferByteLength]] to byteLength.
-                data: Some(block),
+                data: Some(DataBlock::Owned(block)),
                 // 8. If allocatingResizableBuffer is true, then
                 //    c. Set obj.[[ArrayBufferMaxByteLength]] to maxByteLength.
                 max_byte_len,
