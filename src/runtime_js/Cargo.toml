@@ -29,6 +29,7 @@ bun_core = { path = "../bun_core" }
 bun_glob = { path = "../glob" }
 bun_http_rs = { path = "../http_rs" }
 bun_http_types = { path = "../http_types" }
+bun_io = { path = "../io" }
 bun_js = { path = "../bun_js" }
 bun_node_path = { path = "../node_path" }
 bun_paths = { path = "../paths" }

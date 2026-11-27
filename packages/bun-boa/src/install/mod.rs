@@ -42,6 +42,7 @@ pub fn main(subcommand: Subcommand) -> ! {
     // As `Cli::start`: the package manager wakes the main thread's loop, which it finds by this.
     bun_crash_handler::cli_state::set_main_thread_id(bun_threading::current_thread_id());
     uws_dispatch::register();
+    bun_runtime_js::dispatch::register_run_io(hooks::run_io);
     bun_core::set_start_time(bun_core::time::nano_timestamp());
     bun_core::output::stdio::init();
     let _flush = bun_core::output::flush_guard();

@@ -95,12 +95,12 @@ mod runtime_processes {
     runtime_process_exit!(Subprocess Shell FilterRunHandle MultiRunHandle TestParallelWorker Cron ChromeProcess HostProcess);
 }
 
-/// `bun_runtime::dispatch::__bun_run_io`, with the arms of the owners that the package manager makes.
+/// `bun_runtime::dispatch::__bun_run_io`, with the arms of the owners that the package manager makes; registered
+/// with `bun_runtime_js::dispatch`.
 ///
 /// # Safety
 /// `owner.ptr()` is the live value that the arm of `owner.tag()` casts it to.
-#[unsafe(no_mangle)]
-unsafe fn __bun_run_io(owner: Owner, event: IoEvent) {
+pub(crate) unsafe fn run_io(owner: Owner, event: IoEvent) {
     match owner.tag() {
         PollTag::Process => {
             let process = owner.ptr().cast::<bun_spawn::process::Process>();
