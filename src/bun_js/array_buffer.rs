@@ -1,9 +1,9 @@
 //! The bytes of typed arrays, `DataView`s and their buffers, and the `Buffer`s Rust makes.
 
 use boa_engine::object::builtins::{
-    JsArrayBuffer, JsDataView, JsSharedArrayBuffer, JsTypedArray, JsUint8Array,
+    ExternalBytes, JsArrayBuffer, JsDataView, JsSharedArrayBuffer, JsTypedArray, JsUint8Array,
 };
-use boa_engine::JsObject;
+use boa_engine::{JsObject, JsValue};
 
 use crate::{JSGlobalObject, JSValue, JsResult};
 
@@ -126,14 +126,93 @@ impl JSValue {
     pub fn create_buffer(global: &JSGlobalObject, bytes: &[u8]) -> JsResult<JSValue> {
         let array = JsUint8Array::from_iter(bytes.iter().copied(), global.cx());
         let array: JsObject = global.lift(array)?.into();
-        let buffer = global.to_js_value().get(global, "Buffer")?;
-        if let Some(prototype) = buffer.map(|buffer| buffer.get(global, "prototype")).transpose()? {
-            if let Some(prototype) = prototype.and_then(|prototype| prototype.0.as_object()) {
-                array.set_prototype(Some(prototype));
-            }
-        }
+        as_buffer(global, &array)?;
         Ok(JSValue(array.into()))
     }
+
+    /// Where the bytes of a typed array, a `DataView` or an `ArrayBuffer` are, and how many: what `bun:ffi` hands
+    /// native code, which writes what JavaScript reads. `None` for anything else, for a detached buffer, and for a
+    /// `SharedArrayBuffer` (Boa does not say where its bytes are).
+    pub fn array_buffer_or_view_ptr(&self, global: &JSGlobalObject) -> JsResult<Option<(*mut u8, usize)>> {
+        let Some(object) = self.0.as_object() else {
+            return Ok(None);
+        };
+        let (buffer, offset, length) = if let Ok(array) = JsTypedArray::from_object(object.clone()) {
+            let buffer = array.buffer(global.cx());
+            let buffer = global.lift(buffer)?;
+            let offset = array.byte_offset(global.cx());
+            let offset = global.lift(offset)?;
+            let length = array.byte_length(global.cx());
+            (buffer, offset, Some(global.lift(length)?))
+        } else if let Ok(view) = JsDataView::from_object(object.clone()) {
+            let buffer = view.buffer(global.cx());
+            let buffer = global.lift(buffer)?;
+            let offset = view.byte_offset(global.cx());
+            let offset = global.lift(offset)? as usize;
+            let length = view.byte_length(global.cx());
+            (buffer, offset, Some(global.lift(length)? as usize))
+        } else {
+            (JsValue::from(object), 0, None)
+        };
+        let Some(buffer) = buffer.as_object().and_then(|b| JsArrayBuffer::from_object(b).ok()) else {
+            return Ok(None);
+        };
+        let Some(mut data) = buffer.data_mut() else {
+            return Ok(None);
+        };
+        let length = length.unwrap_or(data.len());
+        if offset + length > data.len() {
+            return Ok(None);
+        }
+        Ok(Some((data[offset..].as_mut_ptr(), length)))
+    }
+
+    /// An `ArrayBuffer` over `len` bytes at `ptr`, which are not copied: `finalize` runs when it lets them go.
+    ///
+    /// # Safety
+    /// The bytes are valid for reads and writes until `finalize` runs.
+    pub unsafe fn create_external_array_buffer(
+        global: &JSGlobalObject,
+        ptr: *mut u8,
+        len: usize,
+        finalize: Option<Box<dyn FnOnce()>>,
+    ) -> JsResult<JSValue> {
+        // SAFETY: the contract of this function.
+        let bytes = unsafe { ExternalBytes::new(ptr, len, finalize) };
+        let buffer = JsArrayBuffer::from_external(bytes, global.cx());
+        Ok(JSValue(global.lift(buffer)?.into()))
+    }
+
+    /// A `Buffer` over `len` bytes at `ptr`, as [`create_external_array_buffer`](Self::create_external_array_buffer).
+    ///
+    /// # Safety
+    /// As `create_external_array_buffer`.
+    pub unsafe fn create_external_buffer(
+        global: &JSGlobalObject,
+        ptr: *mut u8,
+        len: usize,
+        finalize: Option<Box<dyn FnOnce()>>,
+    ) -> JsResult<JSValue> {
+        // SAFETY: the contract of this function.
+        let bytes = unsafe { ExternalBytes::new(ptr, len, finalize) };
+        let buffer = JsArrayBuffer::from_external(bytes, global.cx());
+        let buffer = global.lift(buffer)?;
+        let array = JsUint8Array::from_array_buffer(buffer, global.cx());
+        let array: JsObject = global.lift(array)?.into();
+        as_buffer(global, &array)?;
+        Ok(JSValue(array.into()))
+    }
+}
+
+/// Gives `array` the prototype of the realm's `Buffer`, where it has one.
+fn as_buffer(global: &JSGlobalObject, array: &JsObject) -> JsResult<()> {
+    let buffer = global.to_js_value().get(global, "Buffer")?;
+    if let Some(prototype) = buffer.map(|buffer| buffer.get(global, "prototype")).transpose()? {
+        if let Some(prototype) = prototype.and_then(|prototype| prototype.0.as_object()) {
+            array.set_prototype(Some(prototype));
+        }
+    }
+    Ok(())
 }
 
 /// The bytes of an `ArrayBuffer` or a `SharedArrayBuffer`, `None` where it is detached.

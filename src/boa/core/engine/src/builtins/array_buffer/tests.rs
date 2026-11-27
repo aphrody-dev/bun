@@ -309,3 +309,43 @@ fn shared_array_buffer_slice_empty() {
         TestAction::assert("result.length === 0"),
     ]);
 }
+
+#[test]
+fn external_bytes_are_not_copied() {
+    use crate::{Source, js_string, object::builtins::ExternalBytes};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    run_test_actions([TestAction::inspect_context(|context| {
+        let mut memory = Box::new([1u8, 2, 3, 4]);
+        let finalized = Rc::new(Cell::new(false));
+        let flag = finalized.clone();
+        // SAFETY: `memory` outlives the buffer, which is detached below.
+        let bytes = unsafe {
+            ExternalBytes::new(memory.as_mut_ptr(), memory.len(), Some(Box::new(move || flag.set(true))))
+        };
+        let buffer = JsArrayBuffer::from_external(bytes, context).unwrap();
+        context
+            .register_global_property(js_string!("ext"), buffer.clone(), crate::property::Attribute::all())
+            .unwrap();
+
+        let read = context
+            .eval(Source::from_bytes(
+                "const v = new Uint8Array(ext); v[0] = 9; [ext.byteLength, ext.resizable, v[3], ext.slice(1, 3).byteLength].join()",
+            ))
+            .unwrap();
+        assert_eq!(read.to_string(context).unwrap().to_std_string_escaped(), "4,false,4,2");
+        // A write from JavaScript is in the host's memory, and the host's writes are what JavaScript reads.
+        assert_eq!(memory[0], 9);
+        memory[1] = 7;
+        let read = context.eval(Source::from_bytes("new Uint8Array(ext)[1]")).unwrap();
+        assert_eq!(read.to_i32(context).unwrap(), 7);
+
+        // A transfer copies the bytes into the engine and lets the host's go.
+        let moved = context
+            .eval(Source::from_bytes("const t = ext.transfer(); [ext.detached, new Uint8Array(t).join()].join()"))
+            .unwrap();
+        assert_eq!(moved.to_string(context).unwrap().to_std_string_escaped(), "true,9,7,3,4");
+        assert!(finalized.get());
+    })]);
+}

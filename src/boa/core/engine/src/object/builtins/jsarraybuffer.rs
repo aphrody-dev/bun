@@ -11,7 +11,7 @@ use boa_gc::{Finalize, GcRef, GcRefMut, Trace};
 use std::ops::Deref;
 
 #[doc(inline)]
-pub use crate::builtins::array_buffer::AlignedVec;
+pub use crate::builtins::array_buffer::{AlignedVec, ExternalBytes};
 
 /// `JsArrayBuffer` provides a wrapper for Boa's implementation of the ECMAScript `ArrayBuffer` object
 #[derive(Debug, Clone, Trace, Finalize)]
@@ -129,6 +129,17 @@ impl JsArrayBuffer {
             ArrayBuffer::from_data(block, JsValue::undefined()),
         );
 
+        Ok(Self { inner: obj })
+    }
+
+    /// An `ArrayBuffer` over memory outside of the engine, which is not copied: see [`ExternalBytes`].
+    pub fn from_external(bytes: ExternalBytes, context: &mut Context) -> JsResult<Self> {
+        let prototype = context
+            .intrinsics()
+            .constructors()
+            .array_buffer()
+            .prototype();
+        let obj = JsObject::new(context.root_shape(), prototype, ArrayBuffer::from_external(bytes));
         Ok(Self { inner: obj })
     }
 
