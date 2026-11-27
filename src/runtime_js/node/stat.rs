@@ -1,8 +1,11 @@
 //! `fs.Stats`, `fs.BigIntStats` and `fs.Dirent` (src/runtime/node/Stat.rs and the `Dirent` of types.rs): the
 //! classes are stats.js, made once per realm, and Rust makes their instances with what a stat call returns.
 
+use bun_js::bindgen::JsScope;
 use bun_js::{JSGlobalObject, JSValue, JsResult};
 use bun_sys::PosixStat;
+
+use crate::generated_bindgen::stat::Ino;
 
 struct Classes;
 
@@ -52,6 +55,25 @@ pub(crate) fn to_js(global: &JSGlobalObject, stat: &PosixStat, big_int: bool) ->
     args.extend(integers.iter().map(|&n| JSValue::js_number(n as f64)));
     args.extend(times.iter().map(|&t| JSValue::js_number(ms(t))));
     member(global, "stats")?.call(global, JSValue::UNDEFINED, &args)
+}
+
+/// `createStatsForIno` of bun:internal-for-testing: the stats of a zeroed stat but for `ino`.
+pub(crate) fn create_stats_for_ino(cx: &mut JsScope<'_>, ino: Ino, big: bool) -> JsResult<JSValue> {
+    let mut stat: PosixStat = bun_core::ffi::zeroed();
+    stat.ino = match ino {
+        Ino::Number(number) => to_uint64_no_truncate(number),
+        Ino::Bigint(ino) => ino,
+    };
+    to_js(cx.global(), &stat, big)
+}
+
+/// `JSValue::to_uint64_no_truncate` of a number: 2^64 and more saturate, the rest is `JSC::toUInt64`, modulo 2^64.
+fn to_uint64_no_truncate(number: f64) -> u64 {
+    const TWO_TO_64: f64 = 18446744073709551616.0;
+    if number >= TWO_TO_64 {
+        return u64::MAX;
+    }
+    number.trunc().rem_euclid(TWO_TO_64) as u64
 }
 
 /// What `Dirent` says of an entry's kind, uv's `uv_dirent_type_t`.

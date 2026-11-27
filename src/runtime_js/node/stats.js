@@ -1,5 +1,5 @@
 // fs.Stats, fs.BigIntStats and fs.Dirent: src/jsc/bindings/NodeFSStatBinding.cpp and NodeDirent.cpp, in JavaScript.
-// Evaluated once per realm by stats.rs; the result is `{ Stats, BigIntStats, Dirent, stats, bigIntStats, dirent }`,
+// Evaluated once per realm by stat.rs; the result is `{ Stats, BigIntStats, Dirent, stats, bigIntStats, dirent }`,
 // the constructors and what Rust makes an instance with.
 (function () {
   "use strict";

@@ -9,7 +9,7 @@ use bun_js::{JSGlobalObject, JSPromise, JSValue, JsResult};
 use crate::EventLoop;
 use crate::generated_bindgen::node_fs_binding::RmOptions;
 use crate::node::node_fs::{self as fs, Operation};
-use crate::node::stats;
+use crate::node::stat;
 use crate::node::types::{ArgumentsSlice, invalid_arguments, sys_error_to_js};
 
 /// The default export of src/js/internal/fs/binding.ts. It holds nothing: every call parses its own arguments.
@@ -174,11 +174,11 @@ node_fs_bindings! {
 
 impl Binding {
     pub(crate) fn get_dirent(&self, cx: &mut JsScope<'_>) -> JSValue {
-        stats::constructor(cx.global(), "Dirent")
+        stat::constructor(cx.global(), "Dirent")
     }
 
     pub(crate) fn get_stats(&self, cx: &mut JsScope<'_>) -> JSValue {
-        stats::constructor(cx.global(), "Stats")
+        stat::constructor(cx.global(), "Stats")
     }
 
     pub(crate) fn cp(&self, cx: &mut JsScope<'_>, args: &[JSValue]) -> JsResult<JSValue> {
@@ -189,12 +189,12 @@ impl Binding {
         run_sync::<fs::Cp>(cx.global(), args)
     }
 
-    pub(crate) fn watch(&self, cx: &mut JsScope<'_>, _: &[JSValue]) -> JsResult<JSValue> {
-        Err(cx.global().throw(format_args!("fs.watch is not implemented on Boa yet")))
+    pub(crate) fn watch(&self, cx: &mut JsScope<'_>, args: &[JSValue]) -> JsResult<JSValue> {
+        crate::node::node_fs_watcher::watch(cx.global(), args)
     }
 
-    pub(crate) fn watch_file(&self, cx: &mut JsScope<'_>, _: &[JSValue]) -> JsResult<JSValue> {
-        Err(cx.global().throw(format_args!("fs.watchFile is not implemented on Boa yet")))
+    pub(crate) fn watch_file(&self, cx: &mut JsScope<'_>, args: &[JSValue]) -> JsResult<JSValue> {
+        crate::node::node_fs_stat_watcher::watch_file(cx.global(), args)
     }
 }
 

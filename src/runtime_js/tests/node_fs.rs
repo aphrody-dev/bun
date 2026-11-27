@@ -13,6 +13,8 @@ fn on_event_loop<R>(f: impl FnOnce(&JSGlobalObject) -> R) -> R {
         .job_executor(EventLoop::new().expect("an event loop"))
         .build()
         .expect("a realm");
+    boa_runtime::abort::register(None, &mut context).expect("AbortController");
+    bun_runtime_js::install(&mut context).expect("install");
     f(JSGlobalObject::from_context(&mut context))
 }
 
@@ -222,4 +224,106 @@ fn rm_options_and_flags_for_testing() {
         );
         assert_eq!(out.to_utf8(global).unwrap(), expected);
     });
+}
+
+/// test/js/node/fs/fs-stats-truncate.test.ts: an ino above `i64::MAX` is a number as `u64 as f64` is, and a BigInt
+/// as `u64 as i64` is.
+#[test]
+fn create_stats_for_ino() {
+    JSGlobalObject::with_new(|global| {
+        let create = bun_runtime_js::generated_bindgen::native(global, "Stat.bind.ts", "createStatsForIno")
+            .unwrap()
+            .unwrap();
+        global.to_js_value().put(global, "createStatsForIno", create);
+        let out = global
+            .evaluate_script(
+                r#"const cases = [0n, 1n, (1n << 53n) - 1n, (1n << 63n) - 1n, 1n << 63n, 9225185599684229422n, (1n << 64n) - 1n];
+                JSON.stringify([
+                  cases.every(ino => createStatsForIno(ino, false).ino === Number(ino)),
+                  cases.every(ino => createStatsForIno(ino, true).ino === BigInt.asIntN(64, ino)),
+                  createStatsForIno(2 ** 64, false).ino === 2 ** 64,
+                  createStatsForIno(-1, true).ino === -1n,
+                  createStatsForIno(7, false).size,
+                  (() => { try { createStatsForIno("1", false) } catch (e) { return e.code } })(),
+                ])"#,
+            )
+            .unwrap();
+        assert_eq!(out.to_utf8(global).unwrap(), r#"[true,true,true,true,0,"ERR_INVALID_ARG_TYPE"]"#);
+    });
+}
+
+/// `fs.watch` on inotify: the first event, then `close`, after which nothing is delivered.
+#[test]
+fn watch_reports_a_change_then_closes() {
+    assert_eq!(
+        run(r#"const f = dir + "/w.txt"; fs.writeFileSync(f, "a"); out = [];
+        const w = fs.watch(dir, {}, (type, name) => { out.push(type === "close" ? type : type + ":" + name); if (out.length === 1) w.close(); });
+        fs.writeFileSync(f, "b");"#),
+        r#"["change:w.txt","close"]"#
+    );
+}
+
+#[test]
+fn watch_reports_a_new_file_as_rename_and_a_buffer_name() {
+    assert_eq!(
+        run(r#"out = [];
+        const w = fs.watch(dir, { encoding: "buffer" }, (type, name) => { if (type === "close") return; out.push(type, name instanceof Uint8Array, String.fromCharCode(...name)); w.close(); });
+        fs.writeFileSync(dir + "/new.txt", "x");"#),
+        r#"["rename",true,"new.txt"]"#
+    );
+}
+
+#[test]
+fn watch_recursive_sees_a_subdirectory() {
+    assert_eq!(
+        run(r#"fs.mkdirSync(dir + "/sub"); out = [];
+        const w = fs.watch(dir, { recursive: true }, (type, name) => { if (type === "close") return; out.push(type + ":" + name); w.close(); });
+        fs.writeFileSync(dir + "/sub/x", "x");"#),
+        r#"["rename:sub/x"]"#
+    );
+}
+
+#[test]
+fn watch_errors_and_options() {
+    assert_eq!(
+        run(r#"out = [];
+        try { fs.watch(dir + "/missing", {}, () => {}) } catch (e) { out.push(e.code, e.syscall, e.message === "ENOENT: no such file or directory, watch '" + dir + "/missing'") }
+        try { fs.watch(dir, { persistent: 1 }, () => {}) } catch (e) { out.push(e.message) }
+        try { fs.watch(dir, {}) } catch (e) { out.push(e.message) }
+        // An unref'd watcher does not keep the loop alive.
+        fs.watch(dir, { persistent: false }, () => { out.push("event") });
+        const w = fs.watch(dir, {}, () => {}); w.unref();"#),
+        r#"["ENOENT","watch",true,"persistent must be a boolean","Expected \"listener\" callback"]"#
+    );
+}
+
+#[test]
+fn watch_closes_on_abort() {
+    assert_eq!(
+        run(r#"out = []; const c = new AbortController();
+        fs.watch(dir, { signal: c.signal }, (type, error, fromAbort) => { out.push(type === "error" ? [type, error.name, fromAbort].join() : type) });
+        c.abort();
+        fs.watch(dir, { signal: AbortSignal.abort() }, (type, error, fromAbort) => { out.push(type === "error" ? "aborted before:" + fromAbort : type) });"#),
+        r#"["error,AbortError,true","close","aborted before:true","close"]"#
+    );
+}
+
+/// `fs.watchFile`: a stat on the timer, the listener with the stats after and before.
+#[test]
+fn watch_file_calls_the_listener_with_both_stats() {
+    assert_eq!(
+        run(r#"const f = dir + "/s.txt"; fs.writeFileSync(f, "a");
+        const w = fs.watchFile(f, { interval: 10 }, (current, previous) => { out = [current.size, previous.size, current instanceof fs.Stats]; w.close(); });
+        fs.writeFileSync(f, "longer");"#),
+        r#"[6,1,true]"#
+    );
+    assert_eq!(
+        run(r#"const w = fs.watchFile(dir + "/none", { interval: 10, bigint: true }, (current, previous) => { out = [current.size === 0n, current === previous]; w.close(); });"#),
+        r#"[true,true]"#
+    );
+    assert_eq!(
+        run(r#"try { fs.watchFile(dir, { persistent: 1 }, () => {}) } catch (e) { out = [e.code, e.message] }
+        fs.watchFile(dir, { persistent: false, interval: 10 }, () => {}); const w = fs.watchFile(dir, {}, () => {}); w.unref();"#),
+        r#"["ERR_INVALID_ARG_TYPE","The \"persistent\" property must be of type boolean, got number"]"#
+    );
 }
