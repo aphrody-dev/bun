@@ -11,6 +11,11 @@ pub(crate) struct IncrementLoopIteration;
 impl IncrementLoopIteration {
     #[inline(always)]
     pub(crate) fn operation((): (), context: &mut Context) -> JsResult<()> {
+        if let Some(interrupt) = &context.vm.interrupt
+            && interrupt.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(RuntimeLimitError::Terminated.into());
+        }
         let max = context.vm.runtime_limits.loop_iteration_limit();
         let frame = context.vm.frame_mut();
         let previous_iteration_count = frame.loop_iteration_count;

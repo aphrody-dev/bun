@@ -9,6 +9,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -18,6 +20,82 @@ use bun_http_rs::Reactor;
 
 /// A callback for the next turn: what I/O completes with.
 pub type Task = Box<dyn FnOnce(&mut Context) -> JsResult<()>>;
+
+/// A task that another thread posts to this loop: it carries only `Send` data, and runs on the loop's thread.
+pub type RemoteTask = Box<dyn FnOnce(&mut Context) -> JsResult<()> + Send>;
+
+struct RemoteQueue {
+    tasks: Mutex<Vec<RemoteTask>>,
+    pending: AtomicBool,
+    /// The loop stopped: what is posted from now on is dropped, and nothing wakes it.
+    closed: AtomicBool,
+    /// The thread's uSockets loop, which the event loop waits in: `us_wakeup_loop` makes its tick return.
+    us_loop: usize,
+}
+
+/// The loop as other threads reach it (`ScriptExecutionContext::postTaskTo` and the loop's wakeup): what they post
+/// runs in its next tick, and posting wakes it from its wait.
+#[derive(Clone)]
+pub struct Remote(Arc<RemoteQueue>);
+
+impl Remote {
+    /// Queues `task` and wakes the loop; `false` (and the task is dropped) once the loop has stopped.
+    pub fn post(&self, task: RemoteTask) -> bool {
+        let mut tasks = self.0.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        if self.0.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        tasks.push(task);
+        self.0.pending.store(true, Ordering::Release);
+        self.wake_locked();
+        true
+    }
+
+    /// Wakes the loop from its wait, so that it looks again at what stops it.
+    pub fn wake(&self) {
+        let _tasks = self.0.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.0.closed.load(Ordering::Acquire) {
+            self.wake_locked();
+        }
+    }
+
+    /// Under the lock, with the loop not closed: its thread has not left it.
+    fn wake_locked(&self) {
+        // SAFETY: the thread's loop, alive until the event loop closes its remote, which takes the same lock.
+        unsafe { bun_uws_sys::loop_::us_wakeup_loop(self.0.us_loop as *const bun_uws_sys::Loop) };
+    }
+
+    /// Whether `other` posts to the same loop.
+    pub fn same_loop(&self, other: &Remote) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    fn take(&self) -> Vec<RemoteTask> {
+        if !self.0.pending.swap(false, Ordering::AcqRel) {
+            return Vec::new();
+        }
+        std::mem::take(&mut *self.0.tasks.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn close(&self) -> Vec<RemoteTask> {
+        let mut tasks = self.0.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        self.0.closed.store(true, Ordering::Release);
+        self.0.pending.store(false, Ordering::Release);
+        std::mem::take(&mut *tasks)
+    }
+}
+
+/// What a terminated loop's run returns: script did not throw it, and nothing catches it.
+pub fn is_termination(error: &JsError) -> bool {
+    matches!(
+        error.as_engine(),
+        Some(boa_engine::error::EngineError::RuntimeLimit(boa_engine::error::RuntimeLimitError::Terminated))
+    )
+}
+
+fn terminated() -> JsError {
+    boa_engine::error::RuntimeLimitError::Terminated.into()
+}
 
 enum Queued {
     Generic(GenericJob),
@@ -117,14 +195,26 @@ pub struct EventLoop {
     /// The error a callback threw that nothing caught.
     uncaught: RefCell<Option<JsError>>,
     work: crate::work_pool::WorkQueue,
+    remote: Remote,
+    /// Set from any thread (`worker.terminate()`): the loop stops at its next step, as does the script it runs.
+    terminating: Arc<AtomicBool>,
 }
 
 impl EventLoop {
     pub fn new() -> std::io::Result<Rc<EventLoop>> {
         let reactor = Reactor::new()?;
+        let wait = Wait::new(&reactor)?;
+        let remote = Remote(Arc::new(RemoteQueue {
+            tasks: Mutex::default(),
+            pending: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            us_loop: std::ptr::from_ref::<bun_uws_sys::Loop>(wait.loop_) as usize,
+        }));
         Ok(Rc::new(EventLoop {
-            wait: Wait::new(&reactor)?,
+            wait,
             reactor,
+            remote,
+            terminating: Arc::new(AtomicBool::new(false)),
             microtasks: RefCell::default(),
             async_jobs: RefCell::default(),
             tasks: RefCell::default(),
@@ -150,6 +240,40 @@ impl EventLoop {
         &self.reactor
     }
 
+    /// What other threads post to this loop with.
+    pub fn remote(&self) -> Remote {
+        self.remote.clone()
+    }
+
+    /// The flag that terminates this loop and its script (see [`Context::set_interrupt`]).
+    pub fn terminating(&self) -> Arc<AtomicBool> {
+        self.terminating.clone()
+    }
+
+    pub fn is_terminating(&self) -> bool {
+        self.terminating.load(Ordering::Relaxed)
+    }
+
+    fn check_terminating(&self) -> JsResult<()> {
+        if self.is_terminating() { Err(terminated()) } else { Ok(()) }
+    }
+
+    /// The loop is done: other threads can post no more, and what they posted is dropped (here, on this thread).
+    pub fn close_remote(&self) {
+        drop(self.remote.close());
+    }
+
+    fn take_remote(&self) {
+        let remote = self.remote.take();
+        if remote.is_empty() {
+            return;
+        }
+        let mut tasks = self.tasks.borrow_mut();
+        for task in remote {
+            tasks.push_back(Queued::Native(task));
+        }
+    }
+
     /// Queues `task` for the next tick, as a task posted to Bun's loop.
     pub fn enqueue(&self, task: impl FnOnce(&mut Context) -> JsResult<()> + 'static) {
         self.tasks.borrow_mut().push_back(Queued::Native(Box::new(task)));
@@ -159,6 +283,7 @@ impl EventLoop {
         !self.microtasks.borrow().is_empty()
             || !self.async_jobs.borrow().is_empty()
             || !self.tasks.borrow().is_empty()
+            || self.remote.0.pending.load(Ordering::Acquire)
     }
 
     /// Whether anything could still run JavaScript: queued work, a ref'd timer or immediate, a ref'd I/O handle.
@@ -172,6 +297,10 @@ impl EventLoop {
     }
 
     fn report(&self, error: JsError) {
+        if is_termination(&error) {
+            self.terminating.store(true, Ordering::Relaxed);
+            return;
+        }
         let mut uncaught = self.uncaught.borrow_mut();
         if uncaught.is_none() {
             *uncaught = Some(error);
@@ -188,6 +317,7 @@ impl EventLoop {
     /// Runs the microtasks (promise reactions, then module loading) until none are queued.
     pub fn drain_microtasks(&self, context: &mut Context) -> JsResult<()> {
         loop {
+            self.check_terminating()?;
             let job = self.microtasks.borrow_mut().pop_front();
             if let Some(job) = job {
                 if let Err(error) = job.call(context) {
@@ -208,13 +338,15 @@ impl EventLoop {
             }
         }
         context.clear_kept_objects();
+        self.check_terminating()?;
         self.take_uncaught()
     }
 
-    /// Bun's `tick`: the queued tasks, each followed by the microtasks.
+    /// Bun's `tick`: the queued tasks (with what other threads posted), each followed by the microtasks.
     pub fn tick(&self, context: &mut Context) -> JsResult<()> {
         self.drain_microtasks(context)?;
         loop {
+            self.take_remote();
             let task = self.tasks.borrow_mut().pop_front();
             let Some(task) = task else { break };
             let result = match task {
@@ -259,6 +391,7 @@ impl EventLoop {
     /// Runs the loop until `done` or until nothing is left that could run JavaScript.
     pub fn run_until(&self, context: &mut Context, mut done: impl FnMut() -> bool) -> JsResult<()> {
         loop {
+            self.check_terminating()?;
             self.tick(context)?;
             if done() || !self.is_alive() {
                 return Ok(());

@@ -92,6 +92,12 @@ fn transpile_printing<const SOURCE_MAP: bool>(path: &[u8], contents: &[u8]) -> R
     let options = bun_js_printer::Options {
         require_ref: Some(ast.require_ref),
         import_meta_ref: ast.import_meta_ref,
+        // As src/bundler/transpiler.rs: a CommonJS module reads `import.meta` from its wrapper's parameter.
+        module_type: if commonjs {
+            bun_options_types::bundle_enums::Format::Cjs
+        } else {
+            bun_options_types::bundle_enums::Format::Esm
+        },
         target: bun_ast::Target::Bun,
         source_map_handler: SOURCE_MAP.then_some(&chunk as &dyn bun_js_printer::OnSourceMapChunk),
         ..Default::default()

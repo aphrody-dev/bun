@@ -369,6 +369,9 @@
     "ModuleGraph.cpp:js2native_wrap_jsFunctionModuleGraphFrameOfFrame": () => () => undefined,
     // bun:sql loads every adapter. `init` hands the driver the callbacks of its queries; there is no driver of
     // PostgreSQL or MySQL on Boa yet, so only connecting throws.
+    // js/worker.ts's.
+    "Worker.cpp:createNodeWorkerThreadsBinding": () => G[Symbol.for("bun.boa.worker")].binding,
+    "Worker.cpp:js2native_wrap_jsFunctionPostMessage": () => G[Symbol.for("bun.boa.worker")].postMessage,
     "postgres.bind.ts:binding": () => sqlDriverBinding("PostgreSQL"),
     "mysql.bind.ts:binding": () => sqlDriverBinding("MySQL"),
   };

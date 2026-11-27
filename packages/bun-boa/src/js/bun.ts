@@ -55,8 +55,10 @@ const OPS = "__bun_native_ops__";
   arch: string;
   pid: number;
   cryptoBun: Record<string, unknown>;
+  isMainThread: boolean;
 }) {
   const Bun = {
+    isMainThread: native.isMainThread,
     version: native.version,
     revision: native.revision,
     env: native.env,

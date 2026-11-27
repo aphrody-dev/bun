@@ -614,8 +614,8 @@ impl HostSerialized for SerializedBlob {
     }
 }
 
-/// The serialization steps of the realm's platform objects: a Blob or a File.
-fn serialize_host(
+/// The serialization steps of a Blob or a File.
+pub(crate) fn serialize_host(
     object: &boa_engine::JsObject,
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsResult<Option<Box<dyn HostSerialized>>> {
@@ -1252,7 +1252,7 @@ pub fn exports(global: &JSGlobalObject) -> JsResult<Vec<(&'static str, JSValue)>
         .expect("a function is an object")
         .put_read_only(global, "prototype", prototype)?;
     engine::define_has_instance(global, &file_ctor, file_has_instance)?;
-    engine::set_host_serializer(global, serialize_host);
+    engine::set_host_serializer(global, crate::web::serialize_host);
     let stdio = |fd: i32| {
         Blob::find_or_create_file_from_path(PathOrFileDescriptor::Fd(bun_sys::Fd::from_uv(fd)))
             .to_js(global)

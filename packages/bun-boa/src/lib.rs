@@ -19,5 +19,6 @@ pub mod scripts;
 pub mod source_maps;
 pub mod test;
 pub mod transpile;
+pub mod worker;
 pub mod wtf;
 pub mod yarr;

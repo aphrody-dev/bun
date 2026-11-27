@@ -631,6 +631,13 @@ impl Context {
         &mut self.vm.runtime_limits
     }
 
+    /// A flag that any thread can set to stop this context's execution: the next loop iteration fails with
+    /// [`RuntimeLimitError::Terminated`](crate::error::RuntimeLimitError::Terminated), which script cannot catch.
+    #[inline]
+    pub fn set_interrupt(&mut self, interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+        self.vm.interrupt = interrupt;
+    }
+
     /// Returns `true` if this context can be suspended by an `Atomics.wait` call.
     #[inline]
     #[must_use]

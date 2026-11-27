@@ -653,6 +653,30 @@ fn typescript_drops_unused_imports() {
     assert!(out.status.success(), "stderr: {stderr}");
 }
 
+/// Workers on threads of their own, and `MessageChannel`/`BroadcastChannel` within a thread and across threads
+/// (tests/fixtures/worker/main.ts says what each line checks).
+#[test]
+fn workers_and_channels() {
+    let out = bun().args(["run", "main.ts"]).current_dir(fixtures().join("worker")).output().unwrap();
+    let (stdout, stderr) = text(&out);
+    let expected = r#"local {"a":[1,2],"m":1}
+main true
+detached 0
+echo [1,2,3]
+port pong from worker
+terminated 1
+busy 1
+exit 7
+error ["worker failed","TypeError"]
+broadcast hi!
+node main true 0
+node ["ping",{"n":1},false,true]
+node exit 0
+"#;
+    assert_eq!(stdout, expected, "stderr: {stderr}");
+    assert!(out.status.success(), "stderr: {stderr}");
+}
+
 /// The event loop's order, `Bun.serve` (routes, `fetch`, `error`) answering `fetch()` over loopback, `Headers`,
 /// `Request`, and a refused connection's code. The process exits once `using` stops the server.
 #[test]

@@ -311,6 +311,22 @@ fn order_of_execution_in_assignment_with_comma_expressions() {
 }
 
 #[test]
+fn an_interrupt_stops_a_loop_that_script_cannot_catch() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, LazyLock};
+    static INTERRUPT: LazyLock<Arc<AtomicBool>> = LazyLock::new(|| Arc::new(AtomicBool::new(true)));
+    run_test_actions([
+        TestAction::inspect_context(|context| context.set_interrupt(Some(INTERRUPT.clone()))),
+        TestAction::assert_runtime_limit_error(
+            indoc! {r#"
+                try { while (true) { } } catch { }
+            "#},
+            RuntimeLimitError::Terminated,
+        ),
+    ]);
+}
+
+#[test]
 fn loop_runtime_limit() {
     run_test_actions([
         TestAction::assert_eq(

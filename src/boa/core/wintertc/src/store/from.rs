@@ -5,13 +5,13 @@ use crate::store::{
     unsupported_type,
 };
 use boa_engine::builtins::array_buffer::AlignedVec;
-use boa_engine::builtins::error::Error;
+use boa_engine::builtins::error::{Error, ErrorKind};
 use boa_engine::object::builtins::{
     JsArray, JsArrayBuffer, JsDataView, JsDate, JsMap, JsRegExp, JsSet, JsSharedArrayBuffer,
     JsTypedArray,
 };
 use boa_engine::property::PropertyKey;
-use boa_engine::{Context, JsError, JsObject, JsResult, JsString, JsValue, JsVariant, js_error};
+use boa_engine::{Context, JsError, JsObject, JsResult, JsString, JsValue, JsVariant, js_error, js_string};
 use rustc_hash::FxHashMap;
 
 /// A Map of seen objects when walking through the value. We use the address
@@ -204,6 +204,34 @@ fn try_from_set(
     Ok(store)
 }
 
+/// HTML's StructuredSerializeInternal for an `Error`: its name, if one of the native errors' (else `Error`), and the
+/// value of its own `message` data property; and the stack, which WebKit keeps too.
+fn clone_error(object: &JsObject, seen: &mut SeenMap, context: &mut Context) -> JsResult<JsValueStore> {
+    let name = object.get(js_string!("name"), context)?;
+    let name = if name.is_undefined() { JsString::from("Error") } else { name.to_string(context)? };
+    let kind = match name.to_std_string_escaped().as_str() {
+        "EvalError" => ErrorKind::Eval,
+        "RangeError" => ErrorKind::Range,
+        "ReferenceError" => ErrorKind::Reference,
+        "SyntaxError" => ErrorKind::Syntax,
+        "TypeError" => ErrorKind::Type,
+        "URIError" => ErrorKind::Uri,
+        _ => ErrorKind::Error,
+    };
+    let message = match object.get_own_property(js_string!("message"), context)? {
+        Some(descriptor) if descriptor.is_data_descriptor() => {
+            let value = descriptor.value().cloned().unwrap_or_default();
+            Some(StringStore::from(value.to_string(context)?))
+        }
+        _ => None,
+    };
+    let stack = object.get(js_string!("stack"), context)?;
+    let stack = stack.as_string().map(StringStore::from);
+    let store = JsValueStore::new(ValueStoreInner::Error { kind, message, stack });
+    seen.insert(object, store.clone());
+    Ok(store)
+}
+
 fn try_from_js_object_clone(
     object: &JsObject,
     seen: &mut SeenMap,
@@ -227,8 +255,8 @@ fn try_from_js_object_clone(
         return clone_typed_array(object, typed_array, seen, context);
     } else if let Ok(ref date) = JsDate::from_object(object.clone()) {
         return clone_date(object, date, seen, context);
-    } else if let Ok(_error) = object.clone().downcast::<Error>() {
-        return Err(js_error!(TypeError: "Errors are not supported yet."));
+    } else if object.is::<Error>() {
+        return clone_error(object, seen, context);
     } else if let Ok(ref regexp) = JsRegExp::from_object(object.clone()) {
         return clone_regexp(object, regexp, seen, context);
     } else if let Ok(_dataview) = JsDataView::from_object(object.clone()) {
@@ -247,13 +275,24 @@ fn try_from_js_object_clone(
     let mut dolly = JsValueStore::empty();
     seen.insert(object, dolly.clone());
 
+    // HTML's StructuredSerializeInternal: the enumerable own properties whose keys are strings, as
+    // EnumerableOwnProperties(value, key) lists them.
     let keys = object.own_property_keys(context)?;
     let mut fields: Vec<(StringStore, JsValueStore)> = Vec::with_capacity(keys.len());
     for k in keys {
+        if matches!(k, PropertyKey::Symbol(_)) {
+            continue;
+        }
+        let enumerable = object
+            .get_own_property(k.clone(), context)?
+            .is_some_and(|descriptor| descriptor.enumerable() == Some(true));
+        if !enumerable {
+            continue;
+        }
         let value = object.get(k.clone(), context)?;
         let key = match k {
             PropertyKey::String(s) => s.into(),
-            PropertyKey::Symbol(_) => return Err(unsupported_type()),
+            PropertyKey::Symbol(_) => continue,
             PropertyKey::Index(i) => JsString::from(format!("{}", i.get())).into(),
         };
 
