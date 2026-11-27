@@ -87,6 +87,7 @@ pub(crate) fn define_global(context: &mut Context, name: &str, value: JsValue) -
 /// an [`EventLoop`].
 pub fn install(context: &mut Context) -> JsResult<()> {
     timer::install(context)?;
+    web::abort::install(context)?;
     web::streams::install(context)?;
     webcore::install(context)
 }

@@ -61,3 +61,5 @@ libc = "0.2"
 [dev-dependencies]
 # The C and C++ symbols that bun_core and bun_sys link against (WTF), in Rust, as the bun binary has them.
 bun_sema_standalone = { path = "../sema/standalone" }
+# AbortController and AbortSignal, which the realms of bun-boa have from it.
+boa_runtime = { path = "../boa/core/runtime" }
